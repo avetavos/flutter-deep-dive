@@ -1,0 +1,122 @@
+---
+title: 'Async in Dart'
+description: 'single-threaded event loop, Future และ async/await, Stream สำหรับลำดับของ event และทำไมทั้งหมดนี้ไม่ block UI ของคุณ'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## หนึ่ง thread กับ event loop
+
+Dart รัน code ของคุณบน **single thread** พร้อม **event loop** — model เดียวกับ JavaScript ใน code ปกติไม่มี threading แบบ shared-memory แต่ async operation (network, file, timer) จะรันที่อื่น แล้ว *schedule callback* บน event loop เมื่อเสร็จ
+
+นี่คือเหตุผลที่ "async" ใน Flutter ไม่ได้แปลว่า "อีก thread" แต่แปลว่า "อย่า block thread เดียวที่เรามี" loop แบบ synchronous ที่ช้าจะ freeze UI แต่การ `await` network call ไม่ freeze เพราะ thread ว่างพอจะ render frame ระหว่างรอ
+
+<Mermaid title="งาน async ปลดปล่อย thread เดียวให้ render ต่อได้" code={loopDiagram} />
+
+export const loopDiagram = `flowchart LR
+  ui["UI thread\n(event loop)"] -->|await fetch| free["thread ว่าง\nพอจะ render frame"]
+  free -->|response มาถึง| cb["callback ถูก schedule\nบน loop"]
+  cb --> resume["code ของคุณทำงานต่อ"]`;
+
+## Future และ async/await
+
+**`Future<T>`** คือค่าที่จะมีทีหลัง — ผลของ async operation `async`/`await` ให้คุณเขียนมันเหมือนเป็น sequential
+
+```dart
+Future<User> fetchUser(int id) async {
+  final response = await http.get(Uri.parse('/users/$id')); // รอ แต่ไม่ block
+  return User.fromJson(response.body);
+}
+
+// เรียกใช้:
+Future<void> load() async {
+  try {
+    final user = await fetchUser(42);
+    print(user.name);
+  } catch (e) {
+    print('failed: $e');   // future ที่ await จะ throw error ที่ try/catch ได้
+  }
+}
+```
+
+function ที่เป็น `async` คืน `Future` เสมอ `await` แกะมันออก และที่สำคัญ — error จาก future ที่ await จะโผล่มาเป็น exception ปกติที่ `try`/`catch` ได้ ใน Flutter คุณแทบไม่ `await` ใน `build` แต่ส่ง `Future` ให้ `FutureBuilder` แทน (โมดูลถัดไป)
+
+## Stream: หลายค่าตามเวลา
+
+**`Stream<T>`** เหมือน Future ที่ส่งค่า *หลายค่า* — ลำดับของ event ตามเวลา: ข้อความ web-socket, ค่า sensor, input ของ user, การเปลี่ยนแปลงของ database
+
+```dart
+Stream<int> ticker() async* {   // async* ทำให้เป็น Stream; yield emit ค่า
+  for (var i = 1; i <= 3; i++) {
+    await Future.delayed(const Duration(seconds: 1));
+    yield i;                    // emit 1, แล้ว 2, แล้ว 3
+  }
+}
+
+// consume ด้วย await-for หรือ .listen:
+await for (final tick in ticker()) {
+  print(tick);                  // 1, 2, 3 — หนึ่งค่าต่อวินาที
+}
+```
+
+การแยก Future/Stream map เข้ากับ Flutter ได้พอดี: async แบบ one-shot → `FutureBuilder`; stream ของ update → `StreamBuilder` เข้าใจความต่างนี้ให้ถูกก็เท่ากับเข้าใจ "async ใน Flutter" ไปเกือบหมดแล้ว
+
+## Isolate: parallelism จริง เมื่อจำเป็น
+
+ข้อยกเว้นเดียวของ "single thread" คือ **isolate** — worker แยกที่มี memory ของตัวเอง สื่อสารด้วยการส่ง message (ไม่มี shared state) คุณหยิบมาใช้เฉพาะงานที่หนัก CPU จริง ๆ (parse JSON ก้อนใหญ่, image processing) ที่ไม่งั้นจะทำให้ UI jank Flutter ห่อ case ทั่วไปไว้ใน `compute()` ซึ่งอยู่ในโมดูล performance
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Dart เป็น single-threaded พร้อม event loop ดังนั้น async แปลว่า "อย่า block thread เดียวที่มี" ไม่ใช่ "รันบนอีก thread" **`Future<T>`** คือค่า future หนึ่งค่า (เขียนด้วย `async`/`await`, catch error ด้วย `try`/`catch`); **`Stream<T>`** คือหลายค่าตามเวลา ใน Flutter พวกนี้กลายเป็น `FutureBuilder` และ `StreamBuilder` สำหรับ parallelism จริงบน CPU **isolate** (ผ่าน `compute()`) คือทางออก
+</Callout>
+
+export const quizAsync = [
+  {
+    q: 'async หมายความว่าอะไรใน execution model ของ Dart?',
+    options: [
+      'code รันบน CPU thread ที่สอง',
+      'อย่า block thread เดียว — งานรันที่อื่นแล้ว schedule callback เมื่อเสร็จ',
+      'code ถูก compile ล่วงหน้า',
+      'มันปิด event loop',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความต่างของ Future กับ Stream คืออะไร?',
+    options: [
+      'เหมือนกันทุกอย่าง',
+      'Future คือค่าเดียวที่มาทีหลัง; Stream คือหลายค่าตามเวลา',
+      'Future เป็น synchronous; Stream เป็น async',
+      'Stream เก็บได้แค่ค่าเดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'error จาก Future ที่ await โผล่มาอย่างไร?',
+    options: [
+      'ถูกเมินเงียบ ๆ',
+      'เป็น exception ปกติที่ try/catch ได้',
+      'crash isolate',
+      'คืน null',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรหยิบ isolate มาใช้เมื่อไร?',
+    options: [
+      'ทุก network request',
+      'งานที่หนัก CPU จริง ๆ ที่จะทำให้ UI jank เพราะ isolate ให้ parallelism จริง',
+      'เพื่อให้ widget rebuild',
+      'เพื่อ access DOM',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/async-in-dart" questions={quizAsync} />
+
+<ProgressTracker client:visible id="dart-foundations/async-in-dart" />

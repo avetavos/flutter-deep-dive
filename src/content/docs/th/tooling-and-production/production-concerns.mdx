@@ -1,0 +1,116 @@
+---
+title: 'Production Concerns'
+description: 'การจับทุก error, crash reporting, การ profile jank ใน profile mode และ CI/CD — เรื่องที่แยก demo ออกจาก product'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## จับทุก error
+
+ใน production คุณอยากรู้เรื่อง crash ก่อน user จะบ่น error ของ Flutter มาถึงผ่านสอง channel และคุณต้องมีทั้งคู่:
+
+```dart
+void main() {
+  // 1. Errors thrown inside the Flutter framework (build, layout, paint).
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    reportToCrashService(details.exception, details.stack);
+  };
+
+  // 2. Errors outside the framework (async gaps, callbacks) — a guarded zone.
+  runZonedGuarded(() {
+    runApp(const MyApp());
+  }, (error, stack) {
+    reportToCrashService(error, stack);
+  });
+}
+```
+
+`FlutterError.onError` จับ error ที่ framework raise ส่วน `runZonedGuarded` จับที่เหลือทั้งหมด (uncaught async error, isolate error ผ่าน `PlatformDispatcher.instance.onError`) คุณยังแทน `ErrorWidget` สีแดงด้วย fallback ที่เป็นมิตรได้ เพื่อไม่ให้ widget เดียวที่พังโชว์หน้า crash ให้ user เห็น
+
+## crash reporting และ logging
+
+ต่อ handler พวกนั้นเข้ากับ service — Sentry, Firebase Crashlytics — เพื่อให้ crash จาก device จริงกลับมาพร้อม stack trace, ข้อมูล device และ breadcrumb กฎสองข้อที่สำคัญ:
+
+- **Upload symbol/debug info** สำหรับ release build (AOT ตัด symbol ออก; ถ้าไม่มี mapping stack trace จะเป็น address ที่ถูก obfuscate อ่านไม่ออก)
+- **Log อย่างตั้งใจ** `print` ถูกตัด/เพิกเฉยใน release; ใช้ logger จริงและ scrub ข้อมูล sensitive ก่อนออกจาก device
+
+## profile jank
+
+ความลื่นคือ budget: ~16ms ต่อ frame สำหรับ 60fps, ~8ms สำหรับ 120fps พลาดแล้ว frame จะ "jank" วินิจฉัยใน **profile mode** (อย่าใช้ debug):
+
+<Mermaid title="เวลาของ frame ไปไหนบ้าง" code={frameDiagram} />
+
+export const frameDiagram = `flowchart LR
+  build["build\n(your widgets)"] --> layout["layout"] --> paint["paint"] --> raster["raster\n(GPU)"]
+  raster --> budget["must fit ~16ms\nor the frame janks"]`;
+
+timeline ของ DevTools แสดง cost ต่อ frame แยกเป็น UI (Dart: build/layout/paint) และ raster (GPU) ตัวการยอดฮิต: rebuild เยอะเกิน (ลืม `const`, state อยู่สูงเกินใน tree), งานแพงใน `build`, รูปใหญ่ที่ไม่ cache และการลืม `RepaintBoundary` รอบ subtree ที่ animate ตลอด
+
+## CI/CD
+
+automate pipeline เพื่อให้คุณภาพไม่ขึ้นกับความจำ: ทุก push ให้รัน `flutter analyze`, `flutter test` แล้ว `flutter build` แต่ละ platform และ ship ไป TestFlight / Play internal track เครื่องมืออย่าง Codemagic, Fastlane และ GitHub Actions จัดการเรื่อง signing และ store upload เฉพาะของ Flutter ให้
+
+**production checklist:**
+
+- ต่อ global error handling (`FlutterError.onError` + `runZonedGuarded`) เข้ากับ crash service พร้อม upload symbol
+- มี `ErrorWidget` fallback ที่เป็นมิตรใน release
+- profile ใน profile mode; ไม่มี jank ชัด ๆ บน device เป้าหมาย
+- มี flavor สำหรับ dev/staging/prod; ไม่มี secret ใน source (`--dart-define` / secure storage)
+- CI รัน analyze + test + build ทุกการเปลี่ยนแปลง
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Ship โดยต่อทั้งสอง error channel — `FlutterError.onError` สำหรับ framework error และ `runZonedGuarded` สำหรับ async error — report ไป crash service พร้อม **upload release symbol** (ไม่งั้น trace อ่านไม่ออก) profile jank ใน **profile mode** ด้วย DevTools timeline (เล็งต่ำกว่า ~16ms/frame), แก้ด้วย `const`, rebuild scope ที่แคบลง และ `RepaintBoundary` และให้ **CI/CD** รัน analyze + test + build ทุก push
+</Callout>
+
+export const quizProd = [
+  {
+    q: 'ทำไมต้องมีทั้ง FlutterError.onError และ runZonedGuarded?',
+    options: [
+      'ซ้ำซ้อน ใช้ตัวใดตัวหนึ่งก็ได้',
+      'ตัวหนึ่งจับ error จากใน Flutter framework อีกตัวจับ async/uncaught error ที่อยู่นอกมัน',
+      'runZonedGuarded ใช้เฉพาะ test',
+      'FlutterError.onError ใช้ได้เฉพาะ debug',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมต้อง upload symbol/debug info สำหรับ release crash report?',
+    options: [
+      'เพื่อลดขนาดแอป',
+      'release AOT build ตัด symbol ออก ถ้าไม่มี mapping stack trace จะเป็น address ที่ obfuscate อ่านไม่ออก',
+      'จำเป็นเพื่อ build เลย',
+      'เพื่อเปิด hot reload',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควร profile performance ใน mode ไหน?',
+    options: [
+      'Debug',
+      'Profile mode — AOT-compiled พร้อม tooling ติดอยู่ ตัวเลขจึงสะท้อนความจริง',
+      'Release พร้อมแนบ debugger',
+      'mode ไหนก็ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรคือสาเหตุ jank ที่พบบ่อย?',
+    options: [
+      'การใช้ const constructor',
+      'rebuild เยอะเกิน (ลืม const, state อยู่สูงเกิน) หรืองานแพงใน build',
+      'การเขียน unit test',
+      'การใช้ named parameter',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/production-concerns" questions={quizProd} />
+
+<ProgressTracker client:visible id="tooling-and-production/production-concerns" />

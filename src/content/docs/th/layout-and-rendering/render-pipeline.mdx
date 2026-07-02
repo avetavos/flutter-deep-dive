@@ -1,0 +1,108 @@
+---
+title: 'The Render Pipeline'
+description: 'เกิดอะไรขึ้นในแต่ละ frame — build, layout, paint, composite — พร้อม RenderObject, repaint boundary และทำไมถึงมี three tree'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## สี่ phase ต่อ frame
+
+เวลา Flutter วาด frame หนึ่ง มันรัน pipeline ที่ตายตัว รู้จัก phase เหล่านี้แล้วคุณจะรู้ว่าเวลาไปหมดที่ไหนและควร optimize ตรงไหน
+
+<Mermaid title="render pipeline ต่อ frame" code={pipeDiagram} />
+
+export const pipeDiagram = `flowchart LR
+  build["1. Build\n(run build methods)"] --> layout["2. Layout\n(constraints down, sizes up)"]
+  layout --> paint["3. Paint\n(record draw commands)"]
+  paint --> composite["4. Composite\n(assemble layers, to GPU)"]`;
+
+1. **Build** — widget ที่ dirty rebuild ออกมาเป็นคำอธิบาย widget ที่อัปเดต
+2. **Layout** — pass แบบ constraints-ลงล่าง/size-ขึ้นบน คำนวณ size และตำแหน่งของ render object ทุกตัว
+3. **Paint** — render object แต่ละตัวบันทึกคำสั่งวาด (ยังไม่ใช่ pixel) ลงใน layer
+4. **Composite** — layer ถูกประกอบและส่งให้ GPU rasterize
+
+budget แคบมาก: จะได้ 60fps คุณมีเวลา ~16ms ต่อ frame (~8ms ที่ 120Hz) jank คือ frame ที่พลาด budget นั้น และเกือบทุกครั้งมันมาจากงานเยอะเกินไปใน **build** หรือ **layout**
+
+## RenderObject ทำงานจริง
+
+widget เป็น *คำอธิบาย* ที่เบาและ immutable object ที่ layout และ paint จริง ๆ คือ **RenderObject** และมันอยู่ใน tree ที่สามจากสาม tree ของ Flutter:
+
+- **Widget tree** — configuration ที่ immutable ของคุณ (rebuild บ่อย, ถูก)
+- **Element tree** — กาว mutable ที่เก็บ state และเชื่อม widget กับ render object
+- **Render tree** — `RenderObject` ที่คำนวณ layout และ paint (แพง; ถูกเก็บและ mutate ไม่ใช่ rebuild)
+
+การแยกนี้คือ *เหตุผล* ที่ rebuild widget ถูก: widget ใหม่ถูกเทียบกับตัวเก่า แล้ว Flutter mutate render object เดิมในที่เดิมแทนที่จะสร้างส่วนที่แพงขึ้นใหม่
+
+## repaint boundary
+
+โดย default เมื่อ render object repaint มันบังคับให้เพื่อนบ้าน repaint ตามได้ด้วย — เพราะแชร์ layer กัน **`RepaintBoundary`** เอา subtree ไปไว้บน layer ของตัวเอง เพื่อให้ repaint ของมันไม่กระเพื่อมออกไปข้างนอก (และกลับกัน) นี่คือเครื่องมือหลักในการแยกพื้นที่ที่ animate หรือ repaint บ่อย
+
+```dart
+RepaintBoundary(
+  child: SpinningLogo(),   // repaint บน layer ของตัวเอง ไม่ใช่ทั้งหน้าจอ
+)
+```
+
+ใช้มันรอบสิ่งที่ repaint บ่อย (animation, progress spinner) เพื่อไม่ให้ทั้ง frame ต้องบันทึกใหม่ ใช้มากไปเปลือง memory (แต่ละ boundary คือ layer) ดังนั้นใช้ตรงที่ profiling บอกว่ามี repaint churn
+
+## relayout boundary และวิธี profile
+
+Flutter ยังสร้าง **relayout boundary** อัตโนมัติตรงที่ size ของ subtree เปลี่ยน parent ไม่ได้ (เช่น ภายใต้ tight constraints) — เพื่อให้การเปลี่ยนแปลงข้างในไม่บังคับให้ทั้ง tree ต้อง layout ใหม่ คุณแทบไม่ต้องจัดการมันด้วยมือ แต่มันคือเหตุผลที่การเปลี่ยนแปลงเฉพาะจุดยังคงอยู่เฉพาะจุด
+
+จะเห็นทั้งหมดนี้ ใช้ **Flutter DevTools**: performance view โชว์เวลา build/layout/paint ต่อ frame และเครื่องมือ "Highlight repaints" กับ "Track widget rebuilds" โชว์ว่าอะไรกำลัง churn optimize สิ่งที่คุณวัด ไม่ใช่สิ่งที่คุณเดา
+
+<Callout title="สรุปหนึ่งบรรทัด">
+แต่ละ frame รัน **build → layout → paint → composite** ภายใน budget ~16ms; jank มักมาจากงานเยอะเกินใน build หรือ layout widget เป็นคำอธิบายที่เบาและ immutable; **RenderObject** ที่แพง (tree ที่สาม) ถูก mutate ในที่เดิม ซึ่งเป็นเหตุผลที่ rebuild widget ถูก wrap subtree ที่ repaint บ่อยด้วย **`RepaintBoundary`** เพื่อให้ repaint อยู่บน layer ของตัวเอง — และ profile ด้วย DevTools แทนการเดา
+</Callout>
+
+export const quizPipeline = [
+  {
+    q: 'ลำดับของ render pipeline ต่อ frame คืออะไร?',
+    options: [
+      'paint, build, layout, composite',
+      'build, layout, paint, composite',
+      'layout, build, composite, paint',
+      'composite, paint, layout, build',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม rebuild widget ถึงถูก?',
+    options: [
+      'widget ไม่เคยถูก rebuild',
+      'widget เป็นคำอธิบายที่เบาและ immutable; RenderObject ที่แพงถูก mutate ในที่เดิมแทนการสร้างใหม่',
+      'GPU จัดการให้',
+      'rebuild รันบน isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'RepaintBoundary ทำอะไร?',
+    options: [
+      'ห้าม widget paint ตลอดกาล',
+      'เอา subtree ไปไว้บน layer ของตัวเอง เพื่อให้ repaint ไม่กระเพื่อมไปหาเพื่อนบ้าน',
+      'เร่ง layout ด้วยการข้ามมัน',
+      'เปลี่ยน size ของ widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'jank มักมาจากไหน?',
+    options: [
+      'สีเยอะเกินไป',
+      'งานเยอะเกินไปใน phase build หรือ layout จนพลาด frame budget',
+      'การใช้ const constructor',
+      'widget tree เล็ก',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/render-pipeline" questions={quizPipeline} />
+
+<ProgressTracker client:visible id="layout-and-rendering/render-pipeline" />

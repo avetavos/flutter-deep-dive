@@ -1,0 +1,85 @@
+---
+title: 'State Management'
+description: 'The one question every approach answers — where does state live and who rebuilds — from ephemeral setState to shared app state with Provider, Riverpod, and BLoC.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## State management is one question
+
+There are a dozen state management packages and a hundred blog wars, but they all answer the same two-part question:
+
+> **Where does this piece of state live, and which widgets rebuild when it changes?**
+
+Everything else — `setState`, `InheritedWidget`, Provider, Riverpod, BLoC — is a different mechanism for answering it. Once you see them that way, choosing between them stops being tribal and becomes a matter of scope.
+
+## Two kinds of state
+
+The most useful split is not "which package" but **how far the state reaches**:
+
+<Mermaid title="Ephemeral state vs app state" code={splitDiagram} />
+
+export const splitDiagram = `flowchart TB
+  eph["Ephemeral state\n(one widget: a checkbox,\na text field, an animation)"] --> local["setState\nlives in one State object"]
+  app["App state\n(shared: auth, cart,\nsettings, cached data)"] --> shared["InheritedWidget / Provider /\nRiverpod / BLoC"]`;
+
+- **Ephemeral (local) state** belongs to a single widget and nobody else cares — the current page of a `PageView`, whether a checkbox is ticked, an animation value. `setState` is the correct, complete answer. Reaching for a global store here is over-engineering.
+- **App (shared) state** is needed by many widgets across the tree — the logged-in user, a shopping cart, a theme, data fetched from an API. This is where the dedicated approaches earn their keep.
+
+Most real bugs and most over-engineering come from putting state in the wrong category.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| setState & lifecycle | How rebuilds actually happen, and the State lifecycle |
+| InheritedWidget | The primitive that makes propagating state down the tree efficient |
+| Provider & Riverpod | The ergonomic, widely used shared-state approaches |
+| BLoC & patterns | Unidirectional data flow for complex apps |
+| Choosing an approach | A decision guide and how to layer your app |
+
+<Callout title="The mental shift">
+Don't start by asking "which state management library should I use?" Start by asking "is this state ephemeral or shared?" Ephemeral state needs nothing but `setState`. Only shared state needs a mechanism to reach across the tree — and then the choice is about ergonomics and scale, not correctness.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What single question do all state management approaches answer?',
+    options: [
+      'Which package is fastest',
+      'Where does state live, and which widgets rebuild when it changes',
+      'How to avoid using widgets',
+      'How to compile faster',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is ephemeral (local) state?',
+    options: [
+      'State shared across the whole app',
+      'State that belongs to a single widget and that nobody else needs',
+      'State stored on a server',
+      'State that never changes',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'For a simple checkbox that only one widget cares about, what is the right tool?',
+    options: [
+      'A global Riverpod provider',
+      'setState — it is ephemeral state',
+      'A BLoC with events',
+      'An InheritedWidget at the app root',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="state-management/index" />

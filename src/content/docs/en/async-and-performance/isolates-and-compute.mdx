@@ -1,0 +1,106 @@
+---
+title: 'Isolates & compute'
+description: 'Why CPU-heavy work janks the UI, using compute() to run a function on a background isolate, raw isolates with ports, and the no-shared-memory boundary.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The jank you can't await away
+
+`async`/`await` fixes waiting (network, disk) — but it does **not** help with CPU-heavy work. Parsing a 5MB JSON, resizing an image, or running a crypto hash is synchronous computation, and it runs on the **UI isolate**. While it runs, the event loop can't render frames, and the app freezes.
+
+You cannot `await` your way out of this, because there is nothing to wait *for* — the CPU is busy. The fix is to move the work to a **different isolate** so the UI isolate stays free to render.
+
+## compute(): the common case
+
+For the everyday "run this expensive pure function off the main isolate," Flutter gives you `compute()`. Pass it a top-level (or static) function and its argument; it spins up a background isolate, runs the function there, and returns the result as a `Future`.
+
+```dart
+// A top-level function — required, because it must run on another isolate.
+List<Item> parseItems(String jsonStr) {
+  final raw = jsonDecode(jsonStr) as List;
+  return raw.map((e) => Item.fromJson(e)).toList();   // heavy work
+}
+
+// On the UI isolate — offload it, and await the result without janking:
+final items = await compute(parseItems, hugeJsonString);
+```
+
+The UI keeps rendering at 60fps while the parse runs elsewhere. `compute` is the right tool ~90% of the time.
+
+## Raw isolates and ports
+
+For long-lived workers or two-way communication, use `Isolate.spawn` with **ports** — isolates don't share memory, so they talk by sending messages over `SendPort`/`ReceivePort`.
+
+<Mermaid title="Offloading heavy work to a worker isolate" code={isoDiagram} />
+
+export const isoDiagram = `flowchart LR
+  main["UI isolate\n(keeps rendering)"] -->|send message| worker["Worker isolate\n(does CPU work)"]
+  worker -->|send result back| main
+  note["No shared memory:\nonly copied messages cross"] --- worker`;
+
+## The boundary: no shared memory
+
+The rule that shapes everything: **isolates do not share memory.** Anything you send is *copied* across the boundary (with some fast-path exceptions like `TransferableTypedData`). Consequences:
+
+- You can't pass a closure that captures UI state, or a live object graph you keep mutating.
+- Sending very large data has a copy cost — sometimes the copy eats the savings.
+- The worker function must be self-contained (top-level/static), taking plain data in and returning plain data out.
+
+This is the same message-passing model from the Dart async lesson, now used for parallelism instead of concurrency.
+
+<Callout title="The one-line takeaway">
+`async`/`await` frees the thread while *waiting*, but CPU-heavy work still janks the UI isolate — you can't await a busy CPU. Move it to another isolate: `compute(fn, arg)` runs a top-level function on a background isolate and returns a `Future` (the common case), or use `Isolate.spawn` with ports for long-lived workers. Remember the boundary: isolates share no memory, so everything crossing it is copied.
+</Callout>
+
+export const quizIso = [
+  {
+    q: 'Why does async/await NOT fix jank from parsing a huge JSON?',
+    options: [
+      'Because JSON cannot be parsed in Dart',
+      'It is CPU-heavy synchronous work on the UI isolate — there is nothing to await, so the thread stays busy and frames drop',
+      'Because await is disabled in release mode',
+      'It actually does fix it',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does compute() do?',
+    options: [
+      'Caches a value',
+      'Runs a top-level/static function on a background isolate and returns the result as a Future',
+      'Forces a rebuild',
+      'Creates an animation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do isolates communicate?',
+    options: [
+      'By sharing memory directly',
+      'By passing copied messages over ports (SendPort/ReceivePort) — no shared memory',
+      'Through global variables',
+      'They cannot communicate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a consequence of the no-shared-memory boundary?',
+    options: [
+      'Isolates run slower than the UI',
+      'Data sent across is copied, so a worker function must be self-contained and very large payloads have a copy cost',
+      'You can pass live UI objects freely',
+      'Isolates cannot return values',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/isolates-and-compute" questions={quizIso} />
+
+<ProgressTracker client:visible id="async-and-performance/isolates-and-compute" />

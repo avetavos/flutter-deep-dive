@@ -1,0 +1,108 @@
+---
+title: 'Build & Release'
+description: 'Debug, profile, and release modes, JIT vs AOT compilation, tree-shaking, flavors for environments, and the per-platform build outputs.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Three build modes
+
+Flutter compiles the same code three different ways depending on what you need:
+
+<Mermaid title="The three build modes and their compilation" code={modeDiagram} />
+
+export const modeDiagram = `flowchart LR
+  debug["debug\nJIT · hot reload · asserts on\n(slow, dev only)"]
+  profile["profile\nAOT · perf tools on\n(measure real speed)"]
+  release["release\nAOT · asserts off · optimized\n(ship this)"]`;
+
+- **Debug** — JIT-compiled, hot reload, assertions on, service extensions available. Slow and large; for development only.
+- **Profile** — AOT-compiled like release, but with performance tooling still attached. This is where you measure real-world speed and hunt jank (never profile in debug — the numbers are meaningless).
+- **Release** — AOT-compiled, assertions stripped, debugging disabled, tree-shaken and optimized. This is what users get.
+
+## JIT vs AOT
+
+The debug/release split is really a compilation split:
+
+- **JIT** (Just-In-Time), used in debug, compiles Dart as it runs — which is what makes hot reload possible (it can swap in new code on the fly).
+- **AOT** (Ahead-Of-Time), used in profile and release, compiles Dart to native machine code before the app ships. The result is fast startup and predictable performance, at the cost of no hot reload.
+
+**Tree-shaking** happens in AOT builds: unused code (and, notably, unreferenced icon glyphs) is stripped so the binary stays small.
+
+## Building for each platform
+
+```bash
+flutter build apk --release          # Android APK (direct install/testing)
+flutter build appbundle --release    # Android App Bundle (Play Store)
+flutter build ipa --release          # iOS archive (App Store)
+flutter build web --release          # web bundle
+```
+
+Each target produces a different artifact from the same Dart source — the framework abstracts the platform, the build step materializes it.
+
+## Flavors: one app, many environments
+
+**Flavors** (Android) / **schemes** (iOS) let one codebase produce dev, staging, and production builds with different config — API endpoints, app IDs, icons — without branching your code.
+
+```bash
+flutter run --flavor dev --dart-define=API_URL=https://dev.api.example.com
+flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
+```
+
+`--dart-define` passes compile-time constants your code reads via `String.fromEnvironment` — the clean way to inject per-environment values without committing secrets into source.
+
+<Callout title="The one-line takeaway">
+Flutter builds three ways: **debug** (JIT, hot reload, dev only), **profile** (AOT + perf tools — the only honest place to measure speed), and **release** (AOT, optimized, tree-shaken — what ships). Hot reload exists because debug is JIT; fast release apps exist because release is AOT. Use **flavors** + `--dart-define` to build dev/staging/prod from one codebase.
+</Callout>
+
+export const quizBuild = [
+  {
+    q: 'Which build mode should you use to measure real-world performance?',
+    options: [
+      'Debug — it has the most tools',
+      'Profile — AOT-compiled like release but with performance tooling attached',
+      'Release — but you cannot attach tools',
+      'Any mode gives the same numbers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is hot reload possible in debug but not release?',
+    options: [
+      'Release is smaller',
+      'Debug uses JIT compilation (code swapped in at runtime); release uses AOT (compiled ahead of time)',
+      'Hot reload is disabled by a flag',
+      'Release has no widgets',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does tree-shaking do in a release build?',
+    options: [
+      'Reorders widgets',
+      'Strips unused code and unreferenced icon glyphs to keep the binary small',
+      'Compresses images',
+      'Runs the tests',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are flavors used for?',
+    options: [
+      'Theming the UI',
+      'Producing dev/staging/prod builds with different config from one codebase',
+      'Speeding up hot reload',
+      'Writing tests',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/build-and-release" questions={quizBuild} />
+
+<ProgressTracker client:visible id="tooling-and-production/build-and-release" />

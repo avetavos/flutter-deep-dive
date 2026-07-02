@@ -1,0 +1,116 @@
+---
+title: 'build and BuildContext'
+description: 'The build method contract — pure, fast, and called often — and what BuildContext really is: a handle to this widget location in the element tree.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The build contract
+
+`build` has one job: **return a widget tree that describes the UI for the current state**. It should be a pure, fast function of the widget's fields and state — nothing more.
+
+The rule that matters: **build can be called very often** — every frame of an animation, every `setState`, every time an ancestor rebuilds. So build must be cheap and free of side effects.
+
+```dart
+@override
+Widget build(BuildContext context) {
+  // ✅ Good: just describe UI from current state.
+  return Text('Count: $_count');
+}
+```
+
+```dart
+@override
+Widget build(BuildContext context) {
+  // ❌ Bad: side effects in build. This fires on EVERY rebuild.
+  _apiClient.fetchUser();      // network call — leaks, fires repeatedly
+  _controller = AnimationController(vsync: this); // recreated every build!
+  return Text('...');
+}
+```
+
+Side effects — network calls, creating controllers, subscribing to streams — belong in `initState` (once) or event handlers, never in `build`. Treat build as read-only rendering.
+
+## What BuildContext actually is
+
+Every `build` receives a `BuildContext`. It is not a bag of globals — it is a **handle to this widget's location in the element tree**. (In fact, `BuildContext` *is* the element.) That location is what lets a widget look *up* the tree to find inherited data.
+
+```dart
+@override
+Widget build(BuildContext context) {
+  // context knows WHERE we are, so it can search ancestors:
+  final theme = Theme.of(context);          // nearest Theme above us
+  final media = MediaQuery.of(context);     // nearest MediaQuery above us
+  return Text('Screen is ${media.size.width} wide', style: theme.textTheme.bodyMedium);
+}
+```
+
+`Theme.of(context)` walks up from this element to find the nearest `Theme` ancestor. This is why context matters: the *same* `.of(context)` call returns different results depending on where in the tree the widget sits.
+
+<Mermaid title="context.of walks up the element tree to find an ancestor" code={contextDiagram} />
+
+export const contextDiagram = `flowchart BT
+  here["this widget\n(context = its element)"] --> p1["Padding"]
+  p1 --> p2["Theme (found!)"]
+  p2 --> root["MaterialApp"]
+  here -.->|"Theme.of(context)\nsearches upward"| p2`;
+
+## The classic context pitfall
+
+Because `.of(context)` searches *upward*, a common bug is using a context that sits **above** the widget you're looking for. For example, calling `Scaffold.of(context)` with the context of the same build method that *created* the `Scaffold` fails — that context is above the Scaffold, not below it. The fix is a `Builder` (or a child widget) so you get a context located *under* the target.
+
+<Callout title="The one-line takeaway">
+`build` must be a cheap, side-effect-free function that describes UI from the current state — it runs often (every frame of an animation, every `setState`), so put network calls and controller creation in `initState`, not build. `BuildContext` is a handle to the widget's position in the element tree; `.of(context)` searches *upward* for an ancestor, which is why the same call returns different results depending on where the widget sits — and why an ancestor's context can't find something below it.
+</Callout>
+
+export const quizBuild = [
+  {
+    q: 'Why must the build method be free of side effects?',
+    options: [
+      'It only runs once',
+      'It can be called very often (every frame, every setState), so side effects would fire repeatedly',
+      'Dart forbids side effects in methods',
+      'Side effects are always slow',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where should you create an AnimationController or start a network request?',
+    options: [
+      'In the build method',
+      'In initState (once) or an event handler, not in build',
+      'In the widget constructor',
+      'In the RenderObject',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a BuildContext?',
+    options: [
+      'A global registry of all widgets',
+      'A handle to this widget location in the element tree, used to look up ancestors',
+      'The render object',
+      'A separate isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does `Theme.of(context)` do?',
+    options: [
+      'Creates a new theme',
+      'Walks up the element tree from this context to find the nearest Theme ancestor',
+      'Returns the app default theme, ignoring position',
+      'Rebuilds the whole app',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="widgets/build-and-buildcontext" questions={quizBuild} />
+
+<ProgressTracker client:visible id="widgets/build-and-buildcontext" />

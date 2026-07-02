@@ -1,0 +1,132 @@
+---
+title: 'Platform Channels'
+description: 'Reaching native code from Dart — MethodChannel for calls, EventChannel for native streams, the async message-passing model, plugins, and declaring assets.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## When Dart is not enough
+
+Flutter draws its own pixels, but some things live only in the native OS — the battery level, a specific sensor, a platform SDK, the secure enclave. To reach them, Flutter uses **platform channels**: a typed, asynchronous message pipe between your Dart code and native (Kotlin/Java on Android, Swift/Objective-C on iOS).
+
+The model is the same async message passing you already know from Dart: you send a message, the native side handles it, and a `Future` completes with the reply. Nothing blocks the UI thread.
+
+<Mermaid title="A MethodChannel round-trip" code={channelDiagram} />
+
+export const channelDiagram = `flowchart LR
+  dart["Dart\ninvokeMethod('getBattery')"] -->|message| platform["platform channel"]
+  platform --> native["native code\nreads battery level"]
+  native -->|reply| platform
+  platform -->|Future completes| dart`;
+
+## MethodChannel: call a native method
+
+A `MethodChannel` names a pipe and lets you `invokeMethod` on it. The call is async and returns a `Future` with the native result. Arguments and results are standard types (numbers, strings, lists, maps) serialized across the boundary.
+
+```dart
+const channel = MethodChannel('samples.app/battery');
+
+Future<int> getBatteryLevel() async {
+  try {
+    final level = await channel.invokeMethod<int>('getBatteryLevel');
+    return level ?? -1;
+  } on PlatformException catch (e) {
+    // native side reported an error
+    return -1;
+  }
+}
+```
+
+The native side registers a handler for the same channel name and switches on the method string to run the real platform code.
+
+## EventChannel: a stream of native events
+
+Where `MethodChannel` is one call and one reply, an **`EventChannel`** delivers a **stream** of events from native — sensor updates, connectivity changes, location. It maps to a Dart `Stream`, so you consume it exactly like any other stream.
+
+```dart
+const events = EventChannel('samples.app/accelerometer');
+
+Stream<AccelData> accelerometer() {
+  return events.receiveBroadcastStream().map((e) => AccelData.parse(e));
+}
+```
+
+## Plugins vs raw channels
+
+You rarely write channel code by hand. A **plugin** is a package that wraps platform channels plus the native implementation behind a clean Dart API — `battery_plus`, `geolocator`, `camera`. Reach for a well-maintained plugin first; write a raw channel only for something bespoke to your app.
+
+## Declaring assets
+
+Not native, but part of app structure: images, fonts, and JSON you bundle must be declared in `pubspec.yaml` so they ship with the app.
+
+```yaml
+flutter:
+  assets:
+    - assets/images/logo.png
+    - assets/data/
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+```
+
+```dart
+// Then load them by their declared path:
+Image.asset('assets/images/logo.png');
+```
+
+<Callout title="The one-line takeaway">
+Platform channels are a typed, async message pipe to native code. Use a `MethodChannel` for a one-shot call (`invokeMethod` returns a `Future`), and an `EventChannel` for a **stream** of native events (it becomes a Dart `Stream`). Prefer a maintained **plugin** over hand-written channels for common needs. Separately, any bundled **asset** must be declared in `pubspec.yaml` to ship with the app.
+</Callout>
+
+export const quizChannels = [
+  {
+    q: 'What is a platform channel?',
+    options: [
+      'A TV channel API',
+      'A typed, asynchronous message pipe between Dart and native platform code',
+      'A routing mechanism',
+      'A theme configuration',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the difference between MethodChannel and EventChannel?',
+    options: [
+      'They are identical',
+      'MethodChannel is one call and one reply (a Future); EventChannel delivers a stream of native events (a Stream)',
+      'MethodChannel is for iOS, EventChannel for Android',
+      'EventChannel is synchronous',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'For a common need like battery level or geolocation, what should you reach for first?',
+    options: [
+      'A hand-written raw platform channel',
+      'A well-maintained plugin that wraps the channel and native code behind a Dart API',
+      'A REST API',
+      'An isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where must bundled assets (images, fonts) be declared?',
+    options: [
+      'In main.dart',
+      'In `pubspec.yaml` under the flutter section',
+      'In the native project only',
+      'They are auto-detected, no declaration needed',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/platform-channels" questions={quizChannels} />
+
+<ProgressTracker client:visible id="navigation/platform-channels" />

@@ -1,0 +1,129 @@
+---
+title: 'Core Layout Widgets'
+description: 'The workhorses of Flutter layout — Row/Column/Flex with Expanded and Flexible, Stack with Positioned, Container, and the single-purpose helpers.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Row, Column, and Flex
+
+`Row` and `Column` lay children out along one axis — horizontal and vertical. Both are just `Flex` with the direction fixed. You control alignment with `mainAxisAlignment` (along the axis) and `crossAxisAlignment` (across it).
+
+```dart
+Column(
+  mainAxisAlignment: MainAxisAlignment.spaceBetween, // along the vertical axis
+  crossAxisAlignment: CrossAxisAlignment.start,      // across (horizontal)
+  children: const [ Text('top'), Text('middle'), Text('bottom') ],
+)
+```
+
+A `Column` is unbounded along its main axis unless constrained (recall the ListView error from the last lesson). It sizes itself to its children by default (`MainAxisSize.max` fills, `MainAxisSize.min` shrinks).
+
+## Expanded and Flexible: dividing the free space
+
+Inside a `Row`/`Column`, `Expanded` and `Flexible` split the *remaining* space by a **flex factor**. This is how you build proportional layouts.
+
+```dart
+Row(
+  children: [
+    Expanded(flex: 2, child: blueBox),  // takes 2/3 of the free space
+    Expanded(flex: 1, child: redBox),   // takes 1/3
+  ],
+)
+```
+
+The difference: `Expanded` forces the child to *fill* its share (a tight constraint), while `Flexible` lets the child be *up to* its share but no larger (a loose one). Reach for `Expanded` when you want the child to stretch, `Flexible` when you want it to take at most a share.
+
+## Stack and Positioned: overlapping children
+
+`Stack` layers children on top of each other; `Positioned` pins a child to edges of the stack. This is how you build badges, overlays, and custom placements.
+
+```dart
+Stack(
+  children: [
+    const Avatar(),
+    Positioned(
+      right: 0,
+      top: 0,
+      child: const Badge(),  // pinned to the top-right corner
+    ),
+  ],
+)
+```
+
+Non-positioned children are sized to the stack and aligned by its `alignment`; positioned ones are placed by their edge offsets.
+
+## Container and the single-purpose helpers
+
+`Container` is a convenience that *composes* several simpler widgets — padding, margin, decoration, constraints, alignment — into one. It is handy, but under the hood it is just a stack of `Padding`, `DecoratedBox`, `ConstrainedBox`, and `Align`.
+
+<Mermaid title="Container is composed from simpler widgets" code={containerDiagram} />
+
+export const containerDiagram = `flowchart LR
+  container["Container"] --> align["Align"]
+  container --> pad["Padding"]
+  container --> deco["DecoratedBox"]
+  container --> box["ConstrainedBox"]`;
+
+For a single job, prefer the single-purpose widget — it is clearer and often lets you keep a `const` constructor:
+
+- `Padding` — insets only.
+- `SizedBox` — fixed size (or a `const SizedBox(height: 8)` as a cheap spacer).
+- `Center` / `Align` — positioning.
+- `DecoratedBox` — background/border only.
+
+<Callout title="The one-line takeaway">
+`Row`/`Column` are `Flex` with a fixed axis; `mainAxisAlignment` and `crossAxisAlignment` place children. `Expanded` (fill your share) and `Flexible` (up to your share) divide free space by a flex factor. `Stack` + `Positioned` overlaps and pins. `Container` is a convenient composition of `Padding`, `DecoratedBox`, `ConstrainedBox`, and `Align` — but for one job, the single-purpose widget is clearer and keeps `const`.
+</Callout>
+
+export const quizWidgets = [
+  {
+    q: 'What are Row and Column, fundamentally?',
+    options: [
+      'Separate unrelated widgets',
+      'Flex with the direction fixed to horizontal or vertical',
+      'Subclasses of Stack',
+      'Scrollable lists',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the difference between Expanded and Flexible in a Row?',
+    options: [
+      'They are identical',
+      'Expanded forces the child to fill its share (tight); Flexible lets it be up to its share (loose)',
+      'Flexible only works vertically',
+      'Expanded disables the flex factor',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you pin a child to the top-right corner of a Stack?',
+    options: [
+      'Use crossAxisAlignment',
+      'Wrap it in Positioned with right and top offsets',
+      'Use a Column',
+      'Set its color',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why prefer Padding or SizedBox over Container for a single job?',
+    options: [
+      'Container is deprecated',
+      'The single-purpose widget is clearer and often keeps a const constructor; Container just composes those widgets anyway',
+      'Container cannot have children',
+      'They render faster on the GPU only',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/core-layout-widgets" questions={quizWidgets} />
+
+<ProgressTracker client:visible id="layout-and-rendering/core-layout-widgets" />

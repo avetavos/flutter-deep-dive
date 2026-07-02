@@ -1,0 +1,129 @@
+---
+title: 'Core Layout Widgets'
+description: 'ตัวหลักของ layout ใน Flutter — Row/Column/Flex กับ Expanded และ Flexible, Stack กับ Positioned, Container และตัวช่วยแบบทำงานเดียว'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Row, Column และ Flex
+
+`Row` กับ `Column` วาง child ตามแกนเดียว — แนวนอนและแนวตั้ง ทั้งคู่คือ `Flex` ที่ fix ทิศทางไว้ คุณคุมการจัดตำแหน่งด้วย `mainAxisAlignment` (ตามแกน) และ `crossAxisAlignment` (ขวางแกน)
+
+```dart
+Column(
+  mainAxisAlignment: MainAxisAlignment.spaceBetween, // ตามแกนแนวตั้ง
+  crossAxisAlignment: CrossAxisAlignment.start,      // ขวาง (แนวนอน)
+  children: const [ Text('top'), Text('middle'), Text('bottom') ],
+)
+```
+
+`Column` เป็น unbounded ตามแกนหลักของมันเว้นแต่จะถูก constrain (นึกถึง error ของ ListView จากบทเรียนที่แล้ว) โดย default มัน size ตัวเองตาม child (`MainAxisSize.max` เต็ม, `MainAxisSize.min` หด)
+
+## Expanded และ Flexible: แบ่งพื้นที่ว่าง
+
+ใน `Row`/`Column` `Expanded` และ `Flexible` แบ่งพื้นที่ *ที่เหลือ* ตาม **flex factor** นี่คือวิธีสร้าง layout แบบสัดส่วน
+
+```dart
+Row(
+  children: [
+    Expanded(flex: 2, child: blueBox),  // ได้ 2/3 ของพื้นที่ว่าง
+    Expanded(flex: 1, child: redBox),   // ได้ 1/3
+  ],
+)
+```
+
+ความต่าง: `Expanded` บังคับให้ child *เต็ม* ส่วนแบ่งของมัน (constraint แบบ tight) ส่วน `Flexible` ให้ child ใหญ่ได้ *ถึง* ส่วนแบ่งแต่ไม่เกิน (แบบ loose) ใช้ `Expanded` เมื่ออยากให้ child ยืด, ใช้ `Flexible` เมื่ออยากให้กินไม่เกินส่วนแบ่ง
+
+## Stack และ Positioned: child ที่ซ้อนกัน
+
+`Stack` วาง child ซ้อนทับกัน; `Positioned` ปักหมุด child ไว้ที่ขอบของ stack นี่คือวิธีสร้าง badge, overlay และการวางตำแหน่งแบบ custom
+
+```dart
+Stack(
+  children: [
+    const Avatar(),
+    Positioned(
+      right: 0,
+      top: 0,
+      child: const Badge(),  // ปักไว้มุมขวาบน
+    ),
+  ],
+)
+```
+
+child ที่ไม่ได้ positioned จะ size ตาม stack และจัดตำแหน่งด้วย `alignment` ของมัน; ตัวที่ positioned จะถูกวางตาม offset ของขอบ
+
+## Container และตัวช่วยแบบทำงานเดียว
+
+`Container` เป็นตัวสะดวกที่ *ประกอบ* widget ง่าย ๆ หลายตัวเข้าด้วยกัน — padding, margin, decoration, constraints, alignment — รวมเป็นตัวเดียว มันสะดวก แต่ข้างในมันก็แค่ stack ของ `Padding`, `DecoratedBox`, `ConstrainedBox` และ `Align`
+
+<Mermaid title="Container ประกอบขึ้นจาก widget ง่าย ๆ" code={containerDiagram} />
+
+export const containerDiagram = `flowchart LR
+  container["Container"] --> align["Align"]
+  container --> pad["Padding"]
+  container --> deco["DecoratedBox"]
+  container --> box["ConstrainedBox"]`;
+
+สำหรับงานเดียว ใช้ widget แบบทำงานเดียวดีกว่า — ชัดกว่าและมักปล่อยให้คุณเก็บ `const` constructor ไว้ได้:
+
+- `Padding` — inset เท่านั้น
+- `SizedBox` — ขนาดคงที่ (หรือ `const SizedBox(height: 8)` เป็น spacer ราคาถูก)
+- `Center` / `Align` — การวางตำแหน่ง
+- `DecoratedBox` — background/border เท่านั้น
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`Row`/`Column` คือ `Flex` ที่ fix แกน; `mainAxisAlignment` และ `crossAxisAlignment` วาง child `Expanded` (เต็มส่วนแบ่ง) และ `Flexible` (ไม่เกินส่วนแบ่ง) แบ่งพื้นที่ว่างตาม flex factor `Stack` + `Positioned` ซ้อนและปักหมุด `Container` เป็นการประกอบที่สะดวกของ `Padding`, `DecoratedBox`, `ConstrainedBox` และ `Align` — แต่สำหรับงานเดียว widget แบบทำงานเดียวชัดกว่าและเก็บ `const` ไว้ได้
+</Callout>
+
+export const quizWidgets = [
+  {
+    q: 'จริง ๆ แล้ว Row และ Column คืออะไร?',
+    options: [
+      'widget แยกที่ไม่เกี่ยวกัน',
+      'Flex ที่ fix ทิศทางเป็นแนวนอนหรือแนวตั้ง',
+      'subclass ของ Stack',
+      'list ที่ scroll ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความต่างระหว่าง Expanded กับ Flexible ใน Row คืออะไร?',
+    options: [
+      'เหมือนกันทุกอย่าง',
+      'Expanded บังคับให้ child เต็มส่วนแบ่ง (tight); Flexible ให้ child ใหญ่ได้ถึงส่วนแบ่ง (loose)',
+      'Flexible ทำงานแนวตั้งเท่านั้น',
+      'Expanded ปิด flex factor',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'จะปักหมุด child ไว้มุมขวาบนของ Stack อย่างไร?',
+    options: [
+      'ใช้ crossAxisAlignment',
+      'wrap มันด้วย Positioned พร้อม offset right และ top',
+      'ใช้ Column',
+      'ตั้งสีของมัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมควรใช้ Padding หรือ SizedBox แทน Container สำหรับงานเดียว?',
+    options: [
+      'Container ถูก deprecated',
+      'widget แบบทำงานเดียวชัดกว่าและมักเก็บ const constructor ไว้ได้; Container ก็แค่ประกอบ widget พวกนั้นอยู่ดี',
+      'Container มี child ไม่ได้',
+      'มัน render เร็วกว่าบน GPU เท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/core-layout-widgets" questions={quizWidgets} />
+
+<ProgressTracker client:visible id="layout-and-rendering/core-layout-widgets" />

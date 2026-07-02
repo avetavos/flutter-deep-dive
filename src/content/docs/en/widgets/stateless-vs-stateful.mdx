@@ -1,0 +1,118 @@
+---
+title: 'Stateless vs Stateful'
+description: 'The two base widgets, why State is a separate object from the widget, how State survives rebuilds, and when to reach for each.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Stateless: pure description
+
+A `StatelessWidget` has no mutable state of its own. Given its inputs (constructor arguments), its `build` always returns the same UI. If nothing about its inputs changes, it never needs to change.
+
+```dart
+class Greeting extends StatelessWidget {
+  const Greeting({super.key, required this.name});
+  final String name;
+
+  @override
+  Widget build(BuildContext context) => Text('Hello, $name');
+}
+```
+
+Everything it needs is `final` and passed in. Reach for `StatelessWidget` whenever a widget just renders its inputs — which is most widgets.
+
+## Stateful: state that outlives the widget
+
+A `StatefulWidget` is for UI that changes over time on its own — a counter, a toggle, an animation, a form. But here is the subtlety that trips people up: the widget is **still immutable**. The mutable part lives in a *separate* `State` object.
+
+```dart
+class Counter extends StatefulWidget {
+  const Counter({super.key});
+
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  int _count = 0; // mutable state lives HERE, not on the widget
+
+  void _increment() {
+    setState(() => _count++); // tell Flutter to rebuild with new state
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(onPressed: _increment, child: Text('$_count'));
+  }
+}
+```
+
+`setState` does two things: it runs your mutation, then marks the element dirty so Flutter rebuilds. Without `setState`, you can change `_count` all day and the screen never updates — the framework doesn't know anything changed.
+
+## Why the split? So state survives rebuilds
+
+The Widget is thrown away and recreated on every rebuild — so it *cannot* hold state that must persist. The `State` object is held by the **element**, which lives on across rebuilds. That is the entire reason for the two-class design.
+
+<Mermaid title="The widget is recreated; its State persists on the element" code={splitDiagram} />
+
+export const splitDiagram = `flowchart TB
+  w1["Counter widget\n(rebuilt, discarded)"] -.->|createState once| s["_CounterState\n(persists on the element,\nkeeps _count)"]
+  w2["Counter widget\n(new instance next build)"] -.->|reuses same State| s`;
+
+When the parent rebuilds and makes a *new* `Counter` widget, Flutter matches it to the existing element and hands it the *same* `_CounterState` — so `_count` is preserved. New widget, same state. (`didUpdateWidget` lets the State react to the new widget's data; full lifecycle is in the State Management module.)
+
+<Callout title="The one-line takeaway">
+Use `StatelessWidget` for UI that is a pure function of its inputs (most widgets). Use `StatefulWidget` when the UI changes over time — but the widget stays immutable and the mutable data lives in a separate `State` object, held by the persistent element. Call `setState` to mutate *and* trigger a rebuild; without it, the framework never knows to update.
+</Callout>
+
+export const quizStateful = [
+  {
+    q: 'Where does the mutable state of a StatefulWidget live?',
+    options: [
+      'On the widget itself',
+      'In a separate State object, held by the element',
+      'In a global variable',
+      'In the RenderObject',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does calling setState do?',
+    options: [
+      'Only runs the mutation, nothing else',
+      'Runs the mutation and marks the element dirty so Flutter rebuilds',
+      'Creates a new widget class',
+      'Forces a full app restart',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is State a separate object from the widget?',
+    options: [
+      'To make the code longer',
+      'Because the widget is recreated on every rebuild and cannot hold persistent state; State lives on the durable element',
+      'Because Dart forbids fields on widgets',
+      'For no real reason',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you choose a StatelessWidget?',
+    options: [
+      'When the widget needs an animation controller',
+      'When the widget just renders its inputs and has no state of its own',
+      'Only for the root of the app',
+      'Never — always use StatefulWidget',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="widgets/stateless-vs-stateful" questions={quizStateful} />
+
+<ProgressTracker client:visible id="widgets/stateless-vs-stateful" />

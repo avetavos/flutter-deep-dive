@@ -1,0 +1,132 @@
+---
+title: 'Platform Channels'
+description: 'เข้าถึง native code จาก Dart — MethodChannel สำหรับการเรียก, EventChannel สำหรับ native stream, โมเดล async message-passing, plugin และการ declare asset'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## เมื่อ Dart อย่างเดียวไม่พอ
+
+Flutter วาด pixel ของตัวเอง แต่บางอย่างอยู่แค่ใน native OS — ระดับแบตเตอรี่, sensor เฉพาะ, platform SDK, secure enclave การจะเข้าถึงมัน Flutter ใช้ **platform channel**: ท่อส่งข้อความแบบ async ที่มี type ระหว่าง Dart code กับ native (Kotlin/Java บน Android, Swift/Objective-C บน iOS)
+
+โมเดลก็คือ async message passing แบบเดียวกับที่คุณรู้จักจาก Dart อยู่แล้ว: คุณส่งข้อความ, ฝั่ง native จัดการ แล้ว `Future` complete พร้อมคำตอบ ไม่มีอะไร block UI thread
+
+<Mermaid title="round-trip ของ MethodChannel" code={channelDiagram} />
+
+export const channelDiagram = `flowchart LR
+  dart["Dart\ninvokeMethod('getBattery')"] -->|message| platform["platform channel"]
+  platform --> native["native code\nreads battery level"]
+  native -->|reply| platform
+  platform -->|Future completes| dart`;
+
+## MethodChannel: เรียก native method
+
+`MethodChannel` ตั้งชื่อท่อและให้คุณ `invokeMethod` บนมัน การเรียกเป็น async และ return `Future` พร้อมผลลัพธ์จาก native argument และผลลัพธ์เป็น type มาตรฐาน (number, string, list, map) ที่ถูก serialize ข้ามขอบเขต
+
+```dart
+const channel = MethodChannel('samples.app/battery');
+
+Future<int> getBatteryLevel() async {
+  try {
+    final level = await channel.invokeMethod<int>('getBatteryLevel');
+    return level ?? -1;
+  } on PlatformException catch (e) {
+    // native side reported an error
+    return -1;
+  }
+}
+```
+
+ฝั่ง native ลงทะเบียน handler สำหรับชื่อ channel เดียวกัน แล้ว switch บน method string เพื่อรัน platform code จริง
+
+## EventChannel: stream ของ native event
+
+ในขณะที่ `MethodChannel` คือการเรียกหนึ่งครั้งและตอบหนึ่งครั้ง **`EventChannel`** ส่ง **stream** ของ event จาก native — sensor update, การเปลี่ยน connectivity, location มัน map ไปเป็น Dart `Stream` คุณจึง consume มันแบบเดียวกับ stream อื่น ๆ
+
+```dart
+const events = EventChannel('samples.app/accelerometer');
+
+Stream<AccelData> accelerometer() {
+  return events.receiveBroadcastStream().map((e) => AccelData.parse(e));
+}
+```
+
+## plugin เทียบกับ raw channel
+
+คุณแทบไม่ต้องเขียน channel code ด้วยมือ **plugin** คือ package ที่ห่อ platform channel บวกกับ native implementation ไว้หลัง Dart API ที่สะอาด — `battery_plus`, `geolocator`, `camera` ให้หยิบ plugin ที่ดูแลดีมาใช้ก่อน แล้วค่อยเขียน raw channel เฉพาะสิ่งที่ specific กับแอปคุณเท่านั้น
+
+## การ declare asset
+
+ไม่ใช่เรื่อง native แต่เป็นส่วนหนึ่งของโครงสร้างแอป: รูปภาพ, font และ JSON ที่คุณ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้มันไปกับแอป
+
+```yaml
+flutter:
+  assets:
+    - assets/images/logo.png
+    - assets/data/
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+```
+
+```dart
+// Then load them by their declared path:
+Image.asset('assets/images/logo.png');
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+platform channel คือท่อส่งข้อความแบบ async ที่มี type ไปหา native code ใช้ `MethodChannel` สำหรับการเรียกครั้งเดียว (`invokeMethod` return `Future`) และ `EventChannel` สำหรับ **stream** ของ native event (มันกลายเป็น Dart `Stream`) ให้ใช้ **plugin** ที่ดูแลดีแทนการเขียน channel เองสำหรับความต้องการทั่วไป และแยกต่างหาก: **asset** ที่ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้ไปกับแอป
+</Callout>
+
+export const quizChannels = [
+  {
+    q: 'platform channel คืออะไร?',
+    options: [
+      'API ช่องทีวี',
+      'ท่อส่งข้อความแบบ async ที่มี type ระหว่าง Dart กับ native platform code',
+      'กลไก routing',
+      'การตั้งค่า theme',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความต่างระหว่าง MethodChannel กับ EventChannel คืออะไร?',
+    options: [
+      'มันเหมือนกัน',
+      'MethodChannel คือเรียกครั้งเดียวตอบครั้งเดียว (Future); EventChannel ส่ง stream ของ native event (Stream)',
+      'MethodChannel สำหรับ iOS, EventChannel สำหรับ Android',
+      'EventChannel เป็น synchronous',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'สำหรับความต้องการทั่วไปอย่างระดับแบตเตอรี่หรือ geolocation ควรหยิบอะไรมาใช้ก่อน?',
+    options: [
+      'raw platform channel ที่เขียนด้วยมือ',
+      'plugin ที่ดูแลดีซึ่งห่อ channel และ native code ไว้หลัง Dart API',
+      'REST API',
+      'isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'asset ที่ bundle (รูปภาพ, font) ต้องถูก declare ที่ไหน?',
+    options: [
+      'ใน main.dart',
+      'ใน `pubspec.yaml` ใต้ส่วน flutter',
+      'ใน native project เท่านั้น',
+      'มันถูกตรวจจับอัตโนมัติ ไม่ต้อง declare',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/platform-channels" questions={quizChannels} />
+
+<ProgressTracker client:visible id="navigation/platform-channels" />

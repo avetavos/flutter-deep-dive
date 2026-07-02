@@ -1,0 +1,126 @@
+---
+title: 'Animations'
+description: 'Implicit animations that interpolate to a new value for you, explicit animations driven by an AnimationController and Tween, curves, and when to reach for each.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Two families of animation
+
+Flutter animations split into two families, and picking the right one is most of the skill:
+
+- **Implicit** — you change a value, Flutter animates *to* it automatically. Zero controllers, no lifecycle to manage.
+- **Explicit** — you drive the animation yourself with an `AnimationController`. Full control (repeat, reverse, sync several values, respond to gestures), at the cost of a ticker and disposal.
+
+Start implicit; go explicit only when implicit can't express what you need.
+
+## Implicit: animate to a new value
+
+The `AnimatedFoo` widgets (`AnimatedContainer`, `AnimatedOpacity`, `AnimatedPadding`, …) take a `duration` and animate whenever their target properties change.
+
+```dart
+AnimatedContainer(
+  duration: const Duration(milliseconds: 300),
+  curve: Curves.easeInOut,
+  width: _expanded ? 200 : 100,     // change this (e.g. in setState)...
+  height: 100,
+  color: Colors.blue,
+  // ...and Flutter smoothly animates from the old width to the new one.
+)
+```
+
+`TweenAnimationBuilder` generalizes this: give it a `Tween` and a target, and it animates the value and rebuilds your builder — implicit animation for any property.
+
+## Explicit: drive it yourself
+
+An `AnimationController` produces values from 0 to 1 over a duration, ticked by a `vsync`. A `Tween` maps 0..1 onto your range, and `AnimatedBuilder` rebuilds only the animated part.
+
+```dart
+class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,                                  // the ticker (why we need the mixin)
+    duration: const Duration(seconds: 1),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() { _c.dispose(); super.dispose(); }   // ALWAYS dispose the controller
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, child) => Opacity(opacity: _c.value, child: child),
+      child: const FlutterLogo(),                 // built once, not rebuilt each tick
+    );
+  }
+}
+```
+
+<Mermaid title="The explicit animation pipeline" code={animDiagram} />
+
+export const animDiagram = `flowchart LR
+  ctrl["AnimationController\nticks 0 to 1 via vsync"] --> tween["Tween / Curve\nmaps 0..1 to your range"]
+  tween --> ab["AnimatedBuilder\nrebuilds the animated part"]
+  ab --> ui["widget updates each tick"]`;
+
+Two rules that prevent the common bugs: the controller needs a `vsync` (mix in `SingleTickerProviderStateMixin`), and you must `dispose()` it — a leaked controller keeps ticking forever. Pass the unchanging part as `child` so it isn't rebuilt on every tick.
+
+## Curves
+
+A `Curve` (`Curves.easeInOut`, `Curves.elasticOut`, …) reshapes linear time into natural motion. Both families take a curve; using one is the difference between a mechanical slide and a motion that feels designed.
+
+<Callout title="The one-line takeaway">
+Prefer **implicit** animations (`AnimatedContainer`, `TweenAnimationBuilder`) — change a value and Flutter interpolates to it, with no lifecycle to manage. Reach for **explicit** (`AnimationController` + `Tween` + `AnimatedBuilder`) when you need to repeat, reverse, chain, or gesture-drive motion — and remember its two rules: give it a `vsync` ticker, and `dispose()` it. Add a `Curve` for motion that feels natural.
+</Callout>
+
+export const quizAnim = [
+  {
+    q: 'What is an implicit animation?',
+    options: [
+      'One you drive tick-by-tick with a controller',
+      'One where you change a target value and Flutter automatically animates to it (e.g. AnimatedContainer)',
+      'An animation that cannot be seen',
+      'An animation that only runs in release mode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does an AnimationController need in order to tick?',
+    options: [
+      'A network connection',
+      'A vsync (a ticker provider, e.g. via SingleTickerProviderStateMixin)',
+      'A RepaintBoundary',
+      'A second isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What happens if you forget to dispose an AnimationController?',
+    options: [
+      'Nothing',
+      'It leaks and keeps ticking, wasting resources',
+      'The app will not build',
+      'It disposes itself automatically always',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When should you choose an explicit animation over an implicit one?',
+    options: [
+      'Always — implicit is deprecated',
+      'When you need repeat, reverse, chaining multiple values, or gesture-driven control',
+      'Only for colors',
+      'Never',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/animations" questions={quizAnim} />
+
+<ProgressTracker client:visible id="async-and-performance/animations" />

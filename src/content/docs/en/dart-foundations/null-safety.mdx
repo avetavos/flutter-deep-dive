@@ -1,0 +1,128 @@
+---
+title: 'Null Safety'
+description: 'Sound null safety in Dart — nullable vs non-nullable types, the ?. ?? ! operators, late, and flow analysis that proves a value is not null.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Non-nullable by default
+
+Dart has **sound** null safety: a type cannot hold `null` unless you explicitly say so with `?`. This is a hard guarantee, not a lint — if the type system says a value is non-null, it genuinely cannot be null at runtime.
+
+```dart
+int a = 1;      // non-nullable — can never be null
+int? b = null;  // nullable — the ? opts in to null
+
+a = null;       // ❌ compile error: a cannot be null
+b = 42;         // ✅ a nullable can also hold a real value
+```
+
+"Sound" is the key word: because the guarantee is airtight, the compiler can *optimize* on it and you can *trust* it. A `String name` widget property will never surprise you with a null.
+
+## The four operators you'll use daily
+
+```dart
+String? maybeName;
+
+// ?.  — null-aware access: call only if not null, else the whole thing is null
+final len = maybeName?.length;        // int? — null if maybeName is null
+
+// ??  — if-null: provide a fallback when the left side is null
+final safe = maybeName ?? 'Guest';    // String — never null
+
+// ??= — assign only if currently null
+maybeName ??= 'Default';
+
+// !   — null assertion: "I promise this isn't null" (throws if you're wrong)
+final definite = maybeName!;          // String — DANGER if it's actually null
+```
+
+The `!` operator is the one to respect: it silences the compiler by *asserting* non-null, and if you're wrong it throws at runtime. Every `!` is a small bet — use it only when you can prove the value is non-null.
+
+## Flow analysis narrows for you
+
+You rarely need `!`, because Dart's **flow analysis** narrows a nullable to non-null after a check:
+
+```dart
+void greet(String? name) {
+  if (name == null) return;
+  // From here down, Dart KNOWS name is String (not String?) — no ! needed.
+  print(name.toUpperCase());
+}
+```
+
+<Mermaid title="Flow analysis promotes a nullable to non-null" code={flowDiagram} />
+
+export const flowDiagram = `flowchart TB
+  start["name: String?"] --> check{"name == null?"}
+  check -->|yes| ret["return early"]
+  check -->|no| promoted["name: String\n(promoted, safe to use)"]`;
+
+There's a catch that bites Flutter devs: flow analysis works on **local variables**, not on instance fields or getters (they could change between the check and the use). For a nullable field, copy it to a local first, then check the local.
+
+## `late`: a promise to initialize before use
+
+`late` says "this will be non-null by the time anyone reads it, just not at declaration." Useful for values set in `initState` or computed once.
+
+```dart
+late final String config;   // no value yet, but promised before first read
+// If you read it before assigning, you get a LateInitializationError.
+```
+
+Use `late` sparingly — it trades a compile-time guarantee for a runtime one. A misused `late` is just a `!` in disguise.
+
+<Callout title="The one-line takeaway">
+Dart is non-nullable by default; `?` opts a type into holding `null`, and the guarantee is **sound** — trustworthy at runtime. Reach for `?.` (safe access), `??` (fallback), and lean on **flow analysis** (a null check promotes the variable) instead of `!` (a runtime bet). `late` defers initialization but downgrades the guarantee to runtime — use it sparingly.
+</Callout>
+
+export const quizNull = [
+  {
+    q: 'What does "sound" null safety mean in Dart?',
+    options: [
+      'Nulls make a sound when they occur',
+      'The non-null guarantee is airtight at runtime — if the type is non-nullable, it truly cannot be null',
+      'It only works in debug mode',
+      'It is just a linter warning',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the `??` operator do?',
+    options: [
+      'Asserts a value is non-null and throws otherwise',
+      'Provides a fallback value when the left side is null',
+      'Calls a method only if not null',
+      'Declares a nullable type',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is the `!` (null assertion) operator risky?',
+    options: [
+      'It is slow',
+      'It asserts non-null to satisfy the compiler, and throws at runtime if the value is actually null',
+      'It permanently changes the type',
+      'It only works on numbers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does flow analysis sometimes fail to promote a nullable field?',
+    options: [
+      'Fields are always non-null',
+      'Promotion works on local variables, not fields/getters, which could change between check and use',
+      'Fields cannot be checked for null',
+      'It is a compiler bug',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/null-safety" questions={quizNull} />
+
+<ProgressTracker client:visible id="dart-foundations/null-safety" />

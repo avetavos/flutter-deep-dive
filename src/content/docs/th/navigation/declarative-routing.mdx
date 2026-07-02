@@ -1,0 +1,129 @@
+---
+title: 'Declarative Routing'
+description: 'Navigator 2.0 และ go_router — routing ที่ขับเคลื่อนด้วย app state, URL sync สำหรับเว็บ, deep linking, nested shell route และ auth redirect'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ทำไม imperative push/pop ถึงพังเมื่อเจอ deep link
+
+navigation แบบ imperative ทำงานได้ดีจนกว่าคุณต้องทำ **deep link** เมื่อ user เปิด `myapp.com/orders/42` จาก cold start มันไม่มีลำดับการ `push` ที่เกิดขึ้นมาก่อน — คุณต้องประกอบ stack ทั้งหมด (Home → Orders → Order 42) ขึ้นมาใหม่จาก URL การทำแบบนั้นด้วยมือด้วย `Navigator.push` เจ็บปวดและผิดพลาดง่าย
+
+ทางแก้คือทำให้ route stack เป็น **ฟังก์ชันของ state แบบ declarative**: กำหนด URL หรือ app state ปัจจุบันมา แล้วคำนวณ stack ออกมา นี่คือ Navigator 2.0 และเพราะ API ดิบ ๆ ของมัน verbose เกือบทุกคนจึงใช้ **`go_router`** ซึ่งเป็น package ทางการที่สร้างทับมันอีกที
+
+<Mermaid title="declarative routing derive stack จาก state" code={declDiagram} />
+
+export const declDiagram = `flowchart LR
+  state["app state / URL\n/orders/42"] --> router["go_router\n(route table)"]
+  router --> stack["computed stack\nHome then Orders then Order 42"]`;
+
+## การตั้งค่า go_router
+
+คุณ declare route ครั้งเดียวในรูปของ data `go_router` map path ไป builder, รองรับ path parameter ที่มี type และ sync URL ของ browser ให้อัตโนมัติบนเว็บ
+
+```dart
+final router = GoRouter(
+  routes: [
+    GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+    GoRoute(
+      path: '/orders/:id',                       // typed path parameter
+      builder: (context, state) {
+        final id = state.pathParameters['id']!;
+        return OrderScreen(orderId: id);
+      },
+    ),
+  ],
+);
+
+// Navigate by path — no manual stack juggling:
+context.go('/orders/42');
+```
+
+`context.go('/orders/42')` set location; router คำนวณ stack ใหม่ บนเว็บ URL bar อัปเดตให้ตรง และการ paste URL นั้นจะประกอบหน้าจอเดิมขึ้นมาใหม่ — ได้ deep linking มาฟรี
+
+## nested / shell route
+
+**shell route** ห่อชุดของ route ไว้ใน UI ร่วมกัน — แอปแบบ bottom-navigation คลาสสิกที่ tab bar อยู่คงที่ในขณะที่เนื้อหาข้างในเปลี่ยน shell ยังคง mount อยู่ มีแต่ child route ที่สลับ
+
+```dart
+ShellRoute(
+  builder: (context, state, child) => ScaffoldWithNavBar(child: child),
+  routes: [
+    GoRoute(path: '/feed', builder: (context, state) => const FeedScreen()),
+    GoRoute(path: '/profile', builder: (context, state) => const ProfileScreen()),
+  ],
+);
+```
+
+## redirect เป็น auth guard
+
+`redirect` รันก่อน route จะ build และส่ง user ไปที่อื่นได้ — เป็นที่ที่เหมาะที่สุดสำหรับ authentication guard return path ใหม่เพื่อ redirect หรือ `null` เพื่อไปต่อ
+
+```dart
+GoRouter(
+  redirect: (context, state) {
+    final loggedIn = auth.isLoggedIn;
+    final goingToLogin = state.matchedLocation == '/login';
+    if (!loggedIn && !goingToLogin) return '/login'; // guard
+    if (loggedIn && goingToLogin) return '/';         // already in
+    return null;                                      // no redirect
+  },
+  routes: [ /* ... */ ],
+);
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+deep link ทำให้ imperative `push`/`pop` พัง เพราะไม่มีประวัติการ push ให้เล่นซ้ำ — คุณต้องประกอบ stack จาก URL declarative routing ทำให้ **stack เป็นฟังก์ชันของ state** และ `go_router` คือวิธีมาตรฐานในการทำ: declare route เป็น data พร้อม path parameter ที่มี type, ได้ **web URL sync และ deep linking** มาฟรี, ห่อ UI ที่ใช้ร่วมกันด้วย **shell route** และวาง **auth guard** ไว้ใน `redirect`
+</Callout>
+
+export const quizDecl = [
+  {
+    q: 'ทำไม navigation แบบ imperative push/pop ถึงมีปัญหากับ deep link?',
+    options: [
+      'deep link ยาวเกินไป',
+      'การเปิด URL จาก cold start ไม่มีประวัติการ push ให้เล่นซ้ำ — ต้องประกอบ stack ทั้งหมดขึ้นใหม่จาก URL',
+      'push/pop แสดง animation ไม่ได้',
+      'deep link ทำงานเฉพาะบนเว็บ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'แนวคิดหลักของ declarative routing คืออะไร?',
+    options: [
+      'push แต่ละหน้าจอด้วยมือ',
+      'route stack ถูกคำนวณเป็นฟังก์ชันของ app state / URL ปัจจุบัน',
+      'เก็บ route ไว้ใน database',
+      'ทุกหน้าจอเป็น isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'shell route ใช้ทำอะไร?',
+    options: [
+      'รันคำสั่ง shell',
+      'ห่อชุดของ route ไว้ใน UI ร่วมกันที่คงอยู่ (เช่น bottom nav bar) ในขณะที่เนื้อหาข้างในสลับ',
+      'เข้ารหัส route',
+      'native code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน go_router ควรวาง authentication guard ไว้ที่ไหน?',
+    options: [
+      'ใน build method ของทุกหน้าจอ',
+      'ใน callback `redirect` ที่ส่ง user ไปที่อื่นได้ก่อน route จะ build',
+      'ใน main() เท่านั้น',
+      'ใน platform channel',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/declarative-routing" questions={quizDecl} />
+
+<ProgressTracker client:visible id="navigation/declarative-routing" />

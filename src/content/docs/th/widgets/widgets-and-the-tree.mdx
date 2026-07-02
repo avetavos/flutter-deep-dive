@@ -1,0 +1,120 @@
+---
+title: 'Widgets and the Tree'
+description: 'สาม tree ที่อยู่เบื้องหลังทุกแอป Flutter — widget เป็น immutable config, element เป็น living instance และ render object ที่ทำงานจริง'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## composition ไม่ใช่ inheritance
+
+Flutter สร้าง UI ด้วยการ **nest** widget ไม่ใช่ subclass มัน คุณไม่ extend `Button` เพื่อเพิ่ม padding — คุณ *wrap* มันด้วย `Padding` หนึ่งหน้าจอคือ tree ที่ลึกของ widget เล็ก ๆ ที่ทำหน้าที่เดียว ประกอบเข้าด้วยกัน
+
+```dart
+Widget build(BuildContext context) {
+  return Center(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          const Text('Hello'),
+          ElevatedButton(onPressed: () {}, child: const Text('Tap')),
+        ],
+      ),
+    ),
+  );
+}
+```
+
+นี่คือ composition over inheritance แบบสุดโต่ง: widget เล็ก ๆ จำนวนมาก แต่ละตัวทำสิ่งเดียว nest กันจนเป็นภาพรวม `Center`, `Padding`, `Column` ไม่ใช่ของประดับ — พวกมัน *คือ* layout
+
+## สาม tree
+
+นี่คือ model ที่อธิบายเกือบทุกอย่างเกี่ยวกับ behavior และ performance ของ Flutter มันไม่ได้มี tree เดียว — มันมี **สาม tree** ที่ถูก sync ให้ตรงกัน:
+
+<Mermaid title="Widget, Element และ Render tree ทำงานคู่ขนานกัน" code={treesDiagram} />
+
+export const treesDiagram = `flowchart LR
+  subgraph W["Widget tree"]
+    w1["Padding"] --> w2["Text"]
+  end
+  subgraph E["Element tree"]
+    e1["PaddingElement\n(อยู่ต่อเนื่อง)"] --> e2["TextElement\n(ถือ state)"]
+  end
+  subgraph R["Render tree"]
+    r1["RenderPadding\n(layout)"] --> r2["RenderParagraph\n(paint)"]
+  end
+  W -.creates.-> E
+  E -.creates.-> R`;
+
+- **Widget** — description ที่ immutable ที่คุณเขียน rebuild ตลอดและทิ้งไป ถูก
+- **Element** — *living instance* ของ widget ณ ตำแหน่งหนึ่งใน tree มันอยู่ต่อเนื่องข้าม rebuild, ถือ `State` ของ stateful widget และตัดสินว่า widget ใหม่จะ update มันได้หรือต้องแทนที่
+- **RenderObject** — ทำ layout, paint และ hit-testing จริง นี่คือ layer ที่แพง และ Flutter พยายามอย่างหนักที่จะนำมันกลับมาใช้ซ้ำ
+
+## ทำไม rebuild ถึงยังถูก
+
+เมื่อคุณ rebuild Flutter จะเดิน widget tree ใหม่และเทียบ widget ใหม่แต่ละตัวกับ element ที่มีอยู่ ถ้า widget ใหม่มี **type และ key เดียวกัน** กับตัวเก่า element จะถูก *update ในที่เดิม* — render object ถูกใช้ซ้ำ อัปเดตเฉพาะ property ที่เปลี่ยน เฉพาะเมื่อ type หรือ key ต่างเท่านั้น Flutter จึงรื้อ element กับ render object แล้ว build ใหม่
+
+```dart
+// การ rebuild สร้าง Text widget ใหม่ทุกครั้ง...
+Text(counter.toString())
+// ...แต่ TextElement และ RenderParagraph ข้างล่างถูกใช้ซ้ำ
+// มีแค่ string ที่เปลี่ยนถูกส่งลงไป นี่คือเหตุผลที่ setState ถูก
+```
+
+การ reconciliation นี้ — widget ใหม่ที่ immutable ถูก diff กับ element ที่อยู่ต่อเนื่อง — คือห้องเครื่องของ Flutter Key (บทเรียนถัดไป) มีไว้เพื่อควบคุมมันเมื่อการ match ด้วย type แบบ default ทำผิด
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Flutter สร้าง UI ด้วยการ **compose** widget เล็ก ๆ ไม่ใช่ subclass ข้างล่างมีสาม tree ทำงานคู่ขนาน: **widget** ที่ทิ้งได้ (description), **element** ที่อยู่ต่อเนื่อง (living instance ที่ถือ state) และ **render object** ที่แพง (layout และ paint) การ rebuild ถูกเพราะ Flutter นำ element และ render object กลับมาใช้ซ้ำทุกที่ที่ widget ใหม่ตรงกับตัวเก่าด้วย type และ key
+</Callout>
+
+export const quizTree = [
+  {
+    q: 'Flutter เพิ่ม behavior อย่าง padding ให้ widget อย่างไร?',
+    options: [
+      'ด้วยการ subclass widget',
+      'ด้วย composition — wrap มันด้วย widget อีกตัว (เช่น Padding)',
+      'ด้วยการแก้ render object โดยตรง',
+      'ด้วย mixin เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'tree ไหนในสาม tree ที่อยู่ต่อเนื่องข้าม rebuild และถือ State?',
+    options: [
+      'widget tree',
+      'element tree',
+      'render tree',
+      'ไม่มี — ทั้งหมด rebuild ทุกเฟรม',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไร Flutter นำ element (และ render object) กลับมาใช้ซ้ำระหว่าง rebuild?',
+    options: [
+      'ไม่เคย — สร้างใหม่หมดทุกอย่าง',
+      'เมื่อ widget ใหม่มี type และ key เดียวกับตัวเก่าที่ตำแหน่งนั้น',
+      'เฉพาะกับ StatelessWidget',
+      'เฉพาะตอน build ครั้งแรก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'layer ไหนที่ทำ layout และ paint จริง?',
+    options: [
+      'widget',
+      'element',
+      'RenderObject',
+      'BuildContext',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="widgets/widgets-and-the-tree" questions={quizTree} />
+
+<ProgressTracker client:visible id="widgets/widgets-and-the-tree" />

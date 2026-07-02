@@ -1,0 +1,78 @@
+---
+title: 'Layout & Rendering'
+description: 'Flutter เปลี่ยน widget เป็น pixel อย่างไร — layout algorithm แบบ constraints, core layout widget, sliver กับ scrolling และ render pipeline ต่อ frame'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## จาก widget สู่ pixel
+
+คุณอธิบาย UI เป็น tree ของ widget หน้าที่ของ Flutter คือเปลี่ยนคำอธิบายนั้นให้เป็น pixel ที่วางตำแหน่งและ paint ออกมา — และมันทำด้วย algorithm เล็ก ๆ อันเดียวที่เรียนรู้ได้ พอเข้าใจ algorithm นี้ layout จะเลิกเป็นการลองผิดลองถูก
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียนรู้ |
+|--------|-------------------|
+| Constraints & layout | กฎเดียว: constraints ลงล่าง, size ขึ้นบน, parent เป็นคนวางตำแหน่ง |
+| Core layout widgets | Row/Column/Flex, Expanded, Stack, Container และเพื่อน ๆ |
+| Slivers & scrolling | lazy building, ListView, CustomScrollView และ sliver |
+| The render pipeline | build, layout, paint, composite — เกิดอะไรขึ้นในแต่ละ frame |
+
+## ไอเดียเดียวที่ต้องจำ
+
+เกือบทุกคำถามเรื่อง layout ใน Flutter ตอบได้ด้วยประโยคเดียวที่คุณจะเจอในบทเรียนถัดไป:
+
+<Mermaid title="บทสนทนาเรื่อง layout ระหว่าง parent กับ child" code={idxDiagram} />
+
+export const idxDiagram = `flowchart TB
+  p["Parent"] -->|1. passes constraints down| c["Child"]
+  c -->|2. picks a size within them| p
+  p -->|3. sets child position| done["Positioned + sized"]`;
+
+parent ส่ง **constraints** (min/max ของ width และ height) ให้ child, child เลือก **size** ของตัวเองภายในขอบเขตนั้น จากนั้น parent ตัดสินใจว่าจะวาง child **ตรงไหน** บทสนทนาสามขั้นนี้ ที่ทำซ้ำลงไปตาม tree คือทั้งหมดของระบบ layout
+
+<Callout title="การปรับ mindset">
+widget ไม่ได้ paint ตัวเองตรงไหนก็ได้ตามใจ layout คือการเจรจา: parent constrain, child เลือก size, parent วางตำแหน่ง เวลา layout "ไม่ยอมทำตามที่คุณต้องการ" เกือบทุกครั้งคุณกำลังสู้กับ constraints ที่ถูกส่งลงมา ไม่ใช่ตัว widget เอง พออ่าน constraint flow เป็น layout ก็คาดเดาได้
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ระบบ layout ของ Flutter สรุปเป็นประโยคเดียวคืออะไร?',
+    options: [
+      'widget paint ตัวเองที่พิกัดสัมบูรณ์',
+      'การเจรจา: parent ส่ง constraints ลง, child เลือก size ภายในนั้น, parent วางตำแหน่ง child',
+      'การ cascade ของ style แบบ CSS',
+      'grid ของ cell ขนาดคงที่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เวลา layout ไม่ยอมทำตามที่ต้องการ ปกติคุณกำลังสู้กับอะไร?',
+    options: [
+      'Dart compiler',
+      'constraints ที่ถูกส่งลงมาให้ widget',
+      'GPU',
+      'สีของ widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใครเป็นคนตัดสินใจว่า child ถูกวางตำแหน่งตรงไหน?',
+    options: [
+      'ตัว child เอง',
+      'parent หลังจาก child เลือก size แล้ว',
+      'render pipeline แบบสุ่ม',
+      'ระบบปฏิบัติการ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="layout-and-rendering/index" />

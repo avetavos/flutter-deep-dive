@@ -1,0 +1,118 @@
+---
+title: 'Project & Tooling'
+description: 'pubspec.yaml and pub, the flutter CLI, DevTools, and the difference between hot reload and hot restart — the daily toolchain.'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## pubspec.yaml: the manifest
+
+Every Flutter project is described by `pubspec.yaml` — dependencies, dev-only dependencies, and the assets bundled into the app.
+
+```yaml
+name: my_app
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  go_router: ^14.0.0        # runtime dependency
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0     # only used during development/tests
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/        # a whole folder
+    - assets/config.json    # a single file
+```
+
+The split matters: `dependencies` ship inside your app; `dev_dependencies` (test frameworks, linters, code generators) do not. Assets listed here are the only ones bundled — a missing entry is the usual cause of "asset not found."
+
+## The flutter CLI
+
+The `flutter` command is the entry point to everything:
+
+```bash
+flutter create my_app        # scaffold a new project
+flutter pub get              # resolve and download dependencies
+flutter run                  # run on a connected device/emulator
+flutter run --release        # run in release mode
+flutter build apk            # produce a release build
+flutter doctor               # diagnose your local toolchain
+flutter analyze              # static analysis / lints
+```
+
+`flutter doctor` is the first thing to run when anything is off — it checks the SDK, device toolchains, and IDE plugins and tells you exactly what's missing.
+
+## DevTools
+
+**DevTools** is the browser-based suite for inspecting a running app: the widget inspector (tap a widget, see its tree and constraints), the performance/timeline view (find jank), the memory view, and the network view. It's how you *see* the trees and pipeline the earlier modules described.
+
+## Hot reload vs hot restart
+
+The two refresh commands are not the same, and knowing the difference saves real confusion:
+
+- **Hot reload** (`r`) injects changed source into the *running* app and rebuilds the widget tree — **State is preserved**. It's sub-second and is the reason Flutter development feels fast.
+- **Hot restart** (`R`) throws away app state and restarts from `main()` — slower, but a clean slate.
+
+Hot reload has limits. It re-runs `build`, but it does **not** re-run `initState` or a changed `main()`, and it can't apply certain changes (new `const` evaluations, changes to enum/class shape, global variable initializers). When a change doesn't seem to take, the answer is usually hot restart.
+
+<Callout title="The one-line takeaway">
+`pubspec.yaml` declares dependencies (shipped), `dev_dependencies` (build/test-only), and the assets that get bundled — a missing asset entry is the classic "not found" bug. The `flutter` CLI runs everything (start with `flutter doctor` when stuck), DevTools lets you inspect the live tree and timeline, and **hot reload** preserves State while re-running `build` — but changes to `initState`, `main`, or class shape need a **hot restart**.
+</Callout>
+
+export const quizTooling = [
+  {
+    q: 'What is the difference between `dependencies` and `dev_dependencies` in pubspec.yaml?',
+    options: [
+      'They are the same',
+      'dependencies ship inside the app; dev_dependencies (tests, linters) are used only during development',
+      'dev_dependencies ship, dependencies do not',
+      'dependencies are for web only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does hot reload preserve that hot restart does not?',
+    options: [
+      'The source code',
+      'The running app\'s State',
+      'The pubspec',
+      'The build cache',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why might a code change not appear after a hot reload?',
+    options: [
+      'Hot reload never works',
+      'It re-runs build but not initState/main or certain shape changes — those need a hot restart',
+      'The file was not saved is the only cause',
+      'Hot reload requires release mode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the first command to run when your local toolchain seems broken?',
+    options: [
+      'flutter build apk',
+      'flutter doctor',
+      'flutter clean',
+      'flutter upgrade',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/project-and-tooling" questions={quizTooling} />
+
+<ProgressTracker client:visible id="tooling-and-production/project-and-tooling" />

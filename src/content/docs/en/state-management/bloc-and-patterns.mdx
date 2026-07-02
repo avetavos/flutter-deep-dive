@@ -1,0 +1,112 @@
+---
+title: 'BLoC & Patterns'
+description: 'Unidirectional data flow with BLoC and Cubit — events in, states out, business logic separated from UI, and when the extra ceremony is worth it.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## One direction, always
+
+**BLoC** (Business Logic Component) is a pattern built on a strict rule: data flows in **one direction**. The UI sends *events* (or method calls) in; the BLoC emits *states* out; the UI rebuilds from those states. The UI never mutates state directly, and business logic never touches widgets.
+
+<Mermaid title="Unidirectional data flow" code={flowDiagram} />
+
+export const flowDiagram = `sequenceDiagram
+  participant UI
+  participant Bloc
+  UI->>Bloc: add(Event) / method call
+  Bloc->>Bloc: run business logic
+  Bloc->>UI: emit(new State)
+  UI->>UI: rebuild from State`;
+
+This one-way discipline is the whole value. Because state only ever changes in one place, in response to explicit inputs, the app becomes predictable and testable — you can feed events to a BLoC in a test and assert the exact sequence of states, with no widgets involved.
+
+## Cubit: the simpler half
+
+The BLoC library ships two flavors. **Cubit** is the simpler one — no event classes, you just call methods that `emit` new states. Start here.
+
+```dart
+// State flows out; methods are the inputs.
+class CounterCubit extends Cubit<int> {
+  CounterCubit() : super(0);          // initial state
+
+  void increment() => emit(state + 1); // emit a new state
+  void reset() => emit(0);
+}
+
+// In the UI: BlocBuilder rebuilds when a new state is emitted.
+BlocBuilder<CounterCubit, int>(
+  builder: (context, count) => Text('$count'),
+);
+
+// Trigger an input:
+context.read<CounterCubit>().increment();
+```
+
+**BLoC** proper adds explicit `Event` classes between the UI and the logic (`add(IncrementPressed())` instead of `increment()`). That indirection buys you a documented, loggable list of every possible input — valuable in large apps, overkill in small ones.
+
+## When the ceremony pays off
+
+BLoC is more structure than `setState` or Provider, and that structure is a cost you pay upfront. It earns back when:
+
+- The app is **large** and you want business logic in testable units, fully separate from UI.
+- State transitions are **complex** — many events, async flows, and you want them explicit and traceable.
+- A **team** benefits from one enforced pattern across the codebase.
+
+For a small app or a single screen's local state, BLoC is over-engineering — `setState` or a simple `ChangeNotifier` is clearer. The skill is matching the ceremony to the complexity.
+
+<Callout title="The one-line takeaway">
+BLoC enforces **unidirectional data flow**: events/methods go in, states come out, and the UI only rebuilds from emitted states — which makes logic predictable and testable without widgets. **Cubit** is the simple form (call methods that `emit`); full **BLoC** adds explicit event classes for traceability. Reach for it when apps are large, flows are complex, or a team needs one pattern — not for a single screen.
+</Callout>
+
+export const quizBloc = [
+  {
+    q: 'What is the defining rule of the BLoC pattern?',
+    options: [
+      'State can be mutated anywhere',
+      'Unidirectional data flow — events/methods in, states out, UI rebuilds from states',
+      'Widgets contain the business logic',
+      'It avoids the build method',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does Cubit differ from full BLoC?',
+    options: [
+      'Cubit is for animations only',
+      'Cubit uses methods that emit states directly; full BLoC adds explicit Event classes',
+      'Cubit cannot hold state',
+      'They are unrelated',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is BLoC considered testable?',
+    options: [
+      'It requires no tests',
+      'You can feed events to it and assert the exact sequence of emitted states, with no widgets involved',
+      'It runs tests automatically',
+      'It disables state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is BLoC likely over-engineering?',
+    options: [
+      'For a large app with complex async flows',
+      'For a single screen\'s simple local state, where setState is clearer',
+      'When a team needs one enforced pattern',
+      'When you need traceable state transitions',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/bloc-and-patterns" questions={quizBloc} />
+
+<ProgressTracker client:visible id="state-management/bloc-and-patterns" />

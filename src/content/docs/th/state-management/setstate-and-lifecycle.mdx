@@ -1,0 +1,120 @@
+---
+title: 'setState & the Lifecycle'
+description: 'setState mark element เป็น dirty แล้ว trigger rebuild อย่างไร, State lifecycle ทั้งหมด, hook แต่ละตัวใส่อะไร และ scope ของ setState rebuild'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## setState ทำอะไรกันแน่
+
+`setState` ไม่ได้ "วาดหน้าจอใหม่" มันทำสิ่งเล็ก ๆ อย่างเดียว: รัน callback ของคุณ (ที่ mutate field) แล้ว mark **element** ของ widget นี้เป็น *dirty* พอถึง frame ถัดไป Flutter จะ rebuild ทุก element ที่ dirty โดยเรียก `build` อีกครั้ง
+
+```dart
+class Counter extends StatefulWidget {
+  const Counter({super.key});
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  int _count = 0;
+
+  void _increment() {
+    setState(() {
+      _count++;          // mutate state ข้างใน callback
+    });                  // แล้ว Flutter mark element นี้เป็น dirty
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: _increment,
+      child: Text('count: $_count'),
+    );
+  }
+}
+```
+
+มีกฎสองข้อที่ตามมา: mutate state **ข้างใน** callback ของ `setState` (เพื่อให้การเปลี่ยนและการ mark dirty เกิดพร้อมกัน) และรู้ไว้ว่า `setState` schedule rebuild สำหรับ frame *ถัดไป* — ไม่ใช่ synchronous
+
+## State lifecycle
+
+`State` object มี lifecycle ที่ชัดเจน รู้ว่า hook ไหนทำอะไรช่วยกัน bug ทั้งกลุ่มได้
+
+<Mermaid title="The State lifecycle" code={lifecycleDiagram} />
+
+export const lifecycleDiagram = `flowchart TB
+  create["createState()"] --> init["initState()\nsetup ครั้งเดียว"]
+  init --> deps["didChangeDependencies()\nหลัง inherited deps พร้อม"]
+  deps --> build["build()\nเรียกทุกครั้งที่ rebuild"]
+  build --> update["didUpdateWidget()\nparent rebuild ด้วย config ใหม่"]
+  update --> build
+  build --> dispose["dispose()\ncleanup"]`;
+
+- **`initState`** — setup ครั้งเดียว: สร้าง controller, subscribe stream รันครั้งเดียว ตรงนี้ยังใช้ `context` กับ inherited widget อย่างเชื่อถือได้ไม่ได้
+- **`didChangeDependencies`** — รันหลัง `initState` และรันอีกทุกครั้งที่ inherited dependency เปลี่ยน เป็นที่ปลอดภัยสำหรับอ่าน data ของ `InheritedWidget`/`Provider` ที่ setup ต้องพึ่ง
+- **`build`** — เรียกทุกครั้งที่ rebuild ต้อง **pure และเร็ว**: ไม่มี side effect, ไม่มี network call, ไม่มี subscription แค่ describe UI จาก state ปัจจุบัน
+- **`didUpdateWidget`** — parent rebuild แล้วส่ง widget config ใหม่ให้ State นี้; react ต่อ props ที่เปลี่ยน (เช่น re-subscribe ถ้า `id` เปลี่ยน)
+- **`dispose`** — cleanup: dispose controller, cancel subscription ลืมตรงนี้คือ memory leak คลาสสิกของ Flutter
+
+## scope ของ rebuild
+
+`setState` mark element ของ State *นี้* เป็น dirty ดังนั้น `build` รันใหม่และผลิต subtree ใหม่ — แต่ Flutter ฉลาดเรื่องนี้ มันจะ diff widget subtree ใหม่กับ element tree เดิมและแตะเฉพาะส่วนที่เปลี่ยน ถึงอย่างนั้น `build` method ทั้งตัวก็รันอยู่ดี ดังนั้น `setState` ที่อยู่สูงใน tree แล้ว rebuild subtree ใหญ่ ๆ คือปัญหา performance จริง
+
+บทเรียนเชิงปฏิบัติ: **ดัน `setState` ให้ต่ำใน tree มากที่สุด** แยกส่วนที่เปลี่ยนออกไปเป็น `StatefulWidget` เล็ก ๆ ของตัวเอง เพื่อให้เฉพาะ subtree เล็ก ๆ นั้น rebuild ไม่ใช่ทั้งหน้า (โมดูล performance เจาะลึกเรื่องนี้)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`setState` mutate field ของคุณและ mark element เป็น **dirty** โดย schedule `build` ใน frame ถัดไป — mutate ข้างใน callback เสมอ lifecycle มีหน้าที่ชัดเจน: `initState` สำหรับ setup ครั้งเดียว, `didChangeDependencies` สำหรับอ่าน inherited data, `build` (pure, เร็ว, เรียกบ่อย), `dispose` สำหรับ cleanup เก็บ `setState` ให้ต่ำใน tree มากที่สุดเพื่อให้ subtree เล็กที่สุด rebuild
+</Callout>
+
+export const quizSetState = [
+  {
+    q: 'setState ทำอะไรกันแน่?',
+    options: [
+      'repaint หน้าจอทันที',
+      'รัน callback และ mark element เป็น dirty โดย schedule rebuild ใน frame ถัดไป',
+      'สร้าง State object ใหม่',
+      'dispose widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'lifecycle hook ไหนคือที่ถูกต้องสำหรับ dispose controller และ cancel subscription?',
+    options: [
+      'initState',
+      'build',
+      'dispose',
+      'didChangeDependencies',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'ทำไม build method ต้อง pure และไม่มี side effect?',
+    options: [
+      'มันรันครั้งเดียว',
+      'มันถูกเรียกทุกครั้งที่ rebuild — side effect ตรงนั้นจะยิงซ้ำ ๆ และคาดเดาไม่ได้',
+      'Dart ห้าม side effect',
+      'มันรันบน thread แยก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'จะจำกัดปริมาณ rebuild เมื่อ state เปลี่ยนได้อย่างไร?',
+    options: [
+      'เรียก setState สองครั้ง',
+      'ดัน setState ให้ต่ำใน tree มากที่สุด โดยแยกส่วนที่เปลี่ยนไว้ใน widget เล็ก ๆ ของตัวเอง',
+      'วาง state ทั้งหมดไว้ที่ root ของ app',
+      'เลี่ยง StatefulWidget ทั้งหมด',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/setstate-and-lifecycle" questions={quizSetState} />
+
+<ProgressTracker client:visible id="state-management/setstate-and-lifecycle" />

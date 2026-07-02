@@ -1,0 +1,79 @@
+---
+title: 'Async, Performance & Rendering'
+description: 'frame budget ที่คุณต้องปกป้อง และสองวินัยที่ปกป้องมัน — ป้อนข้อมูล async เข้า UI ให้สะอาด และกัน rebuild กับงานหนักออกจาก critical path'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## คุณมี frame budget
+
+Flutter เล็งไว้ที่ 60fps — และ 120fps บนจอที่รองรับ ที่ 60fps หนึ่ง frame คือ **~16ms** ที่ 120fps คือ **~8ms** ทุกอย่างที่แอปทำในหนึ่ง frame — build widget, layout, paint — ต้องอยู่ในกรอบเวลานั้น ถ้าเกิน frame จะถูก drop: user เห็น jank
+
+โมดูลนี้ว่าด้วยการปกป้อง budget นั้น มีสองวินัยที่ทำงานเกือบทั้งหมด:
+
+<Mermaid title="สองทางที่ทำ frame budget พัง และวิธีเลี่ยงแต่ละทาง" code={budgetDiagram} />
+
+export const budgetDiagram = `flowchart TB
+  budget["Frame budget\n16ms ที่ 60fps"] --> a["Async: ป้อนข้อมูล\nโดยไม่ block thread"]
+  budget --> b["Rebuild และงาน CPU:\nกันออกจาก critical path"]
+  a --> ok1["FutureBuilder, StreamBuilder"]
+  b --> ok2["const, narrow setState,\nRepaintBoundary, isolate"]`;
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Futures & Streams in UI | FutureBuilder และ StreamBuilder และกับดัก create-in-build |
+| Rebuilds & performance | const, scope ของ setState, RepaintBoundary และ DevTools |
+| Animations | implicit vs explicit animation และเลือกอันไหนเมื่อไร |
+| Isolates & compute | ย้ายงาน CPU หนักออกจาก UI isolate |
+
+## เส้นเรื่องหลัก
+
+งาน async ต้องไม่ block UI thread เดี่ยว และ rebuild ต้องไม่ทำมากเกินที่จำเป็น ทำสองอย่างนี้ให้ถูก Flutter จะลื่นเกือบฟรี ทำผิด ต่อให้ widget ฉลาดแค่ไหนก็ช่วยไม่ได้
+
+<Callout title="การปรับมุมมอง">
+Performance ใน Flutter แทบไม่เกี่ยวกับการทำอะไรพิสดาร — มันคือการ *ไม่* ทำสิ่งที่สิ้นเปลืองซ้ำทุก frame `Future` ที่ถูกสร้างใหม่ใน `build`, `setState` ที่ rebuild ครึ่งจอ, `const` ที่ขาดไป, หรือ parse หนัก ๆ บน UI isolate: แต่ละอย่างค่อย ๆ กิน 16ms ของคุณ ทั้งโมดูลคือการตามล่า leak เหล่านี้
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ที่ 60fps หนึ่ง frame มีเวลาเท่าไร?',
+    options: [
+      'ประมาณ 100ms',
+      'ประมาณ 16ms',
+      'ประมาณ 1 วินาที',
+      'ไม่มี limit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'สองวินัยที่ปกป้อง frame budget คืออะไร?',
+    options: [
+      'ใช้ widget และ state มากขึ้น',
+      'ป้อนข้อมูล async โดยไม่ block และกัน rebuild/งาน CPU ออกจาก critical path',
+      'ปิด animation และรูปภาพ',
+      'เพิ่ม isolate ให้ทุก widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรมักทำให้เกิด jank ในแอป Flutter?',
+    options: [
+      'ทำอะไรพิสดารครั้งเดียว',
+      'งานสิ้นเปลืองที่ทำซ้ำทุก frame — future ที่สร้างใหม่, rebuild กว้างเกิน, const ที่ขาด, งานหนักบน UI isolate',
+      'widget น้อยเกินไป',
+      'ใช้ named parameter',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="async-and-performance/index" />

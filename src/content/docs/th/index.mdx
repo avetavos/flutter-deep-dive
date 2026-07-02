@@ -1,0 +1,60 @@
+---
+title: Flutter Deep Dive
+description: เชี่ยวชาญ Flutter ตั้งแต่พื้นฐาน — ภาษา Dart, widget tree และสถาปัตยกรรม three-tree, layout algorithm แบบ constraints, render pipeline, state management ตั้งแต่ setState ถึง Riverpod และ BLoC, navigation, animation, isolate และการ ship ขึ้น production
+template: splash
+hero:
+  tagline: คอร์สแบบ standalone ระดับ intermediate→advanced ว่าด้วย Flutter และ Dart ตั้งแต่ null safety และ async Dart ไปจนถึง widget/element/render tree, layout algorithm แบบ constraints, InheritedWidget และ state management สมัยใหม่, navigation, performance และ release build — ทุกหัวข้อสอนผ่าน code ที่ annotate และ widget-tree diagram
+  actions:
+    - text: เริ่มที่นี่
+      link: /flutter/th/dart-foundations/
+      icon: right-arrow
+      variant: primary
+    - text: ข้ามไปที่ Widgets
+      link: /flutter/th/widgets/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## สิ่งที่คุณจะได้เรียน
+
+<CardGrid>
+  <Card title="Dart Foundations" icon="seti:dart">
+    ภาษา Dart ที่ Flutter dev ต้องรู้ — null safety, class & mixin และ async ด้วย Future/Stream [เริ่ม →](/flutter/th/dart-foundations/)
+  </Card>
+  <Card title="Everything Is a Widget" icon="rocket">
+    แนวคิด widget, stateless vs stateful, build & BuildContext และ three tree [ประกอบ →](/flutter/th/widgets/)
+  </Card>
+  <Card title="Layout & Rendering" icon="puzzle">
+    constraints ลงล่าง size ขึ้นบน — layout algorithm, core widget, sliver และ render pipeline [จัด layout →](/flutter/th/layout-and-rendering/)
+  </Card>
+  <Card title="State Management" icon="seti:config">
+    setState & lifecycle, InheritedWidget, Provider/Riverpod, BLoC และ state ควรอยู่ที่ไหน [จัดการ →](/flutter/th/state-management/)
+  </Card>
+  <Card title="Navigation & App Structure" icon="seti:plan">
+    Navigator, declarative routing & deep link, app scaffolding และ platform channel [navigate →](/flutter/th/navigation/)
+  </Card>
+  <Card title="Async, Performance & Rendering" icon="random">
+    FutureBuilder/StreamBuilder, ลด rebuild, animation และ isolate สำหรับงานหนัก [optimize →](/flutter/th/async-and-performance/)
+  </Card>
+  <Card title="Tooling, Testing & Production" icon="approve-check">
+    toolchain, unit/widget/golden test, build mode & flavor และเรื่อง production [ship →](/flutter/th/tooling-and-production/)
+  </Card>
+</CardGrid>
+
+## คอร์สนี้ทำงานยังไง
+
+<CardGrid>
+  <Card title="เข้าใจ model ก่อน แล้วค่อยดู code" icon="rocket">
+    ทุกหัวข้อเริ่มจาก model — three tree, constraints algorithm, rebuild propagate อย่างไร — พอเข้าใจแล้ว behavior ของ Flutter จะเลิกดูเหมือนเวทมนตร์และกลายเป็นเรื่องที่สมเหตุสมผล
+  </Card>
+  <Card title="Dart ก่อน แล้วค่อย Flutter" icon="seti:dart">
+    Flutter คือ Dart คอร์สเริ่มจากความลึกของ Dart ที่ Flutter dev ต้องใช้จริง — null safety, async, mixin — ก่อนจะแตะ widget ตัวแรก
+  </Card>
+  <Card title="เน้นการออกแบบ ไม่ใช่แค่ syntax" icon="approve-check">
+    ไม่ใช่แค่ "นี่คือ ListView" แต่เป็น "constraints และ sliver ทำให้ scroll ทำงานอย่างไร และทำไม list ถึง jank" คุณจะ reason เรื่อง layout และ performance ได้อย่างมั่นใจ
+  </Card>
+  <Card title="ไดอะแกรมที่อธิบายได้" icon="puzzle">
+    widget/element/render tree, constraint flow, render pipeline และ state propagation เป็นไดอะแกรม Mermaid ที่รองรับธีม สองภาษา (English / ไทย) พร้อมบันทึกความคืบหน้า quiz
+  </Card>
+</CardGrid>

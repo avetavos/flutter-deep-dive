@@ -1,0 +1,126 @@
+---
+title: 'Futures & Streams in the UI'
+description: 'เปลี่ยนข้อมูล async เป็น widget ด้วย FutureBuilder และ StreamBuilder, อ่าน AsyncSnapshot, จัดการ state loading และ error และกับดัก create-in-build'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## สะพานจาก async ไปเป็น widget
+
+คุณ `await` ใน `build` ไม่ได้ — `build` ต้องเป็น synchronous และอาจรันหลายครั้ง Flutter เลยให้ widget สองตัวที่ *subscribe* แหล่งข้อมูล async แล้ว rebuild เมื่อมันปล่อยค่า: `FutureBuilder` สำหรับ `Future` แบบ one-shot และ `StreamBuilder` สำหรับ `Stream` ที่มีหลายค่า
+
+ทั้งคู่ส่ง `AsyncSnapshot` มาให้ builder ของคุณ ซึ่งบอก state ปัจจุบันของแหล่ง async: ยังรออยู่, มีข้อมูลแล้ว, หรือ error?
+
+## FutureBuilder
+
+```dart
+FutureBuilder<User>(
+  future: _userFuture,               // Future ที่สร้าง OUTSIDE build (ดูกับดัก)
+  builder: (context, snapshot) {
+    if (snapshot.connectionState == ConnectionState.waiting) {
+      return const CircularProgressIndicator();     // loading
+    }
+    if (snapshot.hasError) {
+      return Text('Failed: ${snapshot.error}');      // error
+    }
+    final user = snapshot.data!;                     // ข้อมูลพร้อมแล้ว
+    return Text(user.name);
+  },
+)
+```
+
+อ่าน snapshot ตามลำดับตายตัว: **waiting → error → data** การ handle ครบทั้งสาม (บวก empty state เมื่อจำเป็น) คือสิ่งที่แยกหน้าจอที่ทนทานออกจากหน้าที่แว้บ null error ชั่วขณะ
+
+## StreamBuilder
+
+`StreamBuilder` มีรูปแบบเดียวกันสำหรับ `Stream` — มัน rebuild ทุกค่าที่ปล่อยออกมา จึงเหมาะกับข้อมูล live (chat feed, location stream, `Bloc` state)
+
+```dart
+StreamBuilder<int>(
+  stream: _tickerStream,
+  initialData: 0,
+  builder: (context, snapshot) {
+    return Text('Count: ${snapshot.data}');   // rebuild ทุกค่าใหม่
+  },
+)
+```
+
+## กับดัก create-in-build
+
+นี่คือบั๊ก `FutureBuilder` ที่พบบ่อยที่สุด: สร้าง future *ข้างใน* `build`
+
+```dart
+// ❌ ผิด — future ตัวใหม่ถูกสร้างทุก rebuild
+//    request จึงยิงซ้ำ และ loading spinner กระพริบไม่จบ
+Widget build(BuildContext context) {
+  return FutureBuilder(
+    future: fetchUser(42),   // <-- สร้างใหม่ทุก build
+    builder: ...,
+  );
+}
+
+// ✅ ถูก — สร้างครั้งเดียวแล้วเก็บไว้ (ใน initState สำหรับ StatefulWidget)
+late final Future<User> _userFuture;
+@override
+void initState() {
+  super.initState();
+  _userFuture = fetchUser(42);   // สร้างครั้งเดียว
+}
+```
+
+เพราะ `build` รันได้หลายสาเหตุ (parent rebuild, เปลี่ยน theme, keyboard เด้งขึ้น) future ที่สร้างตรงนั้นจึงถูกสร้างใหม่ทุกครั้ง — trigger งานซ้ำและ reset snapshot กลับเป็น `waiting` สร้างมันครั้งเดียวใน `initState` หรือใน state-management layer แล้วส่ง future *ตัวเดิม* เข้าไป
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`FutureBuilder` และ `StreamBuilder` subscribe แหล่ง async แล้ว rebuild UI จาก `AsyncSnapshot` — จง handle **waiting, error, แล้ว data** ทุกครั้ง บาปร้ายแรงคือสร้าง `Future` ข้างใน `build`: มันถูกสร้างใหม่ทุก rebuild ยิงงานซ้ำและทำ spinner กระพริบ สร้างครั้งเดียว (ใน `initState` หรือ state layer) แล้วส่ง instance เดิมเข้าไป
+</Callout>
+
+export const quizFS = [
+  {
+    q: 'ทำไมถึง await ใน build ตรง ๆ ไม่ได้?',
+    options: [
+      'Dart ไม่รองรับ await',
+      'build ต้องเป็น synchronous และอาจรันหลายครั้ง จึง subscribe ผ่าน FutureBuilder/StreamBuilder แทน',
+      'มันจะเร็วเกินไป',
+      'build รันแค่ครั้งเดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'AsyncSnapshot บอกอะไรคุณ?',
+    options: [
+      'ขนาดของ widget',
+      'state ปัจจุบันของแหล่ง async — waiting, มี data, หรือ error',
+      'frame rate',
+      'route stack',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรจะผิดพลาดเมื่อสร้าง Future ข้างใน build?',
+    options: [
+      'ไม่มีอะไร เป็นวิธีที่แนะนำ',
+      'future ตัวใหม่ถูกสร้างทุก rebuild ยิงงานซ้ำและ reset snapshot กลับเป็น waiting',
+      'แอปจะ compile ไม่ผ่าน',
+      'future จะรันบน thread ที่สอง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Future แบบ one-shot สำหรับ FutureBuilder ควรถูกสร้างที่ไหน?',
+    options: [
+      'ข้างใน builder callback',
+      'ครั้งเดียวใน initState (หรือ state-management layer) แล้วส่ง instance เดิมเข้าไป',
+      'ใน constructor argument ของ widget ทุก build',
+      'ที่ไหนก็ได้ ไม่สำคัญ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/futures-streams-in-ui" questions={quizFS} />
+
+<ProgressTracker client:visible id="async-and-performance/futures-streams-in-ui" />

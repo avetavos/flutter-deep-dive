@@ -1,0 +1,106 @@
+---
+title: 'Keys'
+description: 'เมื่อไร Flutter ต้องใช้ key เพื่อรักษา state ให้ถูกต้อง — ปัญหา reconciliation, ValueKey/ObjectKey/UniqueKey/GlobalKey และบั๊ก reorder คลาสสิก'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ปัญหาที่ key แก้
+
+จำ reconciliation ได้ไหม: เมื่อ rebuild Flutter match widget ใหม่แต่ละตัวกับ element ที่มีอยู่ **ด้วยตำแหน่งและ type** ปกติแล้วนั่นถูกต้องพอดี แต่ใน **list ของ stateful widget ที่ type เดียวกัน** การ match ด้วยตำแหน่งจะพังเมื่อ item ย้ายที่
+
+ลองนึกถึง `TodoItem` สองตัว (แต่ละตัว stateful แต่ละตัวถือ เช่น state ของ checkbox) สลับลำดับกันใน list Flutter เห็นว่า "ตำแหน่ง 0 ยังเป็น `TodoItem`, ตำแหน่ง 1 ยังเป็น `TodoItem`" — type และตำแหน่งตรงกัน — มันจึงเก็บแต่ละ element (และ state ของมัน) ไว้ที่เดิม *ข้อมูล* ย้ายแต่ *state* ไม่ย้าย ผลคือ คุณ reorder list แต่ checkbox ยังติดอยู่ผิดแถว
+
+<Mermaid title="ถ้าไม่มี key, state ถูก match ด้วยตำแหน่งและติดอยู่ที่เดิม" code={reorderDiagram} />
+
+export const reorderDiagram = `flowchart LR
+  subgraph before["ก่อน swap"]
+    a0["item A (checked)"] --- a1["item B"]
+  end
+  subgraph after["หลัง swap, ไม่มี key"]
+    b0["item B\nแต่ยังโชว์ checked"] --- b1["item A\nตอนนี้ unchecked"]
+  end
+  before -->|state ติดกับตำแหน่ง| after`;
+
+## key ให้ identity แก่ element
+
+**key** บอก Flutter ว่า "identity ของ element นี้คือ X ไม่ใช่แค่ตำแหน่งของมัน" ตอนนี้ เมื่อ match widget ใหม่กับ element Flutter จะ match ด้วย *key* — state จึงตาม widget ไปแม้มันจะย้ายที่
+
+```dart
+// ให้แต่ละ item มี key ที่เสถียรจากข้อมูลของมัน:
+return ListView(
+  children: [
+    for (final todo in todos)
+      TodoItem(key: ValueKey(todo.id), todo: todo),
+  ],
+);
+```
+
+ด้วย `ValueKey(todo.id)` การ swap list จะ reorder element ให้ตรงกัน — state ของ `TodoItem` แต่ละตัวเดินทางไปกับ `id` ของมัน หลักคิดคือ: **คุณต้องใช้ key เมื่อมี list ของ stateful widget ที่ลำดับหรือสมาชิกเปลี่ยนได้** list ที่เป็น stateless แทบไม่ต้องใช้
+
+## key สี่แบบ
+
+| Key | identity อ้างอิงจาก | ใช้เมื่อ |
+|-----|-------------------|----------|
+| `ValueKey(v)` | ค่าหนึ่ง (id, string) | item ส่วนใหญ่ใน list — ค่าข้อมูลที่เสถียรระบุแต่ละตัว |
+| `ObjectKey(o)` | object identity | สิ่งที่ระบุตัวตนเป็น object ไม่ใช่ค่าธรรมดา |
+| `UniqueKey()` | unique เสมอ | อยากบังคับให้ได้ element *ใหม่* (ทิ้ง state เดิม) ทุก build |
+| `GlobalKey()` | unique ทั้งแอป | ต้องเข้าถึง state ของ widget หรือ context ของมันจากที่อื่น (ใช้เท่าที่จำเป็น) |
+
+`GlobalKey` เป็นตัวหนัก: มันระบุ widget อย่าง unique ทั้งแอปและให้คุณเข้าถึง `State` ของมันได้ (เช่น `formKey.currentState!.validate()`) มันทรงพลังแต่แพงและ misuse ง่าย — เลือก local key ก่อน เว้นแต่คุณต้องการ cross-tree access จริง ๆ
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Flutter match widget กับ element ด้วยตำแหน่งและ type ซึ่งทำ state หายเมื่อ **stateful widget ที่ type เดียวกัน reorder** ใน list — บั๊กคลาสสิก "checkbox ติดผิดแถว" **key** ให้ element มี identity ที่เสถียร state จึงตาม widget ไป: ใช้ `ValueKey(id)` สำหรับ item ใน list, `UniqueKey()` เพื่อบังคับ element ใหม่ และ `GlobalKey` (เท่าที่จำเป็น) เมื่อต้องเข้าถึง state ของ widget จากที่อื่น
+</Callout>
+
+export const quizKeys = [
+  {
+    q: 'คุณต้องใช้ key มากที่สุดเมื่อไร?',
+    options: [
+      'บนทุก widget เสมอ',
+      'ใน list ของ stateful widget ที่ type เดียวกันซึ่งลำดับหรือสมาชิกเปลี่ยนได้',
+      'เฉพาะกับ StatelessWidget',
+      'ไม่เคย — Flutter จัดการให้อัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรผิดพลาดเมื่อ reorder stateful list item โดยไม่มี key?',
+    options: [
+      'แอป crash',
+      'state ถูก match ด้วยตำแหน่ง จึงติดอยู่แถวเดิมขณะที่ข้อมูลย้าย',
+      'state หายหมด',
+      'ไม่มีอะไร — ทำงานได้ปกติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'จะใช้ key แบบไหนให้แต่ละ item ใน list มี identity ที่เสถียรจาก id ของข้อมูล?',
+    options: [
+      'UniqueKey()',
+      'ValueKey(item.id)',
+      'GlobalKey()',
+      'ไม่ใช้ key',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรพิเศษ (และแพง) เกี่ยวกับ GlobalKey?',
+    options: [
+      'มัน unique เฉพาะภายใน list เดียว',
+      'มัน unique ทั้งแอปและให้เข้าถึง state/context ของ widget จากที่อื่น — ทรงพลังแต่ misuse ง่าย',
+      'มันบังคับ rebuild ทุกเฟรม',
+      'มันเป็น key แบบ default',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="widgets/keys" questions={quizKeys} />
+
+<ProgressTracker client:visible id="widgets/keys" />

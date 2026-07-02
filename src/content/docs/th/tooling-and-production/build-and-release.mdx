@@ -1,0 +1,108 @@
+---
+title: 'Build & Release'
+description: 'debug, profile และ release mode, JIT vs AOT compilation, tree-shaking, flavor สำหรับแต่ละ environment และ build output แต่ละ platform'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## build mode สามแบบ
+
+Flutter compile code เดียวกันสามแบบต่างกันขึ้นกับสิ่งที่คุณต้องการ:
+
+<Mermaid title="build mode สามแบบและ compilation ของมัน" code={modeDiagram} />
+
+export const modeDiagram = `flowchart LR
+  debug["debug\nJIT · hot reload · asserts on\n(slow, dev only)"]
+  profile["profile\nAOT · perf tools on\n(measure real speed)"]
+  release["release\nAOT · asserts off · optimized\n(ship this)"]`;
+
+- **Debug** — JIT-compiled, hot reload, assertion เปิด, service extension ใช้ได้ ช้าและใหญ่ สำหรับ develop เท่านั้น
+- **Profile** — AOT-compiled เหมือน release แต่ยังมี performance tooling ติดอยู่ นี่คือที่ที่คุณวัดความเร็วจริงและตามล่า jank (อย่า profile ใน debug — ตัวเลขไม่มีความหมาย)
+- **Release** — AOT-compiled, assertion ถูกตัด, debugging ปิด, tree-shaken และ optimize นี่คือสิ่งที่ user ได้รับ
+
+## JIT vs AOT
+
+การแยก debug/release จริง ๆ แล้วคือการแยก compilation:
+
+- **JIT** (Just-In-Time) ใช้ใน debug compile Dart ตอนที่มันรัน — ซึ่งเป็นสิ่งที่ทำให้ hot reload เป็นไปได้ (มัน swap code ใหม่เข้าไปได้ทันที)
+- **AOT** (Ahead-Of-Time) ใช้ใน profile และ release compile Dart เป็น native machine code ก่อนที่แอปจะ ship ผลลัพธ์คือ startup ที่เร็วและ performance ที่คาดเดาได้ แลกกับการไม่มี hot reload
+
+**Tree-shaking** เกิดใน AOT build: code ที่ไม่ถูกใช้ (และที่สำคัญ icon glyph ที่ไม่ถูก reference) ถูกตัดออกเพื่อให้ binary เล็ก
+
+## build แต่ละ platform
+
+```bash
+flutter build apk --release          # Android APK (direct install/testing)
+flutter build appbundle --release    # Android App Bundle (Play Store)
+flutter build ipa --release          # iOS archive (App Store)
+flutter build web --release          # web bundle
+```
+
+แต่ละ target สร้าง artifact คนละแบบจาก Dart source เดียวกัน — framework abstract platform ออกไป ส่วน build step ทำให้มันเป็นจริง
+
+## Flavors: แอปเดียว หลาย environment
+
+**Flavor** (Android) / **scheme** (iOS) ให้ codebase เดียวสร้าง build แบบ dev, staging และ production ด้วย config ต่างกัน — API endpoint, app ID, icon — โดยไม่ต้องแตก branch ของ code
+
+```bash
+flutter run --flavor dev --dart-define=API_URL=https://dev.api.example.com
+flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
+```
+
+`--dart-define` ส่ง compile-time constant ที่ code อ่านผ่าน `String.fromEnvironment` — วิธีที่สะอาดในการ inject ค่าแต่ละ environment โดยไม่ commit secret เข้า source
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Flutter build สามแบบ: **debug** (JIT, hot reload, dev เท่านั้น), **profile** (AOT + perf tools — ที่เดียวที่วัดความเร็วได้จริง) และ **release** (AOT, optimize, tree-shaken — ตัวที่ ship) hot reload มีได้เพราะ debug เป็น JIT; release ที่เร็วมีได้เพราะ release เป็น AOT ใช้ **flavor** + `--dart-define` เพื่อ build dev/staging/prod จาก codebase เดียว
+</Callout>
+
+export const quizBuild = [
+  {
+    q: 'ควรใช้ build mode ไหนในการวัด performance จริง?',
+    options: [
+      'Debug — มันมีเครื่องมือเยอะสุด',
+      'Profile — AOT-compiled เหมือน release แต่มี performance tooling ติดอยู่',
+      'Release — แต่แนบเครื่องมือไม่ได้',
+      'mode ไหนก็ให้ตัวเลขเดียวกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม hot reload ใช้ได้ใน debug แต่ไม่ใช่ release?',
+    options: [
+      'release เล็กกว่า',
+      'debug ใช้ JIT compilation (swap code ตอน runtime); release ใช้ AOT (compile ล่วงหน้า)',
+      'hot reload ถูกปิดด้วย flag',
+      'release ไม่มี widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'tree-shaking ทำอะไรใน release build?',
+    options: [
+      'เรียง widget ใหม่',
+      'ตัด code ที่ไม่ถูกใช้และ icon glyph ที่ไม่ถูก reference เพื่อให้ binary เล็ก',
+      'บีบอัดรูป',
+      'รัน test',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'flavor ใช้ทำอะไร?',
+    options: [
+      'ทำ theme ให้ UI',
+      'สร้าง build dev/staging/prod ด้วย config ต่างกันจาก codebase เดียว',
+      'เร่ง hot reload',
+      'เขียน test',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/build-and-release" questions={quizBuild} />
+
+<ProgressTracker client:visible id="tooling-and-production/build-and-release" />

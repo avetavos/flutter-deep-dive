@@ -1,0 +1,130 @@
+---
+title: 'Provider & Riverpod'
+description: 'The two most common shared-state approaches — Provider as ergonomic InheritedWidget, and Riverpod as compile-safe providers decoupled from the tree.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Provider: InheritedWidget with ergonomics
+
+Writing `InheritedWidget` by hand is boilerplate. **Provider** wraps that pattern with a clean API, and pairs it with `ChangeNotifier` — a simple class that holds state and calls `notifyListeners()` when it changes.
+
+```dart
+// 1. A model that notifies listeners when it changes.
+class CartModel extends ChangeNotifier {
+  final List<String> _items = [];
+  List<String> get items => List.unmodifiable(_items);
+
+  void add(String item) {
+    _items.add(item);
+    notifyListeners();   // tell listening widgets to rebuild
+  }
+}
+
+// 2. Provide it above the widgets that need it.
+ChangeNotifierProvider(
+  create: (_) => CartModel(),
+  child: const MyApp(),
+);
+
+// 3. Read it. watch() rebuilds on change; read() does not.
+final cart = context.watch<CartModel>();      // rebuilds when cart changes
+context.read<CartModel>().add('Book');         // one-off action, no rebuild
+```
+
+The `watch` vs `read` distinction is the whole game. `context.watch<T>()` subscribes — the widget rebuilds when the model notifies. `context.read<T>()` grabs it once without subscribing — use it in callbacks (like `onPressed`) where you want to *act*, not *listen*. Mixing them up is the most common Provider bug (either missing rebuilds or rebuilding too much).
+
+## Riverpod: providers without the tree
+
+**Riverpod** is a reimagining by the same author that fixes Provider's rough edges. Its key move: providers are **top-level objects, not tied to the widget tree**, which makes them compile-safe (you can't read a provider that isn't there) and easy to test and combine.
+
+```dart
+// A provider declared at top level — not in the widget tree.
+final counterProvider = StateNotifierProvider<Counter, int>((ref) => Counter());
+
+class Counter extends StateNotifier<int> {
+  Counter() : super(0);
+  void increment() => state++;   // reassigning `state` notifies listeners
+}
+
+// In a ConsumerWidget, `ref` reads providers:
+class CounterView extends ConsumerWidget {
+  const CounterView({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(counterProvider);          // rebuilds on change
+    return TextButton(
+      onPressed: () => ref.read(counterProvider.notifier).increment(),
+      child: Text('$count'),
+    );
+  }
+}
+```
+
+Notice the same `watch`/`read` split via `ref`. The difference from Provider is structural: no `BuildContext` lookup, no "provider not found" at runtime, and providers compose (one provider can `ref.watch` another).
+
+## Choosing between them
+
+<Mermaid title="Provider vs Riverpod at a glance" code={compareDiagram} />
+
+export const compareDiagram = `flowchart TB
+  prov["Provider\nInheritedWidget + ChangeNotifier\ntied to the tree, runtime lookup"] --> use1["great for smaller apps,\nteams already using it"]
+  rp["Riverpod\ntop-level providers\ncompile-safe, testable, composable"] --> use2["preferred for new apps,\ncomplex or testable state"]`;
+
+Both are excellent. Provider is simpler and ubiquitous; Riverpod is more robust for larger, testable apps and is where the ecosystem is heading. Either one is a fine default over hand-rolled `InheritedWidget` for real shared state.
+
+<Callout title="The one-line takeaway">
+**Provider** makes `InheritedWidget` + `ChangeNotifier` ergonomic — the core skill is `context.watch<T>()` (subscribe and rebuild) vs `context.read<T>()` (act without rebuilding). **Riverpod** decouples providers from the widget tree, making them compile-safe, testable, and composable via `ref.watch`/`ref.read`. Both beat hand-rolled InheritedWidget for shared state; Riverpod is the more robust default for new, larger apps.
+</Callout>
+
+export const quizProvider = [
+  {
+    q: 'What is the difference between context.watch and context.read in Provider?',
+    options: [
+      'They are identical',
+      'watch subscribes and rebuilds on change; read gets the value once without subscribing (use it in callbacks)',
+      'read rebuilds; watch does not',
+      'watch is only for Riverpod',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does calling notifyListeners() on a ChangeNotifier do?',
+    options: [
+      'Disposes the model',
+      'Tells widgets that are watching it to rebuild',
+      'Navigates to a new screen',
+      'Nothing at runtime',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is Riverpod\'s key structural difference from Provider?',
+    options: [
+      'It does not support state at all',
+      'Providers are top-level objects not tied to the widget tree, making them compile-safe and testable',
+      'It requires no build method',
+      'It runs on a separate isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is the most common Provider bug?',
+    options: [
+      'Forgetting to import Dart',
+      'Confusing watch and read — causing missed rebuilds or rebuilding too much',
+      'Using const constructors',
+      'Declaring too many widgets',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/provider-and-riverpod" questions={quizProvider} />
+
+<ProgressTracker client:visible id="state-management/provider-and-riverpod" />

@@ -1,0 +1,85 @@
+---
+title: 'State Management'
+description: 'คำถามเดียวที่ทุกวิธีตอบ — state อยู่ที่ไหนและใคร rebuild — ตั้งแต่ ephemeral setState ไปจนถึง shared app state ด้วย Provider, Riverpod และ BLoC'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## State management คือคำถามเดียว
+
+มี package สำหรับ state management เป็นสิบ และมีศึกใน blog อีกเป็นร้อย แต่ทั้งหมดตอบคำถามเดียวกันที่แบ่งเป็นสองส่วน:
+
+> **state ชิ้นนี้อยู่ที่ไหน และ widget ตัวไหน rebuild เมื่อมันเปลี่ยน?**
+
+อย่างอื่น — `setState`, `InheritedWidget`, Provider, Riverpod, BLoC — เป็นแค่กลไกคนละแบบที่ตอบคำถามนี้ พอมองแบบนี้แล้ว การเลือกระหว่างมันจะเลิกเป็นเรื่องพวกพ้องและกลายเป็นเรื่องของ scope
+
+## state สองแบบ
+
+การแบ่งที่มีประโยชน์ที่สุดไม่ใช่ "ใช้ package ไหน" แต่เป็น **state เข้าถึงได้ไกลแค่ไหน**:
+
+<Mermaid title="Ephemeral state vs app state" code={splitDiagram} />
+
+export const splitDiagram = `flowchart TB
+  eph["Ephemeral state\n(widget เดียว: checkbox,\ntext field, animation)"] --> local["setState\nอยู่ใน State object เดียว"]
+  app["App state\n(shared: auth, cart,\nsettings, cached data)"] --> shared["InheritedWidget / Provider /\nRiverpod / BLoC"]`;
+
+- **Ephemeral (local) state** เป็นของ widget เดียวและไม่มีใครอื่นสน — หน้าปัจจุบันของ `PageView`, checkbox ติ๊กหรือยัง, ค่า animation `setState` คือคำตอบที่ถูกและครบ การหยิบ global store มาใช้ตรงนี้คือ over-engineering
+- **App (shared) state** ถูกใช้โดย widget หลายตัวทั่ว tree — user ที่ login อยู่, shopping cart, theme, data ที่ fetch จาก API นี่คือที่ที่วิธีเฉพาะทางคุ้มค่า
+
+bug จริงและ over-engineering ส่วนใหญ่มาจากการเอา state ไปวางผิดหมวด
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียนรู้ |
+|--------|-------------------|
+| setState & lifecycle | rebuild เกิดขึ้นจริงอย่างไร และ State lifecycle |
+| InheritedWidget | primitive ที่ทำให้ propagate state ลง tree ได้อย่างมีประสิทธิภาพ |
+| Provider & Riverpod | วิธี shared-state ที่ ergonomic และใช้กันแพร่หลาย |
+| BLoC & patterns | unidirectional data flow สำหรับ app ที่ซับซ้อน |
+| Choosing an approach | decision guide และการ layer app |
+
+<Callout title="การเปลี่ยนวิธีคิด">
+อย่าเริ่มด้วยคำถาม "ควรใช้ state management library ตัวไหน?" ให้เริ่มด้วย "state นี้เป็น ephemeral หรือ shared?" ephemeral state ไม่ต้องการอะไรมากกว่า `setState` มีแค่ shared state เท่านั้นที่ต้องการกลไกในการเข้าถึงข้าม tree — แล้วการเลือกก็เป็นเรื่องของ ergonomics และ scale ไม่ใช่ความถูกต้อง
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ทุกวิธีของ state management ตอบคำถามเดียวกันข้อไหน?',
+    options: [
+      'package ไหนเร็วที่สุด',
+      'state อยู่ที่ไหน และ widget ตัวไหน rebuild เมื่อมันเปลี่ยน',
+      'จะเลี่ยงการใช้ widget อย่างไร',
+      'จะ compile ให้เร็วขึ้นอย่างไร',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ephemeral (local) state คืออะไร?',
+    options: [
+      'state ที่ share ทั้ง app',
+      'state ที่เป็นของ widget เดียวและไม่มีใครอื่นต้องใช้',
+      'state ที่เก็บบน server',
+      'state ที่ไม่เคยเปลี่ยน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'สำหรับ checkbox ง่าย ๆ ที่มี widget เดียวสน เครื่องมือที่ถูกต้องคือ?',
+    options: [
+      'global Riverpod provider',
+      'setState — เพราะมันคือ ephemeral state',
+      'BLoC พร้อม event',
+      'InheritedWidget ที่ root ของ app',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="state-management/index" />

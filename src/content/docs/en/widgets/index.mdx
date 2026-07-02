@@ -1,0 +1,79 @@
+---
+title: 'Everything Is a Widget'
+description: 'The idea that defines Flutter — the UI is a tree of immutable widget descriptions, rebuilt cheaply, backed by longer-lived elements and render objects.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The one idea
+
+Flutter has a slogan: **everything is a widget**. Layout, padding, a button, the whole app — all widgets. But the deeper truth is what a widget *is*: an **immutable description** of a piece of UI at one moment. It is not the thing on screen; it is a recipe for it.
+
+Because widgets are immutable and cheap, Flutter's answer to "the UI changed" is radical: **throw the widgets away and build new ones**. You never mutate a widget. You describe the new state, Flutter rebuilds the description, and it efficiently updates only what actually differs.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Widgets and the tree | Immutable config, composition, and the three trees (widget / element / render) |
+| Stateless vs stateful | The two base widgets, and why State is a separate object |
+| build and BuildContext | The build method's contract, and what BuildContext really is |
+| Keys | When Flutter needs a key to preserve state correctly |
+
+## Cheap descriptions, expensive reality
+
+If Flutter rebuilt everything on screen every frame, it would be unusably slow. The trick is that widgets are only the cheap top layer:
+
+<Mermaid title="Three layers: cheap widgets, persistent elements, real rendering" code={layersDiagram} />
+
+export const layersDiagram = `flowchart TB
+  w["Widget\nimmutable description\n(rebuilt freely)"] --> e["Element\nliving instance\n(persists, holds state)"]
+  e --> r["RenderObject\nlayout and paint\n(the expensive part)"]`;
+
+Rebuilding widgets is cheap. The **element** and **render** layers underneath persist and are only updated where the new widget differs from the old. That split — disposable descriptions on top of durable machinery — is the whole performance story, and the next lesson makes it concrete.
+
+<Callout title="The mental shift">
+Stop thinking of a widget as "the button on screen." A widget is an immutable *description* you rebuild constantly; the actual on-screen object lives one layer down and is reused. Once that clicks, "why did my whole build method run again?" stops being scary — running build is supposed to be cheap.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is a widget, most precisely?',
+    options: [
+      'The actual pixels on screen',
+      'An immutable description of a piece of UI at one moment',
+      'A mutable object you update in place',
+      'A separate thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does Flutter respond to a state change?',
+    options: [
+      'It mutates the existing widgets in place',
+      'It rebuilds new widget descriptions and updates only what differs underneath',
+      'It reloads the whole app',
+      'It swaps to a background thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is rebuilding widgets cheap?',
+    options: [
+      'Widgets are the lightweight top layer; the expensive element/render layers persist and update only where needed',
+      'Flutter caches the entire screen as an image',
+      'Rebuilds only happen once per app',
+      'Widgets run on the GPU',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="widgets/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="widgets/index" />

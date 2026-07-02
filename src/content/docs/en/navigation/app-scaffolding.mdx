@@ -1,0 +1,136 @@
+---
+title: 'App Scaffolding'
+description: 'MaterialApp and Scaffold, ThemeData and color schemes for light and dark, and responsive/adaptive layout with LayoutBuilder and MediaQuery.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## MaterialApp at the root
+
+`MaterialApp` is the widget you wrap your whole app in. It provides the things every screen needs: the theme, the routing config, localization, and the `Navigator`/`Overlay` machinery. There is a `CupertinoApp` sibling for an iOS-styled app, and `WidgetsApp` if you want neither design language.
+
+```dart
+void main() => runApp(const MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue)),
+      darkTheme: ThemeData.dark(),
+      themeMode: ThemeMode.system,   // follow the OS setting
+      home: const HomeScreen(),
+    );
+  }
+}
+```
+
+## Scaffold: the standard screen frame
+
+Inside each route, a `Scaffold` gives you the conventional Material layout slots — an app bar, a body, a floating action button, a bottom navigation bar, and a drawer. It also handles overlaps like the on-screen keyboard for you.
+
+```dart
+Scaffold(
+  appBar: AppBar(title: const Text('Home')),
+  body: const CenteredContent(),
+  floatingActionButton: FloatingActionButton(onPressed: () {}, child: const Icon(Icons.add)),
+  bottomNavigationBar: const MyNavBar(),
+  drawer: const MyDrawer(),
+);
+```
+
+## Theming, read from context
+
+A theme is defined once on `MaterialApp` and read anywhere below with `Theme.of(context)`. Modern Material 3 apps drive their whole palette from a single seed color via `ColorScheme.fromSeed`, so light and dark stay consistent.
+
+```dart
+// Read theme values instead of hardcoding colors:
+final scheme = Theme.of(context).colorScheme;
+Container(color: scheme.primary);
+Text('Title', style: Theme.of(context).textTheme.titleLarge);
+```
+
+Reading from the theme (rather than hardcoding a `Color`) is what makes dark mode and rebranding a one-line change.
+
+## Responsive and adaptive layout
+
+The same app runs on a phone, a foldable, a tablet, and the web, so a screen must adapt to the space it is given.
+
+- **`MediaQuery.of(context).size`** gives the screen dimensions — useful for global breakpoints.
+- **`LayoutBuilder`** gives the constraints of the *specific slot* a widget occupies — better for local decisions, because it reacts to the actual available space, not the whole screen.
+
+```dart
+LayoutBuilder(
+  builder: (context, constraints) {
+    // Switch layout based on available width at THIS position.
+    if (constraints.maxWidth > 600) {
+      return const TwoPaneLayout();   // tablet / desktop
+    }
+    return const SinglePaneLayout();  // phone
+  },
+);
+```
+
+<Mermaid title="Adapt layout to the space you are given" code={respDiagram} />
+
+export const respDiagram = `flowchart LR
+  lb["LayoutBuilder\n(constraints of this slot)"] --> check{"maxWidth over 600?"}
+  check -->|yes| two["two-pane layout"]
+  check -->|no| one["single-pane layout"]`;
+
+<Callout title="The one-line takeaway">
+Wrap the app in `MaterialApp` for theme, routing, and navigation; frame each screen with a `Scaffold` for the standard app-bar/body/nav slots. Define the theme once (a Material 3 seed color drives light and dark) and read it with `Theme.of(context)` instead of hardcoding colors. For responsive UI, use `MediaQuery` for screen-level breakpoints and `LayoutBuilder` to adapt to the space a widget actually gets.
+</Callout>
+
+export const quizScaffold = [
+  {
+    q: 'What does MaterialApp provide to the whole app?',
+    options: [
+      'Only the app icon',
+      'Theme, routing config, localization, and the Navigator/Overlay machinery',
+      'The database',
+      'Native platform code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a Scaffold?',
+    options: [
+      'A build tool',
+      'The standard Material screen frame with slots for app bar, body, FAB, bottom nav, and drawer',
+      'A state management library',
+      'A routing package',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why read colors from `Theme.of(context)` instead of hardcoding them?',
+    options: [
+      'It is faster at runtime',
+      'It makes dark mode and rebranding a one-line change instead of edits everywhere',
+      'Hardcoded colors are illegal in Dart',
+      'It reduces app size',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is LayoutBuilder preferable to MediaQuery for layout decisions?',
+    options: [
+      'Never — they are identical',
+      'When you want to react to the constraints of the specific slot a widget occupies, not the whole screen',
+      'Only on the web',
+      'Only for text',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/app-scaffolding" questions={quizScaffold} />
+
+<ProgressTracker client:visible id="navigation/app-scaffolding" />

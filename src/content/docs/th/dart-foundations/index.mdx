@@ -1,0 +1,82 @@
+---
+title: 'Dart Foundations'
+description: 'ทำไมคอร์ส Flutter ถึงเริ่มที่ Dart — feature ของภาษาที่กำหนดทุกอย่างที่คุณเขียนใน Flutter ตั้งแต่ null safety, class & mixin ไปจนถึง async'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Flutter คือ Dart
+
+ก่อนจะแตะ widget ตัวแรก เราเริ่มที่ภาษา เพราะ **Flutter ทุกบรรทัดที่คุณเขียนคือ Dart** รูปทรงของ framework — widget ที่ immutable, `const` constructor, `async`/`await` ใน build logic, mixin อย่าง `SingleTickerProviderStateMixin` — ล้วนเป็นผลโดยตรงจาก feature ของ Dart พอเข้าใจภาษาดีแล้ว Flutter ก็เลิกเป็นกองคาถาวิเศษ
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียนรู้ |
+|--------|-------------------|
+| Dart language tour | type, variable, function, collection — พื้นฐานแบบเร็ว ๆ |
+| Null safety | sound null safety, operator ต่าง ๆ และ flow analysis |
+| Classes & mixins | constructor (named/factory/const), mixin, extension, enum |
+| Async in Dart | Future, async/await, Stream และ single-threaded event loop |
+
+## ทำไมต้องสี่หัวข้อนี้
+
+สี่หัวข้อนี้ไม่ใช่ language tour แบบสุ่ม ๆ — แต่ละอันโผล่มาตลอดใน code ของ Flutter:
+
+<Mermaid title="feature แต่ละตัวของ Dart ขับเคลื่อน Flutter อย่างไร" code={mapDiagram} />
+
+export const mapDiagram = `flowchart LR
+  ns["Null safety"] --> w["widget props ที่ปลอดภัย,\noptional params"]
+  cc["const constructors"] --> perf["rebuild widget ราคาถูก"]
+  mx["mixins"] --> st["State mixins\n(ticker, observer)"]
+  as["async / Stream"] --> ui["FutureBuilder,\nStreamBuilder"]`;
+
+- **Null safety** กำหนดว่าคุณ model widget property และข้อมูลที่เป็น optional อย่างไร
+- **`const` constructor** คือ lever ที่ใหญ่ที่สุดของ performance ใน Flutter — widget ที่เป็น `const` จะถูกข้ามตอน rebuild
+- **Mixin** คือวิธีที่ Flutter เพิ่มความสามารถให้ `State` class ของคุณ
+- **Async และ Stream** คือวิธีที่ UI คุยกับ network, database และเวลา
+
+<Callout title="mental shift">
+มาจาก framework อื่นคุณอาจอยากกระโดดไป widget เลย อย่าเพิ่ง ใช้เวลาสิบนาทีกับ null safety และ `const` constructor ของ Dart จะช่วยประหยัดเวลาสับสนหลายชั่วโมงทีหลัง — "ทำไมมันไม่ rebuild?", "ทำไมค่านี้ null?", "ทำไม list ถึง jank?" เกือบทั้งหมดคือคำถามเรื่อง Dart ที่ใส่ชุด Flutter มา
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'ทำไมคอร์ส Flutter ถึงเริ่มที่ Dart?',
+    options: [
+      'Dart เป็น add-on แยกที่ไม่จำเป็น',
+      'Flutter ทุกบรรทัดคือ Dart — รูปทรงของ framework มาจากภาษา',
+      'คุณต้อง compile Dart เป็น JavaScript ก่อน',
+      'Flutter รองรับ Dart แค่ใน test',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'feature ใดของ Dart คือ lever ที่ใหญ่ที่สุดของ performance การ render ใน Flutter?',
+    options: [
+      'String interpolation',
+      'const constructor — widget ที่เป็น const จะถูกข้ามตอน rebuild',
+      'keyword var',
+      'semicolon',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ปกติ Flutter เพิ่มความสามารถให้ State class อย่างไร?',
+    options: [
+      'ผ่าน global variable',
+      'ผ่าน mixin (เช่น SingleTickerProviderStateMixin)',
+      'ผ่านการ inherit จาก Object',
+      'ผ่าน reflection',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="dart-foundations/index" />

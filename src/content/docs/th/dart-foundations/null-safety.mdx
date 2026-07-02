@@ -1,0 +1,128 @@
+---
+title: 'Null Safety'
+description: 'sound null safety ใน Dart — nullable vs non-nullable type, operator ?. ?? !, late และ flow analysis ที่พิสูจน์ว่าค่าไม่ใช่ null'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## non-nullable โดย default
+
+Dart มี **sound** null safety: type ไม่สามารถเก็บ `null` ได้เว้นแต่คุณจะบอกชัด ๆ ด้วย `?` นี่คือการันตีแบบแข็ง ไม่ใช่ lint — ถ้า type system บอกว่าค่านั้น non-null มันจะเป็น null ตอน runtime ไม่ได้จริง ๆ
+
+```dart
+int a = 1;      // non-nullable — เป็น null ไม่ได้เลย
+int? b = null;  // nullable — ? opt-in ให้เป็น null ได้
+
+a = null;       // ❌ compile error: a เป็น null ไม่ได้
+b = 42;         // ✅ nullable ก็เก็บค่าจริงได้เหมือนกัน
+```
+
+คำสำคัญคือ "sound": เพราะการันตีมันแน่นหนา compiler เลย *optimize* บนมันได้ และคุณ *เชื่อ* มันได้ widget property แบบ `String name` จะไม่มาเซอร์ไพรส์คุณด้วย null
+
+## operator สี่ตัวที่คุณจะใช้ทุกวัน
+
+```dart
+String? maybeName;
+
+// ?.  — null-aware access: เรียกก็ต่อเมื่อไม่ null ไม่งั้นทั้งก้อนเป็น null
+final len = maybeName?.length;        // int? — เป็น null ถ้า maybeName เป็น null
+
+// ??  — if-null: ให้ค่า fallback เมื่อฝั่งซ้ายเป็น null
+final safe = maybeName ?? 'Guest';    // String — ไม่มีทางเป็น null
+
+// ??= — assign ก็ต่อเมื่อตอนนี้เป็น null
+maybeName ??= 'Default';
+
+// !   — null assertion: "ฉันสัญญาว่าอันนี้ไม่ null" (throw ถ้าคุณคิดผิด)
+final definite = maybeName!;          // String — อันตรายถ้ามันเป็น null จริง
+```
+
+operator `!` คือตัวที่ต้องเคารพ: มันปิดปาก compiler ด้วยการ *assert* ว่า non-null และถ้าคุณผิด มันจะ throw ตอน runtime ทุก `!` คือการเดิมพันเล็ก ๆ — ใช้เมื่อคุณพิสูจน์ได้ว่าค่านั้น non-null เท่านั้น
+
+## flow analysis narrow ให้คุณ
+
+คุณแทบไม่ต้องใช้ `!` เพราะ **flow analysis** ของ Dart จะ narrow nullable เป็น non-null หลังผ่านการเช็ค:
+
+```dart
+void greet(String? name) {
+  if (name == null) return;
+  // จากตรงนี้ลงไป Dart รู้ว่า name เป็น String (ไม่ใช่ String?) — ไม่ต้องใช้ !
+  print(name.toUpperCase());
+}
+```
+
+<Mermaid title="flow analysis promote nullable เป็น non-null" code={flowDiagram} />
+
+export const flowDiagram = `flowchart TB
+  start["name: String?"] --> check{"name == null?"}
+  check -->|yes| ret["return early"]
+  check -->|no| promoted["name: String\n(promote แล้ว ใช้ได้ปลอดภัย)"]`;
+
+มีจุดที่กัด Flutter dev อยู่บ่อย: flow analysis ทำงานกับ **local variable** ไม่ใช่กับ instance field หรือ getter (พวกนั้นอาจเปลี่ยนค่าระหว่างเช็คกับใช้งาน) สำหรับ field ที่เป็น nullable ให้ copy ไปเป็น local ก่อน แล้วค่อยเช็ค local นั้น
+
+## `late`: สัญญาว่าจะ initialize ก่อนใช้
+
+`late` บอกว่า "อันนี้จะเป็น non-null ตอนที่มีใครอ่าน แค่ตอนประกาศยังไม่มีค่า" มีประโยชน์กับค่าที่ set ใน `initState` หรือคำนวณครั้งเดียว
+
+```dart
+late final String config;   // ยังไม่มีค่า แต่สัญญาว่าจะมีก่อนอ่านครั้งแรก
+// ถ้าอ่านก่อน assign จะได้ LateInitializationError
+```
+
+ใช้ `late` อย่างประหยัด — มันแลกการันตีตอน compile-time เป็นตอน runtime `late` ที่ใช้ผิดก็คือ `!` ในคราบปลอมนั่นเอง
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Dart เป็น non-nullable โดย default; `?` opt-in ให้ type เก็บ `null` ได้ และการันตีเป็นแบบ **sound** — เชื่อได้ตอน runtime ใช้ `?.` (access ปลอดภัย), `??` (fallback) และพึ่ง **flow analysis** (การเช็ค null จะ promote ตัวแปร) แทน `!` (การเดิมพันตอน runtime) `late` เลื่อนการ initialize แต่ลดการันตีเหลือแค่ runtime — ใช้อย่างประหยัด
+</Callout>
+
+export const quizNull = [
+  {
+    q: '"sound" null safety ใน Dart หมายความว่าอะไร?',
+    options: [
+      'null มีเสียงตอนเกิดขึ้น',
+      'การันตี non-null แน่นหนาตอน runtime — ถ้า type เป็น non-nullable ก็เป็น null ไม่ได้จริง ๆ',
+      'ทำงานแค่ใน debug mode',
+      'เป็นแค่ warning ของ linter',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'operator `??` ทำอะไร?',
+    options: [
+      'assert ว่าค่า non-null ไม่งั้น throw',
+      'ให้ค่า fallback เมื่อฝั่งซ้ายเป็น null',
+      'เรียก method ก็ต่อเมื่อไม่ null',
+      'ประกาศ type ที่เป็น nullable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม operator `!` (null assertion) ถึงเสี่ยง?',
+    options: [
+      'มันช้า',
+      'มัน assert non-null เพื่อให้ compiler ผ่าน และ throw ตอน runtime ถ้าค่าเป็น null จริง',
+      'มันเปลี่ยน type อย่างถาวร',
+      'ใช้ได้กับตัวเลขเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมบางที flow analysis ถึง promote nullable field ไม่ได้?',
+    options: [
+      'field เป็น non-null เสมอ',
+      'promotion ทำงานกับ local variable ไม่ใช่ field/getter ที่อาจเปลี่ยนค่าระหว่างเช็คกับใช้',
+      'field เช็ค null ไม่ได้',
+      'เป็น bug ของ compiler',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/null-safety" questions={quizNull} />
+
+<ProgressTracker client:visible id="dart-foundations/null-safety" />

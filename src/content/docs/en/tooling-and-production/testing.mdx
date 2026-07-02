@@ -1,0 +1,126 @@
+---
+title: 'Testing'
+description: 'The Flutter test pyramid — unit tests for logic, widget tests for UI behavior, integration tests for the whole app, and golden tests for pixels.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Four kinds of test, one pyramid
+
+Flutter gives you four testing tools, and they trade speed for realism. Use many fast ones and few slow ones.
+
+<Mermaid title="The Flutter test pyramid" code={pyramidDiagram} />
+
+export const pyramidDiagram = `flowchart TB
+  integ["Integration tests\n(whole app, real device) — few, slow"] --> widget["Widget tests\n(one widget tree, no device) — many, fast"]
+  widget --> unit["Unit tests\n(pure Dart logic) — most, fastest"]`;
+
+- **Unit tests** verify pure Dart — a function, a class, a Cubit's logic. No UI, no device, milliseconds each.
+- **Widget tests** pump a widget into a test harness and interact with it (tap, enter text, expect) — no real device, still fast. This is the Flutter-specific sweet spot.
+- **Integration tests** run the whole app on a real device or emulator, driving it end to end — slow, but the most realistic.
+- **Golden tests** capture a widget's rendered pixels and compare against a saved reference image, catching visual regressions.
+
+## A unit test
+
+```dart
+import 'package:test/test.dart';
+
+test('cart total sums item prices', () {
+  final cart = Cart()..add(Item(price: 10))..add(Item(price: 5));
+  expect(cart.total, 15);
+});
+```
+
+Plain Dart, plain `expect`. Most of your logic — pricing, validation, parsing, state transitions — should be reachable by tests this simple, which is a good reason to keep logic out of widgets.
+
+## A widget test
+
+Widget tests use `WidgetTester` to build a widget, find elements, act, and assert — all in memory.
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+testWidgets('tapping + increments the counter', (WidgetTester tester) async {
+  await tester.pumpWidget(const MyApp());        // build the widget tree
+
+  expect(find.text('0'), findsOneWidget);        // initial state
+
+  await tester.tap(find.byIcon(Icons.add));      // interact
+  await tester.pump();                           // rebuild after setState
+
+  expect(find.text('1'), findsOneWidget);        // assert the new state
+});
+```
+
+The key calls: `pumpWidget` builds the tree, `find` locates widgets, `tap`/`enterText` interact, and `pump` (or `pumpAndSettle` for animations) advances frames so rebuilds happen. No emulator needed — this runs in seconds.
+
+## Golden tests
+
+```dart
+testWidgets('button matches golden', (tester) async {
+  await tester.pumpWidget(const MyButton());
+  await expectLater(
+    find.byType(MyButton),
+    matchesGoldenFile('goldens/my_button.png'),
+  );
+});
+```
+
+Golden (snapshot) tests are powerful for design systems, but brittle across platforms and font versions — pin them carefully and regenerate deliberately with `--update-goldens`.
+
+<Callout title="The one-line takeaway">
+Lean on the pyramid: lots of **unit tests** (pure Dart logic — a reason to keep logic out of widgets), plenty of **widget tests** (`pumpWidget` → `find` → `tap` → `pump` → `expect`, no device, fast), few **integration tests** (whole app, realistic, slow), and **golden tests** for pixel-level visual regressions where they earn their keep.
+</Callout>
+
+export const quizTesting = [
+  {
+    q: 'What is a widget test?',
+    options: [
+      'A test that runs the whole app on a real device',
+      'A test that pumps a widget into an in-memory harness and interacts with it — fast, no device',
+      'A pixel snapshot comparison',
+      'A pure Dart logic test with no UI',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a widget test, what does `pump` do after an interaction?',
+    options: [
+      'Deletes the widget',
+      'Advances a frame so rebuilds (e.g. after setState) take effect',
+      'Takes a screenshot',
+      'Starts an emulator',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why keep business logic out of widgets?',
+    options: [
+      'It is required by Dart',
+      'So it can be covered by fast, simple unit tests instead of slower widget tests',
+      'To reduce app size',
+      'Widgets cannot hold logic',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What do golden tests catch?',
+    options: [
+      'Logic errors',
+      'Visual/pixel regressions by comparing rendered output to a reference image',
+      'Network failures',
+      'Memory leaks',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/testing" questions={quizTesting} />
+
+<ProgressTracker client:visible id="tooling-and-production/testing" />

@@ -1,0 +1,79 @@
+---
+title: 'Navigation & App Structure'
+description: 'How screens stack and swap, the shift from imperative to declarative routing, the widgets that scaffold an app, and the bridge to native code.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## From one screen to a whole app
+
+A widget tree draws one screen. A real app has many screens, a back button, deep links, a theme, and — eventually — a need to talk to the platform underneath. This module is about the structure that holds all of that together.
+
+The through-line is a single shift in thinking: **navigation started imperative (push this screen, pop that one) and moved to declarative (the route stack is a function of app state)**. Understanding why that shift happened explains most of modern Flutter routing.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Navigator & routes | The route stack, `push`/`pop`, named routes, passing and returning data |
+| Declarative routing | `go_router`, URL sync, deep linking, nested routes, auth redirects |
+| App scaffolding | `MaterialApp`, `Scaffold`, theming, and responsive/adaptive layout |
+| Platform channels | `MethodChannel`, `EventChannel`, and the bridge to native code |
+
+## The shape of a Flutter app
+
+<Mermaid title="The layers that structure an app" code={shapeDiagram} />
+
+export const shapeDiagram = `flowchart TB
+  app["MaterialApp\n(theme, routing config)"] --> router["Router / Navigator\n(the route stack)"]
+  router --> scaffold["Scaffold\n(appBar, body, nav)"]
+  scaffold --> screen["your screen widgets"]
+  screen -. platform channel .-> native["native code\n(iOS / Android)"]`;
+
+At the top sits `MaterialApp`, which wires up the theme and the routing configuration. Below it, the router manages a stack of routes. Each route renders a `Scaffold` — the standard frame with an app bar, body, and navigation slots. And when Dart alone is not enough, a platform channel reaches down to native code.
+
+<Callout title="The mental shift">
+Stop thinking of navigation as "moving to a page." Think of it as **editing a stack**: the screen you see is the top of a stack of routes, and every `push` and `pop` is a stack operation. Declarative routing takes it one step further — the stack becomes a *derived value* computed from your app state, which is exactly why deep links and web URLs suddenly work.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the core shift in modern Flutter navigation?',
+    options: [
+      'From widgets to functions',
+      'From imperative (push/pop) to declarative (the route stack is a function of app state)',
+      'From Dart to native',
+      'From mobile to web only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does `MaterialApp` sit at the top of an app to provide?',
+    options: [
+      'The database connection',
+      'The theme and the routing configuration',
+      'The native platform code',
+      'The list of assets',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'The screen you currently see is best thought of as:',
+    options: [
+      'A global variable',
+      'The top of a stack of routes',
+      'A separate isolate',
+      'A compiled binary',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="navigation/index" />

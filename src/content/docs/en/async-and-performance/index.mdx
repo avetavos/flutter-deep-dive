@@ -1,0 +1,79 @@
+---
+title: 'Async, Performance & Rendering'
+description: 'The frame budget you must protect, and the two disciplines that protect it — feeding async data into the UI cleanly, and keeping rebuilds and heavy work off the critical path.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## You have a frame budget
+
+Flutter aims for 60fps — and 120fps on capable displays. At 60fps a frame is **~16ms**; at 120fps it is **~8ms**. Everything your app does in a frame — building widgets, laying out, painting — has to fit in that window. Miss it and the frame is dropped: the user sees jank.
+
+This module is about protecting that budget. Two disciplines do almost all the work:
+
+<Mermaid title="Two ways to blow the frame budget, and how to avoid each" code={budgetDiagram} />
+
+export const budgetDiagram = `flowchart TB
+  budget["Frame budget\n16ms at 60fps"] --> a["Async: feed data\nwithout blocking the thread"]
+  budget --> b["Rebuilds and CPU work:\nkeep them off the critical path"]
+  a --> ok1["FutureBuilder, StreamBuilder"]
+  b --> ok2["const, narrow setState,\nRepaintBoundary, isolates"]`;
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Futures & Streams in UI | FutureBuilder and StreamBuilder, and the create-in-build trap |
+| Rebuilds & performance | const, setState scope, RepaintBoundary, and DevTools |
+| Animations | Implicit vs explicit animations and when each fits |
+| Isolates & compute | Moving CPU-heavy work off the UI isolate |
+
+## The through-line
+
+Async work must not block the single UI thread, and rebuilds must not do more than they need to. Get those two right and Flutter is smooth almost for free; get them wrong and no amount of clever widgets will save you.
+
+<Callout title="The mental shift">
+Performance in Flutter is rarely about doing something exotic — it is about *not* doing wasteful things every frame. A recreated `Future` in `build`, a `setState` that rebuilds half the screen, a missing `const`, or a heavy parse on the UI isolate: each quietly eats your 16ms. The whole module is a hunt for those leaks.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'How much time does one frame get at 60fps?',
+    options: [
+      'About 100ms',
+      'About 16ms',
+      'About 1 second',
+      'There is no limit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are the two disciplines that protect the frame budget?',
+    options: [
+      'Using more widgets and more state',
+      'Feeding async data without blocking, and keeping rebuilds/CPU work off the critical path',
+      'Disabling animations and images',
+      'Adding more isolates for every widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What usually causes jank in a Flutter app?',
+    options: [
+      'Doing something exotic once',
+      'Wasteful work repeated every frame — recreated futures, over-broad rebuilds, missing const, heavy work on the UI isolate',
+      'Too few widgets',
+      'Using named parameters',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="async-and-performance/index" />

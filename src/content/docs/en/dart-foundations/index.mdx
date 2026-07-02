@@ -1,0 +1,82 @@
+---
+title: 'Dart Foundations'
+description: 'Why a Flutter course starts with Dart — the language features that shape everything you write in Flutter: null safety, classes & mixins, and async.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Flutter is Dart
+
+Before a single widget, we start with the language, because **every line of Flutter you write is Dart**. The framework's shape — immutable widgets, `const` constructors, `async`/`await` in your build logic, mixins like `SingleTickerProviderStateMixin` — is a direct consequence of Dart's features. Learn the language well and Flutter stops being a pile of magic incantations.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Dart language tour | Types, variables, functions, collections — the essentials, fast |
+| Null safety | Sound null safety, the operators, and flow analysis |
+| Classes & mixins | Constructors (named/factory/const), mixins, extensions, enums |
+| Async in Dart | Future, async/await, Stream, and the single-threaded event loop |
+
+## Why these four, specifically
+
+These aren't a random language tour — each one shows up constantly in Flutter code:
+
+<Mermaid title="How each Dart feature powers Flutter" code={mapDiagram} />
+
+export const mapDiagram = `flowchart LR
+  ns["Null safety"] --> w["safe widget props,\noptional params"]
+  cc["const constructors"] --> perf["cheap widget rebuilds"]
+  mx["mixins"] --> st["State mixins\n(tickers, observers)"]
+  as["async / Stream"] --> ui["FutureBuilder,\nStreamBuilder"]`;
+
+- **Null safety** decides how you model optional widget properties and data.
+- **`const` constructors** are the single biggest lever for Flutter performance — a `const` widget is skipped on rebuild.
+- **Mixins** are how Flutter adds capabilities to your `State` classes.
+- **Async and Streams** are how your UI talks to the network, databases, and time.
+
+<Callout title="The mental shift">
+Coming from other frameworks you might want to jump straight to widgets. Resist it. Ten minutes on Dart's null safety and `const` constructors will save you hours of confusion later — "why won't this rebuild?", "why is this null?", "why is my list janky?" are almost always Dart questions wearing a Flutter costume.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Why does a Flutter course begin with Dart?',
+    options: [
+      'Dart is a separate optional add-on',
+      'Every line of Flutter is Dart — the framework\'s shape comes from the language',
+      'You must compile Dart to JavaScript first',
+      'Flutter only supports Dart in tests',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which Dart feature is the biggest lever for Flutter rendering performance?',
+    options: [
+      'String interpolation',
+      'const constructors — a const widget is skipped on rebuild',
+      'The var keyword',
+      'Semicolons',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does Flutter typically add capabilities to a State class?',
+    options: [
+      'Through global variables',
+      'Through mixins (like SingleTickerProviderStateMixin)',
+      'Through inheritance from Object',
+      'Through reflection',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="dart-foundations/index" />

@@ -1,0 +1,146 @@
+---
+title: 'Navigator & Routes'
+description: 'Navigator 1.0 — route stack, push และ pop, MaterialPageRoute, named route และการส่งข้อมูลไปข้างหน้ากับรับผลลัพธ์กลับมา'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## route stack
+
+`Navigator` คือ widget ที่จัดการ **stack ของ route** โดย route หนึ่งคือหน้าจอหนึ่ง route ที่อยู่ top สุดของ stack คือสิ่งที่ user เห็น navigation ก็แค่ operation บน stack สองอย่าง: `push` route ใหม่ขึ้น top หรือ `pop` route บนสุดออกเพื่อเผยตัวที่อยู่ข้างใต้
+
+<Mermaid title="Navigator คือ stack ของ route" code={stackDiagram} />
+
+export const stackDiagram = `flowchart TB
+  subgraph stack["route stack"]
+    top["DetailScreen  (visible, top)"]
+    mid["ListScreen"]
+    bottom["HomeScreen  (bottom)"]
+  end
+  top -->|pop| mid
+  mid -->|push DetailScreen| top`;
+
+ปุ่ม back ของเครื่อง, ลูกศร back บน app bar และ swipe-back gesture ทั้งหมดทำสิ่งเดียวกัน: `pop` route ที่อยู่ top
+
+## push และ pop
+
+คุณเอา `Navigator` มาจาก `BuildContext` ปัจจุบันด้วย `Navigator.of(context)` แล้ว push route ตัว `MaterialPageRoute` ให้ transition animation ที่ถูกต้องตาม platform มาฟรี
+
+```dart
+// Push a new screen onto the stack.
+Navigator.of(context).push(
+  MaterialPageRoute(builder: (context) => const DetailScreen()),
+);
+
+// Pop back to the previous screen.
+Navigator.of(context).pop();
+```
+
+`builder` คือ function ที่ return widget ของหน้าจอ — มันรันตอน route ถูกสร้าง ไม่ใช่ตอนคุณเรียก `push`
+
+## ส่งข้อมูลไปข้างหน้า
+
+วิธีที่สะอาดที่สุดในการส่งข้อมูลไปหน้าจอถัดไปคือ **constructor argument** ธรรมดา ไม่มีเวทมนตร์ ไม่มี global state — แค่ส่งเข้าไป
+
+```dart
+Navigator.of(context).push(
+  MaterialPageRoute(
+    builder: (context) => DetailScreen(userId: 42),
+  ),
+);
+
+// DetailScreen receives it like any widget:
+class DetailScreen extends StatelessWidget {
+  const DetailScreen({super.key, required this.userId});
+  final int userId;
+  // ...
+}
+```
+
+## รับผลลัพธ์กลับมา
+
+`Navigator.push` return `Future` ที่ complete เมื่อ route ที่ push ถูก pop — คุณจึง `await` ผลลัพธ์ที่ user เลือกบนหน้าจอถัดไปได้ (การเลือก, การยืนยัน)
+
+```dart
+// Caller awaits the result of the pushed screen.
+final picked = await Navigator.of(context).push<Color>(
+  MaterialPageRoute(builder: (context) => const ColorPicker()),
+);
+if (picked != null) {
+  // use the returned Color
+}
+
+// Inside ColorPicker, return a value by passing it to pop:
+Navigator.of(context).pop(Colors.blue);
+```
+
+## named route
+
+สำหรับแอปเล็ก ๆ คุณลงทะเบียน **named route** ใน `MaterialApp` แล้ว navigate ด้วยชื่อที่เป็น string ได้ มันรวม route table ไว้ที่เดียว แต่ระวัง: named route จะยุ่งยากเมื่อต้องส่ง argument ที่มี type และเมื่อทำ deep link ซึ่งเป็นเหตุผลที่ ecosystem ย้ายไป declarative routing (บทถัดไป)
+
+```dart
+MaterialApp(
+  routes: {
+    '/': (context) => const HomeScreen(),
+    '/settings': (context) => const SettingsScreen(),
+  },
+);
+
+Navigator.of(context).pushNamed('/settings');
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`Navigator` จัดการ **stack ของ route**; `push` เพิ่มหน้าจอ, `pop` เอาออก และปุ่ม back ก็แค่ pop ห่อหน้าจอด้วย `MaterialPageRoute` เพื่อได้ transition ที่ถูกต้อง, ส่งข้อมูลไปข้างหน้าด้วย **constructor argument** ธรรมดา และรับผลลัพธ์กลับด้วยการ `await` `push` (หน้าจอที่ push return ค่ากลับผ่าน `pop(value)`) named route มีอยู่แต่ scale ได้ไม่ดี — เป็นสัญญาณไปสู่ declarative routing ต่อไป
+</Callout>
+
+export const quizNav = [
+  {
+    q: 'Navigator จัดการ data structure แบบไหน?',
+    options: [
+      'queue ของหน้าจอ',
+      'stack ของ route — top คือสิ่งที่ user เห็น',
+      'tree ของ widget',
+      'map ของ URL',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'วิธีที่แนะนำในการส่งข้อมูลไปหน้าจอถัดไปคืออะไร?',
+    options: [
+      'global variable',
+      'constructor argument ธรรมดาบน widget ปลายทาง',
+      'platform channel',
+      'ไฟล์ JSON',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'จะรับค่ากลับจากหน้าจอที่ user โต้ตอบด้วยอย่างไร?',
+    options: [
+      'อ่าน global หลังจากหน้าจอปิด',
+      '`await` Future จาก `push` แล้วให้หน้าจอ return ค่าผ่าน `pop(value)`',
+      'ใช้ setState บนตัวเรียก',
+      'return ค่าไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม ecosystem ถึงย้ายออกจาก named route สำหรับแอปใหญ่?',
+    options: [
+      'มัน render ช้ากว่า',
+      'มันยุ่งยากเมื่อต้องใช้ argument ที่มี type และทำ deep link',
+      'มันแสดง animation ไม่ได้',
+      'มันทำงานเฉพาะบน Android',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/navigator-and-routes" questions={quizNav} />
+
+<ProgressTracker client:visible id="navigation/navigator-and-routes" />

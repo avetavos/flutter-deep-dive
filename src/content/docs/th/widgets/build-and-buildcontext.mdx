@@ -1,0 +1,116 @@
+---
+title: 'build and BuildContext'
+description: 'contract ของ build method — pure, เร็ว และถูกเรียกบ่อย — และ BuildContext คืออะไรจริง ๆ: handle ไปยังตำแหน่งของ widget นี้ใน element tree'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## contract ของ build
+
+`build` มีหน้าที่เดียว: **คืน widget tree ที่บรรยาย UI สำหรับ state ปัจจุบัน** มันควรเป็น function ที่ pure และเร็วของ field กับ state ของ widget เท่านั้น ไม่มากไปกว่านั้น
+
+กฎที่สำคัญ: **build ถูกเรียกได้บ่อยมาก** — ทุกเฟรมของ animation, ทุก `setState`, ทุกครั้งที่ ancestor rebuild ดังนั้น build ต้องถูกและปราศจาก side effect
+
+```dart
+@override
+Widget build(BuildContext context) {
+  // ✅ ดี: แค่บรรยาย UI จาก state ปัจจุบัน
+  return Text('Count: $_count');
+}
+```
+
+```dart
+@override
+Widget build(BuildContext context) {
+  // ❌ แย่: side effect ใน build อันนี้ยิงทุก rebuild
+  _apiClient.fetchUser();      // network call — leak, ยิงซ้ำ ๆ
+  _controller = AnimationController(vsync: this); // สร้างใหม่ทุก build!
+  return Text('...');
+}
+```
+
+side effect — network call, สร้าง controller, subscribe stream — ควรอยู่ใน `initState` (ครั้งเดียว) หรือ event handler ไม่ใช่ใน `build` มอง build เป็นการ render แบบอ่านอย่างเดียว
+
+## BuildContext คืออะไรจริง ๆ
+
+ทุก `build` ได้รับ `BuildContext` มันไม่ใช่ถุงของ global — มันคือ **handle ไปยังตำแหน่งของ widget นี้ใน element tree** (จริง ๆ แล้ว `BuildContext` *คือ* element) ตำแหน่งนั้นแหละที่ทำให้ widget มองขึ้นไปด้านบนของ tree เพื่อหา inherited data ได้
+
+```dart
+@override
+Widget build(BuildContext context) {
+  // context รู้ว่าเราอยู่ตรงไหน จึงค้น ancestor ได้:
+  final theme = Theme.of(context);          // Theme ที่ใกล้ที่สุดเหนือเรา
+  final media = MediaQuery.of(context);     // MediaQuery ที่ใกล้ที่สุดเหนือเรา
+  return Text('Screen is ${media.size.width} wide', style: theme.textTheme.bodyMedium);
+}
+```
+
+`Theme.of(context)` เดินขึ้นจาก element นี้เพื่อหา `Theme` ancestor ที่ใกล้ที่สุด นี่คือเหตุผลที่ context สำคัญ: การเรียก `.of(context)` *เดียวกัน* คืนผลต่างกันขึ้นกับว่า widget อยู่ตรงไหนใน tree
+
+<Mermaid title="context.of เดินขึ้น element tree เพื่อหา ancestor" code={contextDiagram} />
+
+export const contextDiagram = `flowchart BT
+  here["widget นี้\n(context = element ของมัน)"] --> p1["Padding"]
+  p1 --> p2["Theme (เจอ!)"]
+  p2 --> root["MaterialApp"]
+  here -.->|"Theme.of(context)\nค้นขึ้นบน"| p2`;
+
+## pitfall คลาสสิกของ context
+
+เพราะ `.of(context)` ค้น *ขึ้นบน* บั๊กที่พบบ่อยคือใช้ context ที่อยู่ **เหนือ** widget ที่คุณกำลังหา เช่น เรียก `Scaffold.of(context)` ด้วย context ของ build method เดียวกับที่ *สร้าง* `Scaffold` นั้นจะล้มเหลว — context นั้นอยู่เหนือ Scaffold ไม่ใช่ใต้มัน วิธีแก้คือใช้ `Builder` (หรือ widget ลูก) เพื่อให้ได้ context ที่อยู่ *ใต้* เป้าหมาย
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`build` ต้องเป็น function ที่ถูกและปราศจาก side effect ที่บรรยาย UI จาก state ปัจจุบัน — มันรันบ่อย (ทุกเฟรมของ animation, ทุก `setState`) ให้เอา network call และการสร้าง controller ไว้ใน `initState` ไม่ใช่ build `BuildContext` คือ handle ไปยังตำแหน่งของ widget ใน element tree; `.of(context)` ค้น *ขึ้นบน* หา ancestor นี่คือเหตุผลที่การเรียกเดียวกันคืนผลต่างกันตามตำแหน่ง — และทำไม context ของ ancestor ถึงหาของที่อยู่ข้างล่างมันไม่เจอ
+</Callout>
+
+export const quizBuild = [
+  {
+    q: 'ทำไม build method ต้องปราศจาก side effect?',
+    options: [
+      'มันรันแค่ครั้งเดียว',
+      'มันถูกเรียกได้บ่อยมาก (ทุกเฟรม, ทุก setState) side effect จึงยิงซ้ำ ๆ',
+      'Dart ห้าม side effect ใน method',
+      'side effect ช้าเสมอ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรสร้าง AnimationController หรือเริ่ม network request ที่ไหน?',
+    options: [
+      'ใน build method',
+      'ใน initState (ครั้งเดียว) หรือ event handler ไม่ใช่ใน build',
+      'ใน constructor ของ widget',
+      'ใน RenderObject',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'BuildContext คืออะไร?',
+    options: [
+      'registry กลางของ widget ทั้งหมด',
+      'handle ไปยังตำแหน่งของ widget นี้ใน element tree ใช้ค้นหา ancestor',
+      'render object',
+      'isolate แยกต่างหาก',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`Theme.of(context)` ทำอะไร?',
+    options: [
+      'สร้าง theme ใหม่',
+      'เดินขึ้น element tree จาก context นี้เพื่อหา Theme ancestor ที่ใกล้ที่สุด',
+      'คืน theme default ของแอปโดยไม่สนตำแหน่ง',
+      'rebuild ทั้งแอป',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="widgets/build-and-buildcontext" questions={quizBuild} />
+
+<ProgressTracker client:visible id="widgets/build-and-buildcontext" />

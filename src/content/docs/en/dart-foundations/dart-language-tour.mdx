@@ -1,0 +1,129 @@
+---
+title: 'Dart Language Tour'
+description: 'The Dart essentials fast — variables and type inference, functions and named parameters, collections, and the cascade operator you will see everywhere in Flutter.'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Variables and inference
+
+Dart is statically typed with strong inference. Use `var` and let Dart infer, or annotate when it aids clarity. `final` means assign-once; `const` means a compile-time constant.
+
+```dart
+var name = 'Ada';        // inferred String
+final age = 36;          // assign-once int
+const pi = 3.14159;      // compile-time constant
+int? maybe;              // nullable (null safety — next lesson)
+
+// `final` vs `const`: final is runtime-fixed, const is compile-time-fixed.
+final now = DateTime.now();   // OK — computed at runtime
+// const now = DateTime.now(); // ERROR — not a compile-time constant
+```
+
+`const` matters enormously in Flutter: a `const` value is *canonicalized* — identical `const` objects are the same instance — which is what lets Flutter skip rebuilding `const` widgets.
+
+## Functions and named parameters
+
+Dart functions support positional and **named** parameters. Flutter's entire API is built on named parameters — every widget constructor is a wall of them.
+
+```dart
+// Named parameters in {}, `required` marks the mandatory ones, others have defaults.
+Widget greeting({required String name, String prefix = 'Hello'}) {
+  return Text('$prefix, $name');
+}
+
+greeting(name: 'Ada');                  // Hello, Ada
+greeting(name: 'Ada', prefix: 'Hi');    // Hi, Ada
+
+// Arrow syntax for single-expression functions
+int square(int x) => x * x;
+```
+
+This is why reading Flutter code means reading `Widget(child: ..., padding: ..., color: ...)` — named parameters make big constructors readable and order-independent.
+
+## Collections and collection-if / for
+
+Lists, sets, and maps, plus **collection-if** and **collection-for** — used constantly to build widget lists conditionally.
+
+```dart
+final nums = [1, 2, 3];
+final set = {1, 2, 3};
+final map = {'a': 1, 'b': 2};
+
+// Spread, collection-if, collection-for — you'll use these inside widget children:
+final children = [
+  const Header(),
+  ...items,                         // spread
+  if (isLoggedIn) const Profile(),  // conditional element
+  for (final n in nums) Text('$n'), // generated elements
+];
+```
+
+That `if`/`for`-inside-a-list pattern is idiomatic Flutter — it replaces the awkward "build a list then push to it" you might reach for in other languages.
+
+## The cascade operator
+
+The cascade `..` runs several operations on the same object without repeating it — common in configuration-style code.
+
+```dart
+final paint = Paint()
+  ..color = const Color(0xFF027DFD)
+  ..strokeWidth = 4
+  ..style = PaintingStyle.stroke;
+// Each `..` returns the same Paint, so this configures one object.
+```
+
+<Callout title="The one-line takeaway">
+Dart is statically typed with strong inference (`var`), assign-once `final`, and compile-time `const` — and `const` is special because it canonicalizes values, which powers Flutter's rebuild-skipping. Its **named parameters** are why every widget reads as `Widget(child: ..., color: ...)`, and **collection-if/for** is the idiomatic way to build widget lists.
+</Callout>
+
+export const quizTour = [
+  {
+    q: 'What is the difference between `final` and `const` in Dart?',
+    options: [
+      'They are identical',
+      'final is assign-once at runtime; const is a compile-time constant (and canonicalized)',
+      'const can be reassigned, final cannot',
+      'final is only for numbers',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why are named parameters so central to Flutter?',
+    options: [
+      'They make code run faster',
+      'Widget constructors have many options; named parameters make them readable and order-independent',
+      'They are required by Dart syntax',
+      'They reduce app size',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does collection-if (`if (cond) widget`) inside a list do?',
+    options: [
+      'Throws an error',
+      'Conditionally includes an element in the collection — idiomatic for building widget children',
+      'Creates a nested list',
+      'Runs at compile time only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the cascade operator `..` do?',
+    options: [
+      'Spreads a list into another',
+      'Runs multiple operations on the same object without repeating the reference',
+      'Declares a range',
+      'Marks a nullable type',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/dart-language-tour" questions={quizTour} />
+
+<ProgressTracker client:visible id="dart-foundations/dart-language-tour" />

@@ -1,0 +1,106 @@
+---
+title: 'Choosing an Approach'
+description: 'decision guide — setState สำหรับ ephemeral state, Provider/Riverpod สำหรับ shared, BLoC สำหรับ flow ซับซ้อน — พร้อมการ lift state up และ layer app'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## การตัดสินใจ ให้ง่าย
+
+ตอนนี้คุณรู้กลไกแล้ว การเลือกระหว่างมันส่วนใหญ่เป็นเรื่องของ **scope และความซับซ้อน** และมันเดินตาม decision path สั้น ๆ:
+
+<Mermaid title="Which approach to reach for" code={decideDiagram} />
+
+export const decideDiagram = `flowchart TB
+  q1{"มี widget มากกว่าหนึ่งตัว\nที่ต้องการ state นี้ไหม?"} -->|ไม่| ss["setState\n(ephemeral / local)"]
+  q1 -->|ใช่| q2{"flow ซับซ้อน,\napp ใหญ่, ต้อง test สูงไหม?"}
+  q2 -->|ไม่| prov["Provider / Riverpod\n(shared app state)"]
+  q2 -->|ใช่| bloc["BLoC / Cubit\n(unidirectional, test ได้)"]`;
+
+- **widget เดียวสน?** `setState` อย่าเพิ่ม package เพื่อ checkbox
+- **หลาย widget share?** Provider หรือ Riverpod Riverpod สำหรับ app ใหม่/ใหญ่
+- **ซับซ้อน, async หนัก, ต้อง test แยกได้?** BLoC/Cubit
+
+ไม่มีรางวัลสำหรับการใช้เครื่องมือที่หนักที่สุด app จริงผสมทั้งสามได้อย่างสบาย: `setState` สำหรับ UI ชิ้นเล็ก, Riverpod provider สองสามตัวสำหรับ shared state, และ BLoC เฉพาะที่ความซับซ้อนสมควรจริง ๆ
+
+## Lifting state up
+
+เมื่อ sibling widget สองตัวต้องการ state เดียวกัน ย้ายมันไปที่ common ancestor ที่ใกล้ที่สุดแล้วส่งลงมา — **lifting state up** นี่คือสิ่งแรกที่ควรลองก่อนหยิบ shared-state package ใด ๆ
+
+| สถานการณ์ | state ควรอยู่ที่ไหน |
+|-----------|-----------------------------|
+| widget เดียวใช้ | ใน widget นั้น (`setState`) |
+| sibling สองตัว share | lift ไปที่ parent ร่วม |
+| หลาย widget ทั่ว tree | store ที่ share (Provider/Riverpod) |
+| ทั้ง app, ซับซ้อน, async | layer BLoC/Cubit |
+
+## Ephemeral vs app state และการ layer
+
+นิสัยที่สำคัญที่สุดคือการจัดหมวด state ให้ถูก:
+
+- **Ephemeral state** — index ของ `PageView`, form field, animation อยู่ใน `State` เสียมันตอน rebuild ก็ไม่เป็นไร
+- **App state** — auth, cart, settings, cached server data share และมักถูก persist อยู่ใน store นอก widget ตัวใดตัวหนึ่ง
+
+สำหรับอะไรที่เกิน app เล่น ๆ layer หน้าที่พวกนี้เพื่อไม่ให้พันกัน:
+
+- **UI layer** — widget render state, ส่ง input ไม่มี business logic
+- **State/logic layer** — provider, BLoC, notifier ถือและ transition state
+- **Data layer** — repository และ service คุยกับ API, database, device
+
+การเก็บ business logic และ data access ออกจาก widget คือสิ่งที่ทำให้ app test ได้และรอดเมื่อมันโตขึ้น — ไม่ว่าจะเลือก state package ตัวไหน
+
+<Callout title="สรุปหนึ่งบรรทัด">
+จับคู่เครื่องมือกับ scope: `setState` สำหรับ **ephemeral** state ที่ widget เดียวเป็นเจ้าของ, Provider/Riverpod สำหรับ **shared** state, BLoC สำหรับ flow ที่ **ซับซ้อนและ test ได้** — และลอง **lift state up** ไปที่ parent ร่วมก่อนเพิ่ม package ใด ๆ จัดหมวดทุกชิ้นของ state เป็น ephemeral หรือ app state และ layer app จริงเป็น UI, state/logic และ data เพื่อให้ widget โง่และ logic test ได้
+</Callout>
+
+export const quizChoosing = [
+  {
+    q: 'ควรลองอะไรก่อนเมื่อ sibling widget สองตัวต้องการ share state?',
+    options: [
+      'เพิ่ม global BLoC ทันที',
+      'lift state ขึ้นไปที่ common ancestor ที่ใกล้ที่สุดแล้วส่งลงมา',
+      'ทำ state ซ้ำในทั้งสองตัว',
+      'ใช้ static global variable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'state ไหนควรอยู่ใน shared store มากกว่าใน widget เดียว?',
+    options: [
+      'checkbox เดียวติ๊กหรือยัง',
+      'ค่า animation ปัจจุบันของ widget หนึ่งตัว',
+      'user ที่ login และ shopping cart ที่ใช้ข้ามหลายหน้า',
+      'ค่าของ text field ในเครื่อง',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'ประโยชน์ของการ layer app เป็น UI, state/logic และ data คืออะไร?',
+    options: [
+      'ทำให้ app เล็กลง',
+      'business logic และ data access อยู่นอก widget ทำให้ app test ได้เมื่อมันโต',
+      'ลบความต้องการ state',
+      'เลี่ยงการใช้ Dart',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'app จริงผสม setState, Riverpod และ BLoC ได้ไหม?',
+    options: [
+      'ไม่ได้ ต้องเลือกอย่างเดียว',
+      'ได้ — ใช้ setState สำหรับชิ้นเล็ก, provider สำหรับ shared state, และ BLoC เฉพาะที่ความซับซ้อนสมควร',
+      'เฉพาะใน test',
+      'เฉพาะถ้าเลี่ยง widget',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/choosing-state-approach" questions={quizChoosing} />
+
+<ProgressTracker client:visible id="state-management/choosing-state-approach" />

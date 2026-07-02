@@ -1,0 +1,118 @@
+---
+title: 'Stateless vs Stateful'
+description: 'widget พื้นฐานสองแบบ, ทำไม State ถึงเป็น object แยกจาก widget, State อยู่รอดข้าม rebuild อย่างไร และควรเลือกใช้แบบไหนเมื่อไร'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Stateless: description ล้วน ๆ
+
+`StatelessWidget` ไม่มี mutable state ของตัวเอง เมื่อให้ input เดิม (constructor argument) `build` ของมันจะคืน UI เดิมเสมอ ถ้า input ไม่เปลี่ยน มันก็ไม่ต้องเปลี่ยน
+
+```dart
+class Greeting extends StatelessWidget {
+  const Greeting({super.key, required this.name});
+  final String name;
+
+  @override
+  Widget build(BuildContext context) => Text('Hello, $name');
+}
+```
+
+ทุกอย่างที่มันต้องใช้เป็น `final` และถูกส่งเข้ามา เลือก `StatelessWidget` เมื่อ widget แค่ render input ของมัน — ซึ่งเป็น widget ส่วนใหญ่
+
+## Stateful: state ที่อยู่นานกว่า widget
+
+`StatefulWidget` มีไว้สำหรับ UI ที่เปลี่ยนไปตามเวลาเอง — counter, toggle, animation, form แต่นี่คือจุดที่ทำคนสะดุด: widget **ยังคง immutable** อยู่ดี ส่วนที่ mutable อยู่ใน object `State` *แยกต่างหาก*
+
+```dart
+class Counter extends StatefulWidget {
+  const Counter({super.key});
+
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  int _count = 0; // mutable state อยู่ตรงนี้ ไม่ใช่บน widget
+
+  void _increment() {
+    setState(() => _count++); // บอก Flutter ให้ rebuild ด้วย state ใหม่
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(onPressed: _increment, child: Text('$_count'));
+  }
+}
+```
+
+`setState` ทำสองอย่าง: รัน mutation ของคุณ แล้ว mark element เป็น dirty เพื่อให้ Flutter rebuild ถ้าไม่มี `setState` คุณจะเปลี่ยน `_count` ทั้งวันก็ได้ แต่จอไม่อัปเดต — framework ไม่รู้ว่ามีอะไรเปลี่ยน
+
+## ทำไมต้องแยก? เพื่อให้ state อยู่รอดข้าม rebuild
+
+Widget ถูกทิ้งและสร้างใหม่ทุก rebuild — มันจึง *ถือ* state ที่ต้องอยู่ต่อเนื่องไม่ได้ ส่วน object `State` ถูกถือโดย **element** ที่อยู่ต่อเนื่องข้าม rebuild นั่นคือเหตุผลทั้งหมดของการออกแบบเป็นสอง class
+
+<Mermaid title="widget ถูกสร้างใหม่ ส่วน State อยู่ต่อเนื่องบน element" code={splitDiagram} />
+
+export const splitDiagram = `flowchart TB
+  w1["Counter widget\n(rebuild, ทิ้ง)"] -.->|createState ครั้งเดียว| s["_CounterState\n(อยู่ต่อเนื่องบน element,\nเก็บ _count)"]
+  w2["Counter widget\n(instance ใหม่ build ถัดไป)"] -.->|ใช้ State เดิมซ้ำ| s`;
+
+เมื่อ parent rebuild และสร้าง `Counter` widget *ตัวใหม่* Flutter จะ match มันกับ element ที่มีอยู่แล้วส่ง `_CounterState` *ตัวเดิม* กลับไป — `_count` จึงถูกรักษาไว้ widget ใหม่ แต่ state เดิม (`didUpdateWidget` ให้ State react กับข้อมูลของ widget ใหม่ได้ ส่วน lifecycle เต็ม ๆ อยู่ในโมดูล State Management)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ใช้ `StatelessWidget` สำหรับ UI ที่เป็น pure function ของ input (widget ส่วนใหญ่) ใช้ `StatefulWidget` เมื่อ UI เปลี่ยนตามเวลา — แต่ widget ยังคง immutable และ mutable data อยู่ใน object `State` แยกต่างหาก ถือโดย element ที่อยู่ต่อเนื่อง เรียก `setState` เพื่อ mutate *พร้อม* trigger rebuild ถ้าไม่มีมัน framework จะไม่มีทางรู้ว่าต้องอัปเดต
+</Callout>
+
+export const quizStateful = [
+  {
+    q: 'mutable state ของ StatefulWidget อยู่ที่ไหน?',
+    options: [
+      'บนตัว widget เอง',
+      'ใน object State แยกต่างหาก ถือโดย element',
+      'ใน global variable',
+      'ใน RenderObject',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การเรียก setState ทำอะไร?',
+    options: [
+      'รันแค่ mutation เท่านั้น ไม่ทำอย่างอื่น',
+      'รัน mutation แล้ว mark element เป็น dirty เพื่อให้ Flutter rebuild',
+      'สร้าง widget class ใหม่',
+      'บังคับ restart ทั้งแอป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม State ถึงเป็น object แยกจาก widget?',
+    options: [
+      'เพื่อให้ code ยาวขึ้น',
+      'เพราะ widget ถูกสร้างใหม่ทุก rebuild จึงถือ persistent state ไม่ได้ State อยู่บน element ที่ทนทาน',
+      'เพราะ Dart ห้ามมี field บน widget',
+      'ไม่มีเหตุผลจริง ๆ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรเลือก StatelessWidget เมื่อไร?',
+    options: [
+      'เมื่อ widget ต้องการ animation controller',
+      'เมื่อ widget แค่ render input ของมันและไม่มี state ของตัวเอง',
+      'เฉพาะสำหรับ root ของแอป',
+      'ไม่เคย — ใช้ StatefulWidget เสมอ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="widgets/stateless-vs-stateful" questions={quizStateful} />
+
+<ProgressTracker client:visible id="widgets/stateless-vs-stateful" />

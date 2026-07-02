@@ -1,0 +1,145 @@
+---
+title: 'Classes & Mixins'
+description: 'Constructors (named, factory, const), mixins for horizontal reuse, extension methods, and enhanced enums — the object features Flutter leans on.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Constructors, the Dart way
+
+Dart constructors are richer than most languages, and Flutter uses all of it. The essentials:
+
+```dart
+class Point {
+  final double x, y;
+
+  // Default constructor with `this.` shorthand — assigns fields directly.
+  const Point(this.x, this.y);
+
+  // Named constructor — a second way to build one.
+  const Point.origin() : x = 0, y = 0;
+
+  // Factory constructor — can return a cached/subtype instance, not just a fresh one.
+  factory Point.fromMap(Map<String, double> m) => Point(m['x']!, m['y']!);
+}
+
+const p = Point(1, 2);       // const construction — canonicalized
+final o = Point.origin();
+```
+
+Three things worth internalizing:
+
+- **`const` constructors** (only possible when all fields are `final`) let callers build canonicalized instances — the basis of `const` widgets.
+- **Named constructors** (`Point.origin`) give multiple clear ways to construct, instead of overloading.
+- **Factory constructors** don't have to return a new instance — they can return a cached one or a subtype. `factory` is how many Flutter/Dart classes implement singletons or parsing.
+
+## Mixins: reuse behavior across unrelated classes
+
+Dart has single inheritance, but **mixins** let you compose behavior horizontally — add a set of methods/fields to a class without a subclass relationship. This is *the* Flutter pattern for `State` classes.
+
+```dart
+mixin Logger {
+  void log(String msg) => print('[log] $msg');
+}
+
+mixin Validator {
+  bool isValid(String s) => s.isNotEmpty;
+}
+
+// Compose several capabilities with `with`:
+class Form with Logger, Validator {
+  void submit(String value) {
+    if (isValid(value)) log('submitting $value');
+  }
+}
+```
+
+<Mermaid title="Mixins add capabilities without inheritance" code={mixinDiagram} />
+
+export const mixinDiagram = `flowchart TB
+  base["class State"] -->|with| result["your State class"]
+  m1["mixin\nSingleTickerProviderStateMixin"] -->|with| result
+  m2["mixin\nWidgetsBindingObserver"] -->|with| result`;
+
+When you write `class _MyState extends State<MyWidget> with SingleTickerProviderStateMixin`, you're mixing in the ability to be a `vsync` provider for animations — pure horizontal reuse.
+
+## Extension methods and enhanced enums
+
+**Extension methods** add methods to types you don't own — common for tidy helpers:
+
+```dart
+extension StringX on String {
+  String get capitalized => isEmpty ? this : this[0].toUpperCase() + substring(1);
+}
+'flutter'.capitalized; // 'Flutter'
+```
+
+**Enhanced enums** carry fields and methods, not just names — great for typed, self-describing constants:
+
+```dart
+enum Status {
+  active('Active', true),
+  archived('Archived', false);
+
+  const Status(this.label, this.isVisible);
+  final String label;
+  final bool isVisible;
+}
+Status.active.label; // 'Active'
+```
+
+<Callout title="The one-line takeaway">
+Dart constructors do a lot: `const` constructors (all-`final` fields) enable canonicalized `const` widgets, **named** constructors give clear alternatives, and **factory** constructors can return cached instances or subtypes. **Mixins** (`with`) are how Flutter bolts capabilities like tickers and observers onto your `State` classes — horizontal reuse without inheritance.
+</Callout>
+
+export const quizClasses = [
+  {
+    q: 'What can a factory constructor do that a normal constructor cannot?',
+    options: [
+      'Take parameters',
+      'Return an existing/cached instance or a subtype instead of always a fresh object',
+      'Be marked const',
+      'Have a name',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What are mixins used for in Dart/Flutter?',
+    options: [
+      'Replacing all inheritance',
+      'Composing behavior horizontally — adding methods/fields to a class without a subclass relationship',
+      'Declaring nullable types',
+      'Running async code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is required for a class to have a const constructor?',
+    options: [
+      'It must extend Widget',
+      'All of its fields must be final',
+      'It must be a factory',
+      'It must use a mixin',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What do extension methods let you do?',
+    options: [
+      'Add methods to a type you do not own (like adding a helper to String)',
+      'Extend a class with inheritance',
+      'Create nullable types',
+      'Define a mixin',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/classes-and-mixins" questions={quizClasses} />
+
+<ProgressTracker client:visible id="dart-foundations/classes-and-mixins" />

@@ -1,0 +1,109 @@
+---
+title: 'InheritedWidget'
+description: 'The primitive under Provider, Theme, and MediaQuery — how Flutter propagates data down the tree in O(1) and rebuilds only the widgets that depend on it.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The problem it solves
+
+Passing data down a deep tree by hand — through every constructor — is miserable. This is "prop drilling," and it couples every intermediate widget to data it does not use.
+
+`InheritedWidget` is Flutter's built-in answer. You place one high in the tree, and any descendant can read it **directly** via `context`, no matter how deep, without a single widget in between knowing about it. `Theme`, `MediaQuery`, `Navigator`, and `Provider` are all `InheritedWidget`s — you have been using it all along.
+
+## How a descendant reads it
+
+A descendant calls `dependOnInheritedWidgetOfExactType`, usually wrapped in a static `of(context)` method by convention:
+
+```dart
+class ThemeConfig extends InheritedWidget {
+  const ThemeConfig({super.key, required this.color, required super.child});
+  final Color color;
+
+  // Convention: a static `of` that registers the caller as a dependent.
+  static ThemeConfig of(BuildContext context) {
+    final result =
+        context.dependOnInheritedWidgetOfExactType<ThemeConfig>();
+    assert(result != null, 'No ThemeConfig found in context');
+    return result!;
+  }
+
+  // Called when a new ThemeConfig replaces the old one: should dependents rebuild?
+  @override
+  bool updateShouldNotify(ThemeConfig oldWidget) => color != oldWidget.color;
+}
+
+// Anywhere below it:
+final color = ThemeConfig.of(context).color;
+```
+
+Two mechanics matter here. `dependOnInheritedWidgetOfExactType` does two things at once: it **finds** the nearest ancestor of that type (a fast, cached lookup up the element tree), and it **registers** the calling element as a dependent. And `updateShouldNotify` decides, when the inherited widget is rebuilt with new data, whether dependents actually need to rebuild.
+
+## Only dependents rebuild
+
+This is the payoff. When the `InheritedWidget` updates and `updateShouldNotify` returns true, Flutter rebuilds **only the widgets that called `of(context)`** — not the whole subtree. Widgets in between that never depended on it are untouched.
+
+<Mermaid title="Only registered dependents rebuild on update" code={depDiagram} />
+
+export const depDiagram = `flowchart TB
+  iw["InheritedWidget\n(color changes)"] --> a["Widget A\n(did not depend)\nNOT rebuilt"]
+  iw --> b["Widget B\ncalled of(context)\nREBUILT"]
+  iw --> c["Widget C\n(did not depend)\nNOT rebuilt"]`;
+
+That targeted rebuild is why `InheritedWidget` scales: reading is a cheap upward lookup, and updates only ripple to true dependents. Every higher-level state solution is, underneath, this mechanism plus ergonomics.
+
+<Callout title="The one-line takeaway">
+`InheritedWidget` lets any descendant read data via `context` without prop-drilling, using `dependOnInheritedWidgetOfExactType` (which both **finds** the ancestor and **registers** the reader as a dependent). When it updates, `updateShouldNotify` gates whether dependents rebuild — and only the widgets that actually read it rebuild. Theme, MediaQuery, and Provider are all built on this one primitive.
+</Callout>
+
+export const quizInherited = [
+  {
+    q: 'What problem does InheritedWidget solve?',
+    options: [
+      'Slow network calls',
+      'Prop drilling — passing data down a deep tree through every constructor by hand',
+      'Animating widgets',
+      'Compiling Dart',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does dependOnInheritedWidgetOfExactType do?',
+    options: [
+      'Only creates a new widget',
+      'Finds the nearest ancestor of that type AND registers the caller as a dependent',
+      'Disposes the inherited widget',
+      'Rebuilds the whole app',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When an InheritedWidget updates, which widgets rebuild?',
+    options: [
+      'Every widget in the subtree',
+      'Only the widgets that registered as dependents (called of(context))',
+      'Only the root widget',
+      'None — it never rebuilds',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the role of updateShouldNotify?',
+    options: [
+      'It disposes controllers',
+      'It decides whether dependents should rebuild when the inherited widget is replaced with new data',
+      'It creates the State object',
+      'It handles navigation',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/inherited-widget" questions={quizInherited} />
+
+<ProgressTracker client:visible id="state-management/inherited-widget" />

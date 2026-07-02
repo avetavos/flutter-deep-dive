@@ -1,0 +1,118 @@
+---
+title: 'Project & Tooling'
+description: 'pubspec.yaml และ pub, flutter CLI, DevTools และความต่างระหว่าง hot reload กับ hot restart — toolchain ที่ใช้ทุกวัน'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## pubspec.yaml: manifest ของโปรเจกต์
+
+ทุกโปรเจกต์ Flutter ถูกอธิบายด้วย `pubspec.yaml` — dependency, dependency ที่ใช้เฉพาะตอน dev และ asset ที่ bundle เข้าไปในแอป
+
+```yaml
+name: my_app
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  go_router: ^14.0.0        # runtime dependency
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0     # only used during development/tests
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/        # a whole folder
+    - assets/config.json    # a single file
+```
+
+การแยกนี้สำคัญ: `dependencies` ไปกับแอป ส่วน `dev_dependencies` (test framework, linter, code generator) ไม่ไป ส่วน asset ที่ list ไว้ตรงนี้คือตัวเดียวที่ถูก bundle — การลืมใส่ entry คือสาเหตุยอดฮิตของ "asset not found"
+
+## flutter CLI
+
+คำสั่ง `flutter` คือประตูสู่ทุกอย่าง:
+
+```bash
+flutter create my_app        # scaffold a new project
+flutter pub get              # resolve and download dependencies
+flutter run                  # run on a connected device/emulator
+flutter run --release        # run in release mode
+flutter build apk            # produce a release build
+flutter doctor               # diagnose your local toolchain
+flutter analyze              # static analysis / lints
+```
+
+`flutter doctor` คือสิ่งแรกที่ควรรันเมื่ออะไรผิดปกติ — มันเช็ค SDK, device toolchain และ IDE plugin แล้วบอกคุณตรง ๆ ว่าขาดอะไร
+
+## DevTools
+
+**DevTools** คือชุดเครื่องมือบน browser สำหรับ inspect แอปที่กำลังรัน: widget inspector (แตะ widget เห็น tree และ constraints ของมัน), performance/timeline view (หา jank), memory view และ network view มันคือวิธีที่คุณจะ *เห็น* tree และ pipeline ที่โมดูลก่อน ๆ อธิบายไว้
+
+## Hot reload vs hot restart
+
+คำสั่ง refresh สองตัวนี้ไม่เหมือนกัน และรู้ความต่างช่วยประหยัดความสับสนได้จริง:
+
+- **Hot reload** (`r`) inject source ที่เปลี่ยนเข้าไปในแอปที่ *กำลังรัน* แล้ว rebuild widget tree — **State ถูกเก็บไว้** เร็วระดับต่ำกว่าวินาที และเป็นเหตุผลที่ทำให้การ dev Flutter รู้สึกเร็ว
+- **Hot restart** (`R`) ทิ้ง state ของแอปแล้วเริ่มใหม่จาก `main()` — ช้ากว่า แต่เริ่มจากศูนย์สะอาด ๆ
+
+hot reload มีข้อจำกัด มัน re-run `build` แต่ **ไม่** re-run `initState` หรือ `main()` ที่เปลี่ยน และ apply บางการเปลี่ยนแปลงไม่ได้ (การ eval `const` ใหม่, การเปลี่ยน shape ของ enum/class, global variable initializer) เมื่อการเปลี่ยนแปลงดูเหมือนไม่ติด คำตอบมักคือ hot restart
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`pubspec.yaml` ประกาศ dependency (ที่ ship), `dev_dependencies` (ใช้ตอน build/test เท่านั้น) และ asset ที่ถูก bundle — การลืม entry asset คือ bug "not found" คลาสสิก flutter CLI รันทุกอย่าง (เริ่มด้วย `flutter doctor` เมื่อติดขัด), DevTools ให้ inspect tree และ timeline ที่กำลังรัน และ **hot reload** เก็บ State ไว้พร้อม re-run `build` — แต่การเปลี่ยน `initState`, `main` หรือ shape ของ class ต้อง **hot restart**
+</Callout>
+
+export const quizTooling = [
+  {
+    q: 'ความต่างระหว่าง `dependencies` กับ `dev_dependencies` ใน pubspec.yaml คืออะไร?',
+    options: [
+      'เหมือนกัน',
+      'dependencies ไปกับแอป ส่วน dev_dependencies (test, linter) ใช้เฉพาะตอน develop',
+      'dev_dependencies ไปกับแอป dependencies ไม่ไป',
+      'dependencies ใช้เฉพาะ web',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'hot reload เก็บอะไรไว้ที่ hot restart ไม่เก็บ?',
+    options: [
+      'source code',
+      'State ของแอปที่กำลังรัน',
+      'pubspec',
+      'build cache',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการเปลี่ยน code อาจไม่ปรากฏหลัง hot reload?',
+    options: [
+      'hot reload ใช้ไม่ได้เลย',
+      'มัน re-run build แต่ไม่ re-run initState/main หรือการเปลี่ยน shape บางอย่าง — พวกนั้นต้อง hot restart',
+      'สาเหตุเดียวคือลืม save ไฟล์',
+      'hot reload ต้องใช้ release mode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คำสั่งแรกที่ควรรันเมื่อ local toolchain ดูเหมือนพัง?',
+    options: [
+      'flutter build apk',
+      'flutter doctor',
+      'flutter clean',
+      'flutter upgrade',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/project-and-tooling" questions={quizTooling} />
+
+<ProgressTracker client:visible id="tooling-and-production/project-and-tooling" />

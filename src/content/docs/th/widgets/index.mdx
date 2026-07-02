@@ -1,0 +1,79 @@
+---
+title: 'Everything Is a Widget'
+description: 'แนวคิดที่นิยาม Flutter — UI คือ tree ของ widget description ที่ immutable, rebuild ได้ถูก ๆ โดยมี element และ render object ที่อยู่นานกว่ารองอยู่ข้างล่าง'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## แนวคิดเดียว
+
+Flutter มี slogan ว่า **everything is a widget** — layout, padding, ปุ่ม, ทั้งแอป ล้วนเป็น widget แต่ความจริงที่ลึกกว่านั้นคือ widget *คืออะไร*: มันคือ **description ที่ immutable** ของ UI ชิ้นหนึ่ง ณ ช่วงเวลาหนึ่ง มันไม่ใช่ของที่อยู่บนจอ มันคือสูตรของของนั้น
+
+เพราะ widget เป็น immutable และถูก คำตอบของ Flutter ต่อ "UI เปลี่ยนแล้ว" จึงสุดโต่ง: **ทิ้ง widget เดิมแล้ว build ใหม่** คุณไม่เคย mutate widget เลย คุณแค่บรรยาย state ใหม่ Flutter rebuild description แล้วอัปเดตเฉพาะส่วนที่ต่างจริง ๆ อย่างมีประสิทธิภาพ
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Widgets and the tree | immutable config, composition และ three tree (widget / element / render) |
+| Stateless vs stateful | widget พื้นฐานสองแบบ และทำไม State ถึงเป็น object แยก |
+| build and BuildContext | contract ของ build method และ BuildContext คืออะไรจริง ๆ |
+| Keys | เมื่อไร Flutter ต้องใช้ key เพื่อรักษา state ให้ถูกต้อง |
+
+## description ที่ถูก แต่ของจริงแพง
+
+ถ้า Flutter rebuild ทุกอย่างบนจอทุกเฟรม มันจะช้าจนใช้ไม่ได้ ทริกคือ widget เป็นแค่ layer บนสุดที่ถูก:
+
+<Mermaid title="สาม layer: widget ที่ถูก, element ที่อยู่ต่อเนื่อง, การ render จริง" code={layersDiagram} />
+
+export const layersDiagram = `flowchart TB
+  w["Widget\nimmutable description\n(rebuild อิสระ)"] --> e["Element\nliving instance\n(อยู่ต่อเนื่อง, ถือ state)"]
+  e --> r["RenderObject\nlayout และ paint\n(ส่วนที่แพง)"]`;
+
+การ rebuild widget นั้นถูก ส่วน layer **element** และ **render** ที่อยู่ข้างล่างจะอยู่ต่อเนื่องและถูกอัปเดตเฉพาะจุดที่ widget ใหม่ต่างจากเดิม การแยกแบบนี้ — description ที่ทิ้งได้อยู่บน machinery ที่ทนทาน — คือเรื่องราวทั้งหมดของ performance และบทเรียนต่อไปจะทำให้มันเป็นรูปธรรม
+
+<Callout title="การเปลี่ยนมุมมอง">
+เลิกคิดว่า widget คือ "ปุ่มบนจอ" widget คือ *description* ที่ immutable ที่คุณ rebuild ตลอดเวลา ส่วน object จริงบนจออยู่ต่ำลงไปหนึ่ง layer และถูกนำกลับมาใช้ซ้ำ พอเข้าใจตรงนี้ คำถามอย่าง "ทำไม build method ทั้งอันถึงรันใหม่?" ก็เลิกน่ากลัว — การรัน build ควรจะถูกอยู่แล้ว
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'widget คืออะไรกันแน่?',
+    options: [
+      'pixel จริงบนจอ',
+      'description ที่ immutable ของ UI ชิ้นหนึ่ง ณ ช่วงเวลาหนึ่ง',
+      'object ที่ mutable และแก้ในที่เดิมได้',
+      'thread แยกต่างหาก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Flutter ตอบสนองต่อการเปลี่ยน state อย่างไร?',
+    options: [
+      'mutate widget เดิมในที่เดิม',
+      'rebuild widget description ใหม่ แล้วอัปเดตเฉพาะส่วนที่ต่างข้างล่าง',
+      'reload ทั้งแอป',
+      'สลับไปทำงานบน background thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการ rebuild widget ถึงถูก?',
+    options: [
+      'widget เป็น layer บนสุดที่เบา ส่วน element/render layer ที่แพงอยู่ต่อเนื่องและอัปเดตเฉพาะที่จำเป็น',
+      'Flutter cache ทั้งจอเป็นรูปภาพ',
+      'rebuild เกิดแค่ครั้งเดียวต่อแอป',
+      'widget รันบน GPU',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="widgets/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="widgets/index" />

@@ -1,0 +1,107 @@
+---
+title: 'Rebuilds & Performance'
+description: 'The biggest levers for smooth Flutter — const constructors, narrowing setState scope, stable subtrees, RepaintBoundary, and finding waste with DevTools.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Rebuilds are cheap — until they aren't
+
+Rebuilding a widget subtree is usually fast: Flutter diffs the new widgets against the elements and updates only what changed. The problem is doing it *more than necessary* — rebuilding a big subtree when one small piece changed, every frame of an animation. The levers below all reduce wasted rebuild and repaint work.
+
+## Lever 1: const constructors
+
+A `const` widget is created at compile time and canonicalized. When a parent rebuilds, Flutter sees the same `const` instance and **skips rebuilding that subtree entirely**.
+
+```dart
+// This subtree is const — it is built once and skipped on every parent rebuild.
+const Padding(
+  padding: EdgeInsets.all(16),
+  child: Text('Static label'),
+)
+```
+
+Adding `const` wherever a widget's inputs are all compile-time constant is the cheapest performance win in Flutter. Turn on the `prefer_const_constructors` lint and obey it.
+
+## Lever 2: narrow the setState scope
+
+`setState` rebuilds the *whole* `State`'s `build` output. If a giant screen calls `setState` for a small counter, the whole screen rebuilds.
+
+```dart
+// ❌ setState here rebuilds the entire screen for one number.
+// ✅ Pull the changing part into its own small StatefulWidget,
+//    so only that widget rebuilds. Keep the rest as const siblings.
+```
+
+The pattern: push state *down* to the smallest widget that needs it, and keep the surrounding widgets `const` so they stay put.
+
+## Lever 3: stable subtrees and RepaintBoundary
+
+<Mermaid title="Isolating the part that changes keeps the rest stable" code={boundaryDiagram} />
+
+export const boundaryDiagram = `flowchart TB
+  screen["Big screen (const, stable)"] --> counter["Small changing widget\n(its own State)"]
+  screen --> rest["const siblings\nnot rebuilt, not repainted"]
+  counter --> rb["wrap heavy/animated part\nin RepaintBoundary"]`;
+
+A `RepaintBoundary` gives a subtree its own paint layer, so repainting it does not force its neighbors to repaint. Wrap an animation or a frequently-updating widget in one to contain the damage.
+
+## Lever 4: measure with DevTools
+
+Don't guess. Flutter DevTools shows **rebuild counts** (which widgets rebuild and how often), a **timeline** of frame times (spot the frames over budget), and the widget inspector. The workflow is: reproduce the jank, open the timeline, find the expensive frame, and see which subtree is doing too much.
+
+<Callout title="The one-line takeaway">
+Smooth Flutter is mostly about *not* rebuilding or repainting more than needed: mark every constant-input widget `const` (it is skipped on parent rebuild), push `setState` down to the smallest widget so scope stays tiny, keep surrounding subtrees stable, and wrap animated/heavy parts in a `RepaintBoundary`. Then confirm with DevTools rebuild counts and the frame timeline instead of guessing.
+</Callout>
+
+export const quizPerf = [
+  {
+    q: 'Why does a const widget help performance?',
+    options: [
+      'It compresses the widget',
+      'It is canonicalized, so on a parent rebuild Flutter reuses the same instance and skips rebuilding that subtree',
+      'It runs on a background isolate',
+      'It disables layout',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the effect of calling setState in a large State class?',
+    options: [
+      'Only the changed pixel updates',
+      'The whole State\'s build output is rebuilt — so keep the setState scope small',
+      'Nothing rebuilds',
+      'It rebuilds the entire app',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a RepaintBoundary do?',
+    options: [
+      'Prevents a widget from ever painting',
+      'Gives a subtree its own paint layer so repainting it does not force neighbors to repaint',
+      'Caps the frame rate',
+      'Creates a new isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How should you find a performance problem?',
+    options: [
+      'Guess and add const everywhere blindly',
+      'Measure with DevTools — rebuild counts and the frame timeline — to find the subtree over budget',
+      'Disable the widget tree',
+      'Rewrite the app',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/rebuilds-and-performance" questions={quizPerf} />
+
+<ProgressTracker client:visible id="async-and-performance/rebuilds-and-performance" />

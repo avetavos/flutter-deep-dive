@@ -1,0 +1,108 @@
+---
+title: 'The Render Pipeline'
+description: 'What happens each frame — build, layout, paint, composite — plus RenderObjects, repaint boundaries, and why the three trees exist.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Four phases per frame
+
+When Flutter draws a frame, it runs a fixed pipeline. Knowing the phases tells you where your time goes and where to optimize.
+
+<Mermaid title="The per-frame render pipeline" code={pipeDiagram} />
+
+export const pipeDiagram = `flowchart LR
+  build["1. Build\n(run build methods)"] --> layout["2. Layout\n(constraints down, sizes up)"]
+  layout --> paint["3. Paint\n(record draw commands)"]
+  paint --> composite["4. Composite\n(assemble layers, to GPU)"]`;
+
+1. **Build** — dirty widgets rebuild, producing an updated widget description.
+2. **Layout** — the constraints-go-down/sizes-go-up pass computes every render object's size and position.
+3. **Paint** — each render object records drawing commands (not pixels yet) into layers.
+4. **Composite** — the layers are assembled and handed to the GPU to rasterize.
+
+The budget is tight: to hit 60fps you have ~16ms per frame (~8ms at 120Hz). Jank is a frame that misses that budget, and it almost always comes from too much work in **build** or **layout**.
+
+## RenderObjects do the real work
+
+Widgets are lightweight, immutable *descriptions*. The objects that actually lay out and paint are **RenderObjects**, and they live in the third of Flutter's three trees:
+
+- **Widget tree** — your immutable configuration (rebuilt often, cheap).
+- **Element tree** — the mutable glue that holds state and links widgets to render objects.
+- **Render tree** — the `RenderObject`s that compute layout and paint (expensive; kept and mutated, not rebuilt).
+
+This separation is *why* rebuilding widgets is cheap: a new widget is compared against the old one, and Flutter mutates the existing render object in place rather than recreating the expensive part.
+
+## Repaint boundaries
+
+By default, when a render object repaints, it can force its neighbors to repaint too — they share a layer. A **`RepaintBoundary`** puts a subtree on its own layer, so its repaints do not ripple outward (and vice versa). This is the main tool for isolating an animating or frequently-repainting region.
+
+```dart
+RepaintBoundary(
+  child: SpinningLogo(),   // repaints on its own layer, not the whole screen
+)
+```
+
+Use it around things that repaint often (animations, progress spinners) so the rest of the frame is not re-recorded. Overusing it costs memory (each boundary is a layer), so apply it where profiling shows repaint churn.
+
+## Relayout boundaries and how to profile
+
+Flutter also creates **relayout boundaries** automatically where a subtree's size cannot affect its parent (for example, under tight constraints) — so a change inside does not force the whole tree to re-lay-out. You rarely manage these by hand, but they are why a localized change stays localized.
+
+To see all of this, use **Flutter DevTools**: the performance view shows per-frame build/layout/paint times, and the "Highlight repaints" and "Track widget rebuilds" tools show exactly what is churning. Optimize what you measure, not what you guess.
+
+<Callout title="The one-line takeaway">
+Each frame runs **build → layout → paint → composite** within a ~16ms budget; jank is usually too much work in build or layout. Widgets are cheap immutable descriptions; the expensive **RenderObjects** (the third tree) are mutated in place, which is why rebuilding widgets is cheap. Wrap frequently-repainting subtrees in a **`RepaintBoundary`** to keep their repaints off their own layer — and profile with DevTools instead of guessing.
+</Callout>
+
+export const quizPipeline = [
+  {
+    q: 'What is the order of the per-frame render pipeline?',
+    options: [
+      'Paint, build, layout, composite',
+      'Build, layout, paint, composite',
+      'Layout, build, composite, paint',
+      'Composite, paint, layout, build',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is rebuilding widgets cheap?',
+    options: [
+      'Widgets are never rebuilt',
+      'Widgets are lightweight immutable descriptions; the expensive RenderObjects are mutated in place rather than recreated',
+      'The GPU handles it',
+      'Rebuilds run on an isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a RepaintBoundary do?',
+    options: [
+      'Prevents a widget from ever painting',
+      'Puts a subtree on its own layer so its repaints do not ripple to neighbors',
+      'Speeds up layout by skipping it',
+      'Changes the widget size',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where does jank usually come from?',
+    options: [
+      'Too many colors',
+      'Too much work in the build or layout phase, missing the frame budget',
+      'Using const constructors',
+      'Small widget trees',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/render-pipeline" questions={quizPipeline} />
+
+<ProgressTracker client:visible id="layout-and-rendering/render-pipeline" />

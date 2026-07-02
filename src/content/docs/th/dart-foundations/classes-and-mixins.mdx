@@ -1,0 +1,145 @@
+---
+title: 'Classes & Mixins'
+description: 'constructor (named, factory, const), mixin สำหรับ reuse แบบแนวนอน, extension method และ enhanced enum — feature เชิง object ที่ Flutter พึ่งพา'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## constructor แบบ Dart
+
+constructor ของ Dart รวยกว่าภาษาส่วนใหญ่ และ Flutter ก็ใช้ครบทุกอย่าง พื้นฐานที่ต้องรู้:
+
+```dart
+class Point {
+  final double x, y;
+
+  // default constructor พร้อม `this.` shorthand — assign field ตรง ๆ
+  const Point(this.x, this.y);
+
+  // named constructor — อีกวิธีในการสร้าง
+  const Point.origin() : x = 0, y = 0;
+
+  // factory constructor — คืน instance ที่ cache ไว้/เป็น subtype ได้ ไม่จำเป็นต้องสร้างใหม่
+  factory Point.fromMap(Map<String, double> m) => Point(m['x']!, m['y']!);
+}
+
+const p = Point(1, 2);       // const construction — canonicalize
+final o = Point.origin();
+```
+
+สามอย่างที่ควรจำให้ขึ้นใจ:
+
+- **`const` constructor** (ทำได้เมื่อ field ทุกตัวเป็น `final`) ให้ผู้เรียก build instance ที่ถูก canonicalize — พื้นฐานของ `const` widget
+- **named constructor** (`Point.origin`) ให้หลายวิธีสร้างที่ชัดเจน แทนการ overload
+- **factory constructor** ไม่จำเป็นต้องคืน instance ใหม่ — คืนตัวที่ cache ไว้หรือ subtype ก็ได้ `factory` คือวิธีที่หลาย class ของ Flutter/Dart implement singleton หรือ parsing
+
+## Mixin: reuse behavior ข้าม class ที่ไม่เกี่ยวกัน
+
+Dart มี single inheritance แต่ **mixin** ให้คุณ compose behavior แบบแนวนอน — เพิ่มชุด method/field เข้า class โดยไม่ต้องมีความสัมพันธ์แบบ subclass นี่คือ pattern ของ Flutter สำหรับ `State` class
+
+```dart
+mixin Logger {
+  void log(String msg) => print('[log] $msg');
+}
+
+mixin Validator {
+  bool isValid(String s) => s.isNotEmpty;
+}
+
+// compose หลายความสามารถด้วย `with`:
+class Form with Logger, Validator {
+  void submit(String value) {
+    if (isValid(value)) log('submitting $value');
+  }
+}
+```
+
+<Mermaid title="mixin เพิ่มความสามารถโดยไม่ต้อง inheritance" code={mixinDiagram} />
+
+export const mixinDiagram = `flowchart TB
+  base["class State"] -->|with| result["State class ของคุณ"]
+  m1["mixin\nSingleTickerProviderStateMixin"] -->|with| result
+  m2["mixin\nWidgetsBindingObserver"] -->|with| result`;
+
+เวลาคุณเขียน `class _MyState extends State<MyWidget> with SingleTickerProviderStateMixin` คุณกำลัง mix ความสามารถในการเป็น `vsync` provider สำหรับ animation เข้ามา — reuse แบบแนวนอนล้วน ๆ
+
+## extension method และ enhanced enum
+
+**extension method** เพิ่ม method ให้ type ที่คุณไม่ได้เป็นเจ้าของ — พบบ่อยสำหรับ helper สั้น ๆ:
+
+```dart
+extension StringX on String {
+  String get capitalized => isEmpty ? this : this[0].toUpperCase() + substring(1);
+}
+'flutter'.capitalized; // 'Flutter'
+```
+
+**enhanced enum** พก field และ method ได้ ไม่ใช่แค่ชื่อ — เหมาะกับค่าคงที่ที่มี type และอธิบายตัวเองได้:
+
+```dart
+enum Status {
+  active('Active', true),
+  archived('Archived', false);
+
+  const Status(this.label, this.isVisible);
+  final String label;
+  final bool isVisible;
+}
+Status.active.label; // 'Active'
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+constructor ของ Dart ทำได้เยอะ: `const` constructor (field เป็น `final` ทุกตัว) เปิดทาง `const` widget ที่ถูก canonicalize, **named** constructor ให้ทางเลือกที่ชัดเจน และ **factory** constructor คืน instance ที่ cache หรือ subtype ได้ **mixin** (`with`) คือวิธีที่ Flutter ติดความสามารถอย่าง ticker และ observer เข้ากับ `State` class ของคุณ — reuse แบบแนวนอนโดยไม่ต้อง inheritance
+</Callout>
+
+export const quizClasses = [
+  {
+    q: 'factory constructor ทำอะไรได้ที่ normal constructor ทำไม่ได้?',
+    options: [
+      'รับ parameter',
+      'คืน instance ที่มีอยู่/cache ไว้ หรือ subtype แทนที่จะสร้าง object ใหม่เสมอ',
+      'ถูก mark เป็น const',
+      'มีชื่อได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'mixin ใน Dart/Flutter ใช้ทำอะไร?',
+    options: [
+      'แทน inheritance ทั้งหมด',
+      'compose behavior แบบแนวนอน — เพิ่ม method/field เข้า class โดยไม่ต้องมีความสัมพันธ์แบบ subclass',
+      'ประกาศ type ที่เป็น nullable',
+      'รัน async code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'class ต้องมีอะไรถึงจะมี const constructor ได้?',
+    options: [
+      'ต้อง extend Widget',
+      'field ทุกตัวต้องเป็น final',
+      'ต้องเป็น factory',
+      'ต้องใช้ mixin',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'extension method ให้คุณทำอะไร?',
+    options: [
+      'เพิ่ม method ให้ type ที่คุณไม่ได้เป็นเจ้าของ (เช่นเพิ่ม helper ให้ String)',
+      'extend class ด้วย inheritance',
+      'สร้าง type ที่เป็น nullable',
+      'นิยาม mixin',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/classes-and-mixins" questions={quizClasses} />
+
+<ProgressTracker client:visible id="dart-foundations/classes-and-mixins" />

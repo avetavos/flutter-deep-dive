@@ -1,0 +1,78 @@
+---
+title: 'Layout & Rendering'
+description: 'How Flutter turns widgets into pixels — the constraints-based layout algorithm, the core layout widgets, slivers and scrolling, and the per-frame render pipeline.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## From widgets to pixels
+
+You describe a UI as a tree of widgets. Flutter's job is to turn that description into positioned, painted pixels — and it does it with one small, learnable algorithm. Master that algorithm and layout stops being trial-and-error.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Constraints & layout | The one rule: constraints go down, sizes go up, parent sets position |
+| Core layout widgets | Row/Column/Flex, Expanded, Stack, Container, and friends |
+| Slivers & scrolling | Lazy building, ListView, CustomScrollView, and slivers |
+| The render pipeline | Build, layout, paint, composite — what happens each frame |
+
+## The one idea to hold
+
+Almost every layout question in Flutter is answered by a single sentence you will meet in the next lesson:
+
+<Mermaid title="The layout conversation between parent and child" code={idxDiagram} />
+
+export const idxDiagram = `flowchart TB
+  p["Parent"] -->|1. passes constraints down| c["Child"]
+  c -->|2. picks a size within them| p
+  p -->|3. sets child position| done["Positioned + sized"]`;
+
+A parent hands its child a set of **constraints** (min/max width and height). The child chooses its **size** within those limits. The parent then decides **where** to put the child. That three-step conversation, repeated down the tree, is the whole layout system.
+
+<Callout title="The mental shift">
+Widgets do not paint themselves wherever they like. Layout is a negotiation: a parent constrains, a child sizes, the parent positions. When a layout "won't do what you want," you are almost always fighting the constraints being handed down — not the widget itself. Learn to read the constraint flow and layout becomes predictable.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is Flutter\'s layout system, in one sentence?',
+    options: [
+      'Widgets paint themselves at absolute coordinates',
+      'A negotiation: parent passes constraints down, child sizes within them, parent positions the child',
+      'A CSS-style cascade of styles',
+      'A grid of fixed cells',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When a layout will not do what you want, what are you usually fighting?',
+    options: [
+      'The Dart compiler',
+      'The constraints being handed down to the widget',
+      'The GPU',
+      'The widget\'s color',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Who decides where a child is positioned?',
+    options: [
+      'The child itself',
+      'The parent, after the child picks its size',
+      'The render pipeline at random',
+      'The operating system',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="layout-and-rendering/index" />

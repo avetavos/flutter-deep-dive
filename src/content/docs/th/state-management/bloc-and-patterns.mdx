@@ -1,0 +1,112 @@
+---
+title: 'BLoC & Patterns'
+description: 'unidirectional data flow ด้วย BLoC และ Cubit — event เข้า state ออก, แยก business logic จาก UI และเมื่อไรที่ ceremony เพิ่มเติมคุ้มค่า'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ทิศทางเดียว เสมอ
+
+**BLoC** (Business Logic Component) คือ pattern ที่สร้างบนกฎเข้ม: data ไหลไป **ทิศทางเดียว** UI ส่ง *event* (หรือเรียก method) เข้า; BLoC emit *state* ออก; UI rebuild จาก state เหล่านั้น UI ไม่เคย mutate state ตรง ๆ และ business logic ไม่เคยแตะ widget
+
+<Mermaid title="Unidirectional data flow" code={flowDiagram} />
+
+export const flowDiagram = `sequenceDiagram
+  participant UI
+  participant Bloc
+  UI->>Bloc: add(Event) / เรียก method
+  Bloc->>Bloc: รัน business logic
+  Bloc->>UI: emit(State ใหม่)
+  UI->>UI: rebuild จาก State`;
+
+วินัยทางเดียวนี้คือคุณค่าทั้งหมด เพราะ state เปลี่ยนได้ที่เดียวเท่านั้น ตอบสนองต่อ input ที่ชัดเจน app จึงคาดเดาได้และ test ได้ — คุณ feed event ให้ BLoC ใน test แล้ว assert ลำดับ state ที่แน่นอนได้ โดยไม่ต้องมี widget เลย
+
+## Cubit: ครึ่งที่ง่ายกว่า
+
+library ของ BLoC มาพร้อมสองแบบ **Cubit** คือแบบที่ง่ายกว่า — ไม่มี event class คุณแค่เรียก method ที่ `emit` state ใหม่ เริ่มที่นี่
+
+```dart
+// state ไหลออก; method คือ input
+class CounterCubit extends Cubit<int> {
+  CounterCubit() : super(0);          // initial state
+
+  void increment() => emit(state + 1); // emit state ใหม่
+  void reset() => emit(0);
+}
+
+// ใน UI: BlocBuilder rebuild เมื่อมี state ใหม่ถูก emit
+BlocBuilder<CounterCubit, int>(
+  builder: (context, count) => Text('$count'),
+);
+
+// trigger input:
+context.read<CounterCubit>().increment();
+```
+
+**BLoC** เต็มรูปเพิ่ม `Event` class ที่ชัดเจนระหว่าง UI กับ logic (`add(IncrementPressed())` แทน `increment()`) การอ้อมนั้นแลกมาด้วย list ของทุก input ที่เป็นไปได้ที่ document และ log ได้ — มีค่าใน app ใหญ่ เกินจำเป็นใน app เล็ก
+
+## เมื่อไร ceremony ถึงคุ้ม
+
+BLoC มีโครงสร้างมากกว่า `setState` หรือ Provider และโครงสร้างนั้นคือต้นทุนที่คุณจ่ายล่วงหน้า มันคืนทุนเมื่อ:
+
+- app **ใหญ่** และคุณอยากได้ business logic เป็น unit ที่ test ได้ แยกจาก UI อย่างสมบูรณ์
+- state transition **ซับซ้อน** — event เยอะ, async flow, และคุณอยากให้มันชัดเจนและ trace ได้
+- **ทีม** ได้ประโยชน์จาก pattern เดียวที่ enforce ทั่ว codebase
+
+สำหรับ app เล็กหรือ local state ของหน้าเดียว BLoC คือ over-engineering — `setState` หรือ `ChangeNotifier` ง่าย ๆ ชัดกว่า ทักษะคือการจับคู่ ceremony กับความซับซ้อน
+
+<Callout title="สรุปหนึ่งบรรทัด">
+BLoC บังคับ **unidirectional data flow**: event/method เข้า, state ออก และ UI rebuild จาก state ที่ emit เท่านั้น — ทำให้ logic คาดเดาได้และ test ได้โดยไม่ต้องมี widget **Cubit** คือรูปแบบง่าย (เรียก method ที่ `emit`); **BLoC** เต็มรูปเพิ่ม event class ที่ชัดเจนเพื่อ traceability หยิบมาใช้เมื่อ app ใหญ่, flow ซับซ้อน หรือทีมต้องการ pattern เดียว — ไม่ใช่สำหรับหน้าเดียว
+</Callout>
+
+export const quizBloc = [
+  {
+    q: 'กฎที่นิยาม pattern ของ BLoC คืออะไร?',
+    options: [
+      'state ถูก mutate ที่ไหนก็ได้',
+      'unidirectional data flow — event/method เข้า, state ออก, UI rebuild จาก state',
+      'widget เก็บ business logic',
+      'มันเลี่ยง build method',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Cubit ต่างจาก BLoC เต็มรูปอย่างไร?',
+    options: [
+      'Cubit ใช้สำหรับ animation เท่านั้น',
+      'Cubit ใช้ method ที่ emit state ตรง ๆ; BLoC เต็มรูปเพิ่ม Event class ที่ชัดเจน',
+      'Cubit ถือ state ไม่ได้',
+      'มันไม่เกี่ยวกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม BLoC ถึงถือว่า test ได้?',
+    options: [
+      'มันไม่ต้องการ test',
+      'คุณ feed event ให้มันแล้ว assert ลำดับ state ที่ emit ได้แน่นอน โดยไม่ต้องมี widget',
+      'มันรัน test อัตโนมัติ',
+      'มัน disable state',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไรที่ BLoC มักเป็น over-engineering?',
+    options: [
+      'สำหรับ app ใหญ่ที่มี async flow ซับซ้อน',
+      'สำหรับ local state ง่าย ๆ ของหน้าเดียว ที่ setState ชัดกว่า',
+      'เมื่อทีมต้องการ pattern เดียว',
+      'เมื่อคุณต้องการ state transition ที่ trace ได้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/bloc-and-patterns" questions={quizBloc} />
+
+<ProgressTracker client:visible id="state-management/bloc-and-patterns" />

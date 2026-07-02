@@ -1,0 +1,60 @@
+---
+title: Flutter Deep Dive
+description: Master Flutter from first principles — the Dart language, the widget tree and three-tree architecture, the constraints-based layout algorithm, the render pipeline, state management from setState to Riverpod and BLoC, navigation, animations, isolates, and shipping to production.
+template: splash
+hero:
+  tagline: A standalone, intermediate→advanced course on Flutter and Dart. From null safety and async Dart to the widget/element/render trees, the constraints layout algorithm, InheritedWidget and modern state management, navigation, performance, and release builds — every topic taught through annotated code and widget-tree diagrams.
+  actions:
+    - text: Start here
+      link: /flutter/en/dart-foundations/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to Widgets
+      link: /flutter/en/widgets/
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll learn
+
+<CardGrid>
+  <Card title="Dart Foundations" icon="seti:dart">
+    The Dart language a Flutter dev must know — null safety, classes & mixins, and async with Future/Stream. [Start →](/flutter/en/dart-foundations/)
+  </Card>
+  <Card title="Everything Is a Widget" icon="rocket">
+    The widget concept, stateless vs stateful, build & BuildContext, and the three trees. [Compose →](/flutter/en/widgets/)
+  </Card>
+  <Card title="Layout & Rendering" icon="puzzle">
+    Constraints go down, sizes go up — the layout algorithm, core widgets, slivers, and the render pipeline. [Lay out →](/flutter/en/layout-and-rendering/)
+  </Card>
+  <Card title="State Management" icon="seti:config">
+    setState & lifecycle, InheritedWidget, Provider/Riverpod, BLoC, and where state should live. [Manage →](/flutter/en/state-management/)
+  </Card>
+  <Card title="Navigation & App Structure" icon="seti:plan">
+    Navigator, declarative routing & deep links, app scaffolding, and platform channels. [Navigate →](/flutter/en/navigation/)
+  </Card>
+  <Card title="Async, Performance & Rendering" icon="random">
+    FutureBuilder/StreamBuilder, minimizing rebuilds, animations, and isolates for heavy work. [Optimize →](/flutter/en/async-and-performance/)
+  </Card>
+  <Card title="Tooling, Testing & Production" icon="approve-check">
+    The toolchain, unit/widget/golden tests, build modes & flavors, and production concerns. [Ship →](/flutter/en/tooling-and-production/)
+  </Card>
+</CardGrid>
+
+## How this course works
+
+<CardGrid>
+  <Card title="The model first, then the code" icon="rocket">
+    Every topic starts from a model — the three trees, the constraints algorithm, how rebuilds propagate — so Flutter's behavior stops feeling like magic and starts feeling inevitable.
+  </Card>
+  <Card title="Dart, then Flutter" icon="seti:dart">
+    Flutter is Dart. The course opens with the Dart depth a Flutter dev actually needs — null safety, async, mixins — before a single widget.
+  </Card>
+  <Card title="Design, not just syntax" icon="approve-check">
+    Not "here's a ListView" but "here's how constraints and slivers make scrolling work, and why your list janks." You'll reason about layout and performance with confidence.
+  </Card>
+  <Card title="Diagrams that explain" icon="puzzle">
+    The widget/element/render trees, constraint flow, the render pipeline, and state propagation as theme-aware Mermaid diagrams. Bilingual (English / ไทย) with saved quiz progress.
+  </Card>
+</CardGrid>

@@ -1,0 +1,106 @@
+---
+title: 'Isolates & compute'
+description: 'ทำไมงาน CPU หนักทำให้ UI jank, ใช้ compute() รัน function บน background isolate, raw isolate กับ port และ boundary ที่ไม่แชร์ memory'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## jank ที่ await ออกไปไม่ได้
+
+`async`/`await` แก้เรื่องการรอ (network, disk) — แต่ **ไม่** ช่วยเรื่องงาน CPU หนัก การ parse JSON 5MB, resize รูป, หรือรัน crypto hash เป็นการคำนวณแบบ synchronous และมันรันบน **UI isolate** ระหว่างที่มันรัน event loop render frame ไม่ได้ แอปจึงค้าง
+
+คุณ `await` ออกจากปัญหานี้ไม่ได้ เพราะไม่มีอะไรให้ *รอ* — CPU กำลังยุ่ง ทางแก้คือย้ายงานไป **isolate อื่น** เพื่อให้ UI isolate ว่างพอจะ render
+
+## compute(): กรณีทั่วไป
+
+สำหรับ "รัน expensive pure function นี้นอก main isolate" แบบทั่วไป Flutter ให้ `compute()` ส่ง top-level (หรือ static) function กับ argument ของมัน มันจะสร้าง background isolate ขึ้นมา รัน function ที่นั่น แล้วคืนผลเป็น `Future`
+
+```dart
+// top-level function — จำเป็น เพราะมันต้องรันบน isolate อื่น
+List<Item> parseItems(String jsonStr) {
+  final raw = jsonDecode(jsonStr) as List;
+  return raw.map((e) => Item.fromJson(e)).toList();   // งานหนัก
+}
+
+// บน UI isolate — offload มัน แล้ว await ผลโดยไม่ jank:
+final items = await compute(parseItems, hugeJsonString);
+```
+
+UI ยัง render ที่ 60fps ระหว่างที่ parse รันอยู่ที่อื่น `compute` เป็นเครื่องมือที่ถูก ~90% ของกรณี
+
+## raw isolate และ port
+
+สำหรับ worker ที่อยู่ยาวหรือการสื่อสารสองทาง ใช้ `Isolate.spawn` กับ **port** — isolate ไม่แชร์ memory จึงคุยกันด้วยการส่ง message ผ่าน `SendPort`/`ReceivePort`
+
+<Mermaid title="offload งานหนักไปยัง worker isolate" code={isoDiagram} />
+
+export const isoDiagram = `flowchart LR
+  main["UI isolate\n(render ต่อเนื่อง)"] -->|ส่ง message| worker["Worker isolate\n(ทำงาน CPU)"]
+  worker -->|ส่งผลกลับ| main
+  note["ไม่แชร์ memory:\nข้ามได้แค่ message ที่ถูก copy"] --- worker`;
+
+## boundary: ไม่แชร์ memory
+
+กฎที่กำหนดทุกอย่าง: **isolate ไม่แชร์ memory** อะไรที่คุณส่งจะถูก *copy* ข้าม boundary (มี fast-path ยกเว้นบ้างเช่น `TransferableTypedData`) ผลที่ตามมา:
+
+- คุณส่ง closure ที่ capture UI state หรือ object graph ที่คุณ mutate อยู่ไม่ได้
+- ส่งข้อมูลใหญ่มากมีต้นทุนการ copy — บางครั้งการ copy กินส่วนที่ประหยัดไปหมด
+- worker function ต้อง self-contained (top-level/static) รับ plain data เข้าและคืน plain data ออก
+
+นี่คือ message-passing model เดียวกับในบทเรียน Dart async แต่ตอนนี้ใช้เพื่อ parallelism แทน concurrency
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`async`/`await` ปล่อย thread ให้ว่างระหว่าง *รอ* แต่งาน CPU หนักยังทำให้ UI isolate jank — คุณ await CPU ที่ยุ่งไม่ได้ ย้ายมันไป isolate อื่น: `compute(fn, arg)` รัน top-level function บน background isolate แล้วคืน `Future` (กรณีทั่วไป) หรือใช้ `Isolate.spawn` กับ port สำหรับ worker ที่อยู่ยาว จำ boundary ไว้: isolate ไม่แชร์ memory ทุกอย่างที่ข้ามจึงถูก copy
+</Callout>
+
+export const quizIso = [
+  {
+    q: 'ทำไม async/await ถึงไม่แก้ jank จากการ parse JSON ใหญ่?',
+    options: [
+      'เพราะ Dart parse JSON ไม่ได้',
+      'มันเป็นงาน CPU หนักแบบ synchronous บน UI isolate — ไม่มีอะไรให้ await thread จึงยุ่งและ frame ตก',
+      'เพราะ await ถูกปิดใน release mode',
+      'จริง ๆ มันแก้ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'compute() ทำอะไร?',
+    options: [
+      'cache ค่า',
+      'รัน top-level/static function บน background isolate แล้วคืนผลเป็น Future',
+      'บังคับ rebuild',
+      'สร้าง animation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'isolate สื่อสารกันอย่างไร?',
+    options: [
+      'แชร์ memory โดยตรง',
+      'ส่ง message ที่ถูก copy ผ่าน port (SendPort/ReceivePort) — ไม่แชร์ memory',
+      'ผ่าน global variable',
+      'สื่อสารกันไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ผลของ boundary ที่ไม่แชร์ memory คืออะไร?',
+    options: [
+      'isolate รันช้ากว่า UI',
+      'ข้อมูลที่ส่งข้ามถูก copy worker function จึงต้อง self-contained และ payload ใหญ่มากมีต้นทุนการ copy',
+      'ส่ง live UI object ข้ามได้อิสระ',
+      'isolate คืนค่าไม่ได้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/isolates-and-compute" questions={quizIso} />
+
+<ProgressTracker client:visible id="async-and-performance/isolates-and-compute" />

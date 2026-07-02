@@ -1,0 +1,122 @@
+---
+title: 'Slivers & Scrolling'
+description: 'How scrolling really works — lazy building with ListView.builder, the viewport, and composing custom scroll effects with CustomScrollView and slivers.'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Lazy building is the whole point
+
+A scrollable list might contain ten thousand items, but the screen shows twenty. Building all ten thousand would be catastrophic. The key idea of Flutter scrolling is **lazy building**: only the items near the visible area are built, and they are recycled as you scroll.
+
+This is why the constructor you choose matters enormously:
+
+```dart
+// ❌ Builds ALL children up front — fine for a few, fatal for thousands.
+ListView(children: [ for (final item in items) Tile(item) ])
+
+// ✅ Builds children on demand as they scroll into view.
+ListView.builder(
+  itemCount: items.length,
+  itemBuilder: (context, i) => Tile(items[i]),
+)
+```
+
+`ListView.builder` (and `GridView.builder`) call `itemBuilder` only for items the viewport needs. For any list that could be long, always use the builder form.
+
+## The viewport and slivers
+
+Under a scrollable is a **viewport** — the window you see — and inside it, **slivers**. A sliver is a scrollable region that knows how to lay itself out lazily against the viewport. `ListView` is a convenience that wraps a single sliver; when you need more than one scroll effect in one scroll view, you compose slivers yourself.
+
+<Mermaid title="A viewport lazily builds only the slivers in view" code={sliverDiagram} />
+
+export const sliverDiagram = `flowchart TB
+  scroll["CustomScrollView"] --> vp["Viewport\n(visible window)"]
+  vp --> s1["SliverAppBar\n(collapses on scroll)"]
+  vp --> s2["SliverList\n(builds only visible tiles)"]
+  vp --> offscreen["off-screen tiles:\nnot built yet"]`;
+
+## CustomScrollView: composing scroll effects
+
+`CustomScrollView` takes a list of slivers and scrolls them as one. This is how you build a collapsing header above a list, or a grid and a list in the same scroll view.
+
+```dart
+CustomScrollView(
+  slivers: [
+    const SliverAppBar(
+      floating: true,
+      expandedHeight: 200,     // a header that collapses as you scroll
+    ),
+    SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, i) => Tile(items[i]),   // still lazy
+        childCount: items.length,
+      ),
+    ),
+  ],
+)
+```
+
+The mental model: a normal widget occupies a fixed box; a **sliver** occupies a scrollable extent and negotiates with the viewport about how much of it is visible. `SliverAppBar`, `SliverList`, `SliverGrid`, and `SliverToBoxAdapter` (to drop a regular widget into a sliver list) are the pieces you compose.
+
+## Common scrolling pitfalls
+
+- **Nesting scrollables** the same direction (a `ListView` inside a `ListView`) fights over the scroll and throws unbounded-constraint errors — use slivers or `shrinkWrap` deliberately.
+- **`shrinkWrap: true`** makes a list size to its content instead of the viewport, but it *builds everything* and loses laziness — use it only for genuinely small lists.
+- **Missing keys** on reorderable lists cause the wrong state to attach to the wrong item (see the Keys lesson).
+
+<Callout title="The one-line takeaway">
+Scrolling is built on **lazy building** — only items near the viewport are built and recycled — so always use `ListView.builder` for anything that could be long. A **viewport** holds **slivers**, scrollable regions that lay out lazily; compose them with `CustomScrollView` (e.g. a `SliverAppBar` collapsing over a `SliverList`) when one scroll view needs several effects. Avoid `shrinkWrap` on big lists — it discards the laziness.
+</Callout>
+
+export const quizSlivers = [
+  {
+    q: 'Why must you use ListView.builder for long lists?',
+    options: [
+      'It looks nicer',
+      'It builds children lazily on demand, instead of building all of them up front',
+      'It is required for any list',
+      'It disables scrolling',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a sliver?',
+    options: [
+      'A type of animation',
+      'A scrollable region that lays itself out lazily against the viewport',
+      'A fixed-size box widget',
+      'A navigation route',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When do you reach for CustomScrollView?',
+    options: [
+      'For every list',
+      'When one scroll view needs several effects, like a collapsing header above a lazy list',
+      'To disable lazy building',
+      'Only for grids',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the downside of shrinkWrap: true on a large list?',
+    options: [
+      'It changes the color',
+      'It builds all children (losing laziness) to size the list to its content',
+      'It disables tapping',
+      'It has no downside',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/slivers-and-scrolling" questions={quizSlivers} />
+
+<ProgressTracker client:visible id="layout-and-rendering/slivers-and-scrolling" />

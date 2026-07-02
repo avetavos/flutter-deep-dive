@@ -1,0 +1,78 @@
+---
+title: 'Tooling, Testing & Production'
+description: 'The workflow around the code — the toolchain and hot reload, the three kinds of tests, build modes, and what it takes to ship a Flutter app to real users.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## From code to shipped app
+
+Writing widgets is only half the job. The other half is the machinery around them: the toolchain that runs your code, the tests that prove it works, the build modes that turn Dart into a fast native binary, and the production concerns that decide whether real users have a good day.
+
+This module is that second half — the parts that separate a demo from a product.
+
+## What this module covers
+
+| Lesson | What you'll learn |
+|--------|-------------------|
+| Project & tooling | `pubspec.yaml`, the flutter CLI, DevTools, and hot reload vs hot restart |
+| Testing | Unit, widget, integration, and golden tests |
+| Build & release | Debug/profile/release modes, JIT vs AOT, flavors, per-platform output |
+| Production concerns | Error handling, crash reporting, profiling, and CI/CD |
+
+## The shape of the workflow
+
+<Mermaid title="The Flutter delivery workflow" code={flowDiagram} />
+
+export const flowDiagram = `flowchart LR
+  dev["develop\n(hot reload)"] --> test["test\n(unit/widget/golden)"]
+  test --> build["build\n(release, AOT)"]
+  build --> ship["ship\n(monitor, profile, CI/CD)"]`;
+
+Each stage has its own tools and its own failure modes. The through-line: Flutter optimizes hard for a fast inner loop (hot reload), then flips to a completely different compilation strategy (AOT) for release — and understanding that split explains most of the tooling.
+
+<Callout title="The mental shift">
+In development, Flutter runs your code with a JIT compiler so it can hot-reload changes in under a second. In release, it compiles ahead of time to native machine code for speed and small size. They are two different runtimes for the same code — which is why "it works in debug" is never the same claim as "it works in release."
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does this module focus on?',
+    options: [
+      'Writing more widgets',
+      'The workflow around the code — tooling, testing, building, and shipping',
+      'The Dart language',
+      'Animations',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does "it works in debug" not guarantee "it works in release"?',
+    options: [
+      'Debug and release run the same way',
+      'Development uses a JIT runtime with hot reload; release compiles ahead of time (AOT) — a different runtime',
+      'Release removes all your code',
+      'Debug mode has no bugs',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is Flutter\'s inner development loop optimized for?',
+    options: [
+      'Small binary size',
+      'A fast edit-refresh cycle via hot reload',
+      'Maximum runtime speed',
+      'Cross-language interop',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="tooling-and-production/index" />

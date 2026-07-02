@@ -1,0 +1,132 @@
+---
+title: 'Constraints & Layout'
+description: 'The one rule that explains all of Flutter layout — constraints go down, sizes go up, the parent sets position — and why unbounded constraints crash your app.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The one rule
+
+If you remember nothing else about Flutter layout, remember this:
+
+> **Constraints go down. Sizes go up. The parent sets the position.**
+
+Layout is a single pass down the tree and back up. A parent passes **constraints** to each child — a `BoxConstraints` with a min and max width and height. Each child must choose a **size** that satisfies those constraints, and reports it back up. The parent then **positions** the child inside itself.
+
+<Mermaid title="One layout pass: down with constraints, up with sizes" code={ruleDiagram} />
+
+export const ruleDiagram = `flowchart TB
+  parent["Parent widget"] -->|"constraints:\nmin/max w, min/max h"| child["Child widget"]
+  child -->|"chosen size\n(within constraints)"| parent
+  parent -->|"offset\n(where to place child)"| placed["Child placed"]`;
+
+That is the entire algorithm. Everything else is detail about *how* a particular widget chooses its size and *what* constraints it passes on.
+
+## A concrete walk-through
+
+```dart
+Center(
+  child: Container(
+    width: 100,
+    height: 100,
+    color: Colors.blue,
+  ),
+)
+```
+
+Reading top-down:
+
+1. `Center` receives constraints from its parent (say, the whole screen: exactly the screen size).
+2. `Center` passes **loose** constraints to its child — "you may be any size from 0 up to the screen."
+3. `Container` wants to be exactly `100x100`, which fits, so it sizes to `100x100` and reports up.
+4. `Center` is as big as the screen, and positions the `100x100` child in the middle.
+
+Change `Center` to `Align`, `Padding`, or `SizedBox` and only step 2 changes — the constraints passed down. The rule never changes.
+
+## Tight vs loose constraints
+
+A constraint is **tight** when min equals max (the widget must be exactly that size) and **loose** when min is 0 (the widget may be anything up to max).
+
+```dart
+// SizedBox imposes a tight constraint — the child MUST be 50x50.
+SizedBox(width: 50, height: 50, child: coloredBox)
+
+// Center imposes a loose constraint — the child may be up to the parent size.
+Center(child: coloredBox)
+```
+
+This is why the same widget behaves differently under different parents: `Container(color: Colors.red)` with no size fills its parent under tight constraints, but shrinks to nothing under loose ones. The widget did not change — the constraints did.
+
+## Why "unbounded constraints" crashes
+
+Some widgets pass **unbounded** constraints — a max of infinity — meaning "you can be as big as you want." A vertical `ListView`, for example, gives its children unbounded *height* (the scroll direction is effectively infinite).
+
+Put a `Column` inside that `ListView` and you get the classic error: a `Column` tries to be as tall as its constraints allow, but the constraint is infinite, so it cannot pick a finite height.
+
+```dart
+ListView(
+  children: [
+    Column(              // ❌ RenderFlex: unbounded height
+      children: [ Text('a'), Text('b') ],
+    ),
+  ],
+)
+```
+
+The fix is to give the child a bounded height — wrap it, use `shrinkWrap`, or restructure so the scrollable is the outer widget. Once you can read constraints, these errors read as sentences rather than mysteries.
+
+<Callout title="The one-line takeaway">
+Layout is one pass: **constraints go down, sizes go up, the parent sets position**. A `BoxConstraints` is **tight** (min equals max, size forced) or **loose** (min is 0, size optional). The same widget behaves differently only because its parent passes different constraints — and the dreaded "unbounded constraints" error just means a widget was asked to fill an infinite space. Read the constraint flow and layout becomes predictable.
+</Callout>
+
+export const quizConstraints = [
+  {
+    q: 'What is the core rule of Flutter layout?',
+    options: [
+      'Sizes go down, constraints go up',
+      'Constraints go down, sizes go up, the parent sets the position',
+      'Every widget picks absolute coordinates',
+      'The child positions the parent',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a "tight" constraint?',
+    options: [
+      'A constraint where min equals max, so the child must be exactly that size',
+      'A constraint with a max of infinity',
+      'A constraint that only applies to text',
+      'A constraint with min of 0',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'Why does putting a Column directly inside a vertical ListView error?',
+    options: [
+      'Column is not a valid child type',
+      'The ListView gives unbounded height, and Column cannot choose a finite size within an infinite constraint',
+      'You can only put one child in a ListView',
+      'Column requires a color',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does the same unsized Container fill one parent but shrink under another?',
+    options: [
+      'Containers are random',
+      'The parents pass different constraints (tight vs loose) — the widget did not change',
+      'The color affects size',
+      'It depends on screen brightness',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/constraints-and-layout" questions={quizConstraints} />
+
+<ProgressTracker client:visible id="layout-and-rendering/constraints-and-layout" />

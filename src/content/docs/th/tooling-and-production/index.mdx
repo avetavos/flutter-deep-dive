@@ -1,0 +1,78 @@
+---
+title: 'Tooling, Testing & Production'
+description: 'workflow รอบ ๆ code — toolchain และ hot reload, test สามแบบ, build mode และสิ่งที่ต้องมีเพื่อ ship แอป Flutter ให้ user จริง'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## จาก code สู่แอปที่ ship จริง
+
+การเขียน widget เป็นแค่ครึ่งเดียวของงาน อีกครึ่งคือเครื่องมือรอบ ๆ มัน: toolchain ที่รัน code ของคุณ, test ที่พิสูจน์ว่ามันทำงาน, build mode ที่แปลง Dart เป็น native binary ที่เร็ว และเรื่อง production ที่ตัดสินว่า user จริงจะมีวันที่ดีหรือไม่
+
+โมดูลนี้คือครึ่งหลังนั้น — ส่วนที่แยก demo ออกจาก product
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียน |
+|--------|-------------------|
+| Project & tooling | `pubspec.yaml`, flutter CLI, DevTools และ hot reload vs hot restart |
+| Testing | unit, widget, integration และ golden test |
+| Build & release | debug/profile/release mode, JIT vs AOT, flavor, output แต่ละ platform |
+| Production concerns | error handling, crash reporting, profiling และ CI/CD |
+
+## รูปร่างของ workflow
+
+<Mermaid title="Flutter delivery workflow" code={flowDiagram} />
+
+export const flowDiagram = `flowchart LR
+  dev["develop\n(hot reload)"] --> test["test\n(unit/widget/golden)"]
+  test --> build["build\n(release, AOT)"]
+  build --> ship["ship\n(monitor, profile, CI/CD)"]`;
+
+แต่ละ stage มีเครื่องมือของตัวเองและ failure mode ของตัวเอง เส้นเรื่องหลัก: Flutter optimize หนักมากเพื่อ inner loop ที่เร็ว (hot reload) แล้วสลับไปใช้ compilation strategy คนละแบบเลย (AOT) ตอน release — เข้าใจการแยกนี้แล้วจะเข้าใจ tooling เกือบทั้งหมด
+
+<Callout title="การเปลี่ยนวิธีคิด">
+ตอน develop Flutter รัน code ด้วย JIT compiler เพื่อให้ hot-reload การเปลี่ยนแปลงได้ในไม่ถึงวินาที ตอน release มันจะ compile ล่วงหน้าเป็น native machine code เพื่อความเร็วและขนาดที่เล็ก มันคือ runtime สองแบบสำหรับ code เดียวกัน — ซึ่งเป็นเหตุผลว่าทำไม "ทำงานได้ใน debug" ไม่เคยเป็นข้ออ้างเดียวกันกับ "ทำงานได้ใน release"
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'โมดูลนี้โฟกัสที่อะไร?',
+    options: [
+      'การเขียน widget เพิ่ม',
+      'workflow รอบ ๆ code — tooling, testing, building และ shipping',
+      'ภาษา Dart',
+      'animation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม "ทำงานได้ใน debug" ถึงไม่การันตี "ทำงานได้ใน release"?',
+    options: [
+      'debug และ release รันเหมือนกัน',
+      'ตอน develop ใช้ JIT runtime กับ hot reload ส่วน release compile ล่วงหน้า (AOT) — คนละ runtime',
+      'release ลบ code ทั้งหมดออก',
+      'debug mode ไม่มี bug',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'inner development loop ของ Flutter ถูก optimize เพื่ออะไร?',
+    options: [
+      'ขนาด binary ที่เล็ก',
+      'รอบ edit-refresh ที่เร็วผ่าน hot reload',
+      'ความเร็ว runtime สูงสุด',
+      'การ interop ข้ามภาษา',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="tooling-and-production/index" />

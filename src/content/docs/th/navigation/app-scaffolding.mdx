@@ -1,0 +1,136 @@
+---
+title: 'App Scaffolding'
+description: 'MaterialApp และ Scaffold, ThemeData และ color scheme สำหรับ light กับ dark และ responsive/adaptive layout ด้วย LayoutBuilder กับ MediaQuery'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## MaterialApp ที่ root
+
+`MaterialApp` คือ widget ที่คุณห่อทั้งแอปไว้ มันให้สิ่งที่ทุกหน้าจอต้องใช้: theme, routing config, localization และกลไก `Navigator`/`Overlay` มี `CupertinoApp` เป็นตัวพี่น้องสำหรับแอปสไตล์ iOS และ `WidgetsApp` ถ้าคุณไม่ต้องการ design language ทั้งสองแบบ
+
+```dart
+void main() => runApp(const MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue)),
+      darkTheme: ThemeData.dark(),
+      themeMode: ThemeMode.system,   // follow the OS setting
+      home: const HomeScreen(),
+    );
+  }
+}
+```
+
+## Scaffold: กรอบหน้าจอมาตรฐาน
+
+ภายในแต่ละ route `Scaffold` ให้ช่อง layout มาตรฐานของ Material — app bar, body, floating action button, bottom navigation bar และ drawer มันยังจัดการเรื่องการซ้อนทับ เช่น keyboard บนหน้าจอ ให้คุณด้วย
+
+```dart
+Scaffold(
+  appBar: AppBar(title: const Text('Home')),
+  body: const CenteredContent(),
+  floatingActionButton: FloatingActionButton(onPressed: () {}, child: const Icon(Icons.add)),
+  bottomNavigationBar: const MyNavBar(),
+  drawer: const MyDrawer(),
+);
+```
+
+## theming ที่อ่านจาก context
+
+theme ถูกกำหนดครั้งเดียวบน `MaterialApp` และอ่านได้ทุกที่ข้างใต้ด้วย `Theme.of(context)` แอป Material 3 สมัยใหม่ขับ palette ทั้งหมดจาก seed color ตัวเดียวผ่าน `ColorScheme.fromSeed` ทำให้ light และ dark สอดคล้องกัน
+
+```dart
+// Read theme values instead of hardcoding colors:
+final scheme = Theme.of(context).colorScheme;
+Container(color: scheme.primary);
+Text('Title', style: Theme.of(context).textTheme.titleLarge);
+```
+
+การอ่านจาก theme (แทนการ hardcode `Color`) คือสิ่งที่ทำให้ dark mode และการ rebrand เป็นการแก้แค่บรรทัดเดียว
+
+## responsive และ adaptive layout
+
+แอปเดียวกันรันบนโทรศัพท์, foldable, tablet และเว็บ หน้าจอจึงต้องปรับตามพื้นที่ที่มันได้รับ
+
+- **`MediaQuery.of(context).size`** ให้ขนาดของหน้าจอ — มีประโยชน์สำหรับ breakpoint ระดับ global
+- **`LayoutBuilder`** ให้ constraint ของ *ช่องเฉพาะ* ที่ widget อยู่ — ดีกว่าสำหรับการตัดสินใจ local เพราะมันตอบสนองต่อพื้นที่ที่มีจริง ไม่ใช่ทั้งหน้าจอ
+
+```dart
+LayoutBuilder(
+  builder: (context, constraints) {
+    // Switch layout based on available width at THIS position.
+    if (constraints.maxWidth > 600) {
+      return const TwoPaneLayout();   // tablet / desktop
+    }
+    return const SinglePaneLayout();  // phone
+  },
+);
+```
+
+<Mermaid title="ปรับ layout ตามพื้นที่ที่ได้รับ" code={respDiagram} />
+
+export const respDiagram = `flowchart LR
+  lb["LayoutBuilder\n(constraints of this slot)"] --> check{"maxWidth over 600?"}
+  check -->|yes| two["two-pane layout"]
+  check -->|no| one["single-pane layout"]`;
+
+<Callout title="สรุปหนึ่งบรรทัด">
+ห่อแอปด้วย `MaterialApp` เพื่อได้ theme, routing และ navigation; frame แต่ละหน้าจอด้วย `Scaffold` เพื่อได้ช่อง app-bar/body/nav มาตรฐาน กำหนด theme ครั้งเดียว (seed color ของ Material 3 ขับทั้ง light และ dark) และอ่านด้วย `Theme.of(context)` แทนการ hardcode สี สำหรับ responsive UI ใช้ `MediaQuery` สำหรับ breakpoint ระดับหน้าจอ และ `LayoutBuilder` เพื่อปรับตามพื้นที่ที่ widget ได้รับจริง
+</Callout>
+
+export const quizScaffold = [
+  {
+    q: 'MaterialApp ให้อะไรกับทั้งแอป?',
+    options: [
+      'แค่ไอคอนแอป',
+      'theme, routing config, localization และกลไก Navigator/Overlay',
+      'database',
+      'native platform code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Scaffold คืออะไร?',
+    options: [
+      'build tool',
+      'กรอบหน้าจอ Material มาตรฐานที่มีช่องสำหรับ app bar, body, FAB, bottom nav และ drawer',
+      'library จัดการ state',
+      'package สำหรับ routing',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมควรอ่านสีจาก `Theme.of(context)` แทนการ hardcode?',
+    options: [
+      'มันเร็วกว่าตอน runtime',
+      'มันทำให้ dark mode และการ rebrand เป็นการแก้แค่บรรทัดเดียวแทนที่จะแก้ทุกที่',
+      'สี hardcode ผิดกฎใน Dart',
+      'มันลดขนาดแอป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไรที่ LayoutBuilder เหมาะกว่า MediaQuery สำหรับการตัดสินใจเรื่อง layout?',
+    options: [
+      'ไม่มีเลย — มันเหมือนกัน',
+      'เมื่อคุณต้องการตอบสนองต่อ constraint ของช่องเฉพาะที่ widget อยู่ ไม่ใช่ทั้งหน้าจอ',
+      'เฉพาะบนเว็บ',
+      'เฉพาะสำหรับ text',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/app-scaffolding" questions={quizScaffold} />
+
+<ProgressTracker client:visible id="navigation/app-scaffolding" />

@@ -1,0 +1,107 @@
+---
+title: 'Rebuilds & Performance'
+description: 'lever ที่ใหญ่ที่สุดสำหรับ Flutter ที่ลื่น — const constructor, narrow scope ของ setState, subtree ที่นิ่ง, RepaintBoundary และหา waste ด้วย DevTools'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Rebuild ถูก — จนกว่ามันจะไม่ถูก
+
+การ rebuild widget subtree มักจะเร็ว: Flutter diff widget ใหม่กับ element แล้ว update เฉพาะที่เปลี่ยน ปัญหาคือทำมัน *มากเกินจำเป็น* — rebuild subtree ใหญ่ทั้งที่ชิ้นเล็กชิ้นเดียวเปลี่ยน ทุก frame ของ animation lever ด้านล่างล้วนลดงาน rebuild และ repaint ที่สูญเปล่า
+
+## Lever 1: const constructor
+
+`const` widget ถูกสร้างตอน compile time และถูก canonicalize เมื่อ parent rebuild Flutter เห็น instance `const` ตัวเดิม แล้ว **ข้ามการ rebuild subtree นั้นทั้งก้อน**
+
+```dart
+// subtree นี้เป็น const — build ครั้งเดียวและถูกข้ามทุก parent rebuild
+const Padding(
+  padding: EdgeInsets.all(16),
+  child: Text('Static label'),
+)
+```
+
+การใส่ `const` ทุกที่ที่ input ของ widget เป็น compile-time constant ทั้งหมด คือ performance win ที่ถูกที่สุดใน Flutter เปิด lint `prefer_const_constructors` แล้วทำตามมัน
+
+## Lever 2: narrow scope ของ setState
+
+`setState` rebuild output ของ `build` *ทั้งหมด* ของ `State` นั้น ถ้าหน้าจอยักษ์เรียก `setState` เพื่อ counter เล็ก ๆ ทั้งหน้าจอก็ rebuild
+
+```dart
+// ❌ setState ตรงนี้ rebuild ทั้งหน้าจอเพื่อเลขตัวเดียว
+// ✅ ดึงส่วนที่เปลี่ยนออกไปเป็น StatefulWidget เล็ก ๆ ของมันเอง
+//    ให้เฉพาะ widget นั้น rebuild ส่วนที่เหลือคง const ไว้
+```
+
+Pattern คือ: ดัน state *ลงล่าง* ไปที่ widget เล็กที่สุดที่ต้องการมัน และคง widget รอบ ๆ ให้เป็น `const` เพื่อให้มันอยู่นิ่ง
+
+## Lever 3: subtree ที่นิ่ง และ RepaintBoundary
+
+<Mermaid title="แยกส่วนที่เปลี่ยนออกมาทำให้ที่เหลือนิ่ง" code={boundaryDiagram} />
+
+export const boundaryDiagram = `flowchart TB
+  screen["หน้าจอใหญ่ (const, นิ่ง)"] --> counter["widget เล็กที่เปลี่ยน\n(State ของตัวเอง)"]
+  screen --> rest["const siblings\nไม่ rebuild ไม่ repaint"]
+  counter --> rb["ห่อส่วนหนัก/animated\nด้วย RepaintBoundary"]`;
+
+`RepaintBoundary` ให้ subtree มี paint layer ของตัวเอง การ repaint มันจึงไม่บังคับให้เพื่อนบ้าน repaint ด้วย ห่อ animation หรือ widget ที่ update บ่อยไว้ในนั้นเพื่อจำกัดความเสียหาย
+
+## Lever 4: วัดด้วย DevTools
+
+อย่าเดา Flutter DevTools แสดง **rebuild count** (widget ไหน rebuild บ่อยแค่ไหน), **timeline** ของ frame time (หา frame ที่เกิน budget) และ widget inspector workflow คือ: ทำ jank ให้เกิดซ้ำ, เปิด timeline, หา frame ที่แพง, แล้วดูว่า subtree ไหนทำงานมากเกินไป
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Flutter ที่ลื่นส่วนใหญ่คือการ *ไม่* rebuild หรือ repaint มากเกินจำเป็น: mark widget ที่ input คงที่ทุกตัวเป็น `const` (ถูกข้ามตอน parent rebuild), ดัน `setState` ลงไปที่ widget เล็กสุดเพื่อให้ scope เล็ก, คง subtree รอบ ๆ ให้นิ่ง และห่อส่วน animated/หนักด้วย `RepaintBoundary` แล้วยืนยันด้วย rebuild count และ frame timeline ใน DevTools แทนการเดา
+</Callout>
+
+export const quizPerf = [
+  {
+    q: 'ทำไม const widget ช่วยเรื่อง performance?',
+    options: [
+      'มัน compress widget',
+      'มันถูก canonicalize เมื่อ parent rebuild Flutter reuse instance เดิมและข้ามการ rebuild subtree นั้น',
+      'มันรันบน background isolate',
+      'มันปิด layout',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ผลของการเรียก setState ใน State class ใหญ่คืออะไร?',
+    options: [
+      'เฉพาะ pixel ที่เปลี่ยน update',
+      'output ของ build ทั้งหมดของ State นั้นถูก rebuild — จง keep scope ของ setState ให้เล็ก',
+      'ไม่มีอะไร rebuild',
+      'rebuild ทั้งแอป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'RepaintBoundary ทำอะไร?',
+    options: [
+      'ห้าม widget paint ตลอดไป',
+      'ให้ subtree มี paint layer ของตัวเอง การ repaint มันจึงไม่บังคับเพื่อนบ้าน repaint',
+      'cap frame rate',
+      'สร้าง isolate ใหม่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ควรหาปัญหา performance อย่างไร?',
+    options: [
+      'เดาแล้วใส่ const ทุกที่แบบมั่ว',
+      'วัดด้วย DevTools — rebuild count และ frame timeline — เพื่อหา subtree ที่เกิน budget',
+      'ปิด widget tree',
+      'เขียนแอปใหม่',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/rebuilds-and-performance" questions={quizPerf} />
+
+<ProgressTracker client:visible id="async-and-performance/rebuilds-and-performance" />

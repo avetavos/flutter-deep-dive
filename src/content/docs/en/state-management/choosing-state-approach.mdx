@@ -1,0 +1,106 @@
+---
+title: 'Choosing an Approach'
+description: 'A decision guide — setState for ephemeral state, Provider/Riverpod for shared, BLoC for complex flows — plus lifting state up and layering your app.'
+sidebar:
+  order: 6
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The decision, made simple
+
+You now know the mechanisms. Choosing between them is mostly about **scope and complexity**, and it follows a short decision path:
+
+<Mermaid title="Which approach to reach for" code={decideDiagram} />
+
+export const decideDiagram = `flowchart TB
+  q1{"Does more than one widget\nneed this state?"} -->|no| ss["setState\n(ephemeral / local)"]
+  q1 -->|yes| q2{"Complex flows,\nlarge app, high testability?"}
+  q2 -->|no| prov["Provider / Riverpod\n(shared app state)"]
+  q2 -->|yes| bloc["BLoC / Cubit\n(unidirectional, testable)"]`;
+
+- **One widget cares?** `setState`. Don't add a package for a checkbox.
+- **Several widgets share it?** Provider or Riverpod. Riverpod for new/larger apps.
+- **Complex, async-heavy, needs to be testable in isolation?** BLoC/Cubit.
+
+There's no prize for using the heaviest tool. A real app happily mixes all three: `setState` for local UI bits, a couple of Riverpod providers for shared state, and BLoC only where the complexity truly warrants it.
+
+## Lifting state up
+
+When two sibling widgets need the same state, move it to their nearest common ancestor and pass it down — **lifting state up**. This is the first thing to try before reaching for any shared-state package.
+
+| Situation | Where the state should live |
+|-----------|-----------------------------|
+| One widget uses it | In that widget (`setState`) |
+| Two siblings share it | Lifted to the common parent |
+| Many widgets across the tree | A shared store (Provider/Riverpod) |
+| App-wide, complex, async | A BLoC/Cubit layer |
+
+## Ephemeral vs app state, and layering
+
+The single most important habit is classifying state correctly:
+
+- **Ephemeral state** — a `PageView` index, a form field, an animation. Lives in a `State`. Losing it on rebuild is fine.
+- **App state** — auth, cart, settings, cached server data. Shared and often persisted. Belongs in a store outside any one widget.
+
+For anything beyond a toy app, layer these responsibilities so they don't tangle:
+
+- **UI layer** — widgets. Renders state, sends inputs. No business logic.
+- **State/logic layer** — providers, BLoCs, notifiers. Holds and transitions state.
+- **Data layer** — repositories and services. Talks to APIs, databases, device.
+
+Keeping business logic and data access out of widgets is what makes an app testable and survivable as it grows — regardless of which state package you picked.
+
+<Callout title="The one-line takeaway">
+Match the tool to the scope: `setState` for **ephemeral** state one widget owns, Provider/Riverpod for **shared** state, BLoC for **complex, testable** flows — and try **lifting state up** to a common parent before adding any package. Classify every piece of state as ephemeral or app state, and layer real apps into UI, state/logic, and data so widgets stay dumb and logic stays testable.
+</Callout>
+
+export const quizChoosing = [
+  {
+    q: 'What should you try first when two sibling widgets need to share state?',
+    options: [
+      'Add a global BLoC immediately',
+      'Lift the state up to their nearest common ancestor and pass it down',
+      'Duplicate the state in both',
+      'Use a static global variable',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which state belongs in a shared store rather than a single widget?',
+    options: [
+      'Whether a single checkbox is ticked',
+      'The current animation value of one widget',
+      'The logged-in user and shopping cart used across many screens',
+      'A local text field\'s value',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What is the benefit of layering an app into UI, state/logic, and data layers?',
+    options: [
+      'It makes the app smaller',
+      'Business logic and data access stay out of widgets, keeping the app testable as it grows',
+      'It removes the need for state',
+      'It avoids using Dart',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Can a real app mix setState, Riverpod, and BLoC?',
+    options: [
+      'No, you must pick exactly one',
+      'Yes — use setState for local bits, providers for shared state, and BLoC only where complexity warrants',
+      'Only in tests',
+      'Only if you avoid widgets',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/choosing-state-approach" questions={quizChoosing} />
+
+<ProgressTracker client:visible id="state-management/choosing-state-approach" />

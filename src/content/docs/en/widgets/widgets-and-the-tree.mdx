@@ -1,0 +1,120 @@
+---
+title: 'Widgets and the Tree'
+description: 'The three trees behind every Flutter app — widgets as immutable config, elements as the living instances, and render objects that do the real work.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Composition, not inheritance
+
+Flutter builds UI by **nesting** widgets, not subclassing them. You do not extend a `Button` to add padding — you *wrap* it in a `Padding`. A screen is a deep tree of small, single-purpose widgets composed together.
+
+```dart
+Widget build(BuildContext context) {
+  return Center(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          const Text('Hello'),
+          ElevatedButton(onPressed: () {}, child: const Text('Tap')),
+        ],
+      ),
+    ),
+  );
+}
+```
+
+This is composition over inheritance taken to the extreme: many tiny widgets, each doing one thing, nested to form the whole. `Center`, `Padding`, `Column` are not visual chrome — they *are* the layout.
+
+## The three trees
+
+Here is the model that explains almost everything about Flutter's behavior and performance. There is not one tree — there are **three**, kept in sync:
+
+<Mermaid title="Widget, Element, and Render trees run in parallel" code={treesDiagram} />
+
+export const treesDiagram = `flowchart LR
+  subgraph W["Widget tree"]
+    w1["Padding"] --> w2["Text"]
+  end
+  subgraph E["Element tree"]
+    e1["PaddingElement\n(persists)"] --> e2["TextElement\n(holds state)"]
+  end
+  subgraph R["Render tree"]
+    r1["RenderPadding\n(layout)"] --> r2["RenderParagraph\n(paint)"]
+  end
+  W -.creates.-> E
+  E -.creates.-> R`;
+
+- **Widget** — the immutable description you write. Rebuilt constantly and thrown away. Cheap.
+- **Element** — the *living instance* of a widget at a position in the tree. It persists across rebuilds, holds the `State` for stateful widgets, and decides whether a new widget can update it or must replace it.
+- **RenderObject** — does the actual layout, painting, and hit-testing. This is the expensive layer, and Flutter works hard to reuse it.
+
+## Why rebuilds stay cheap
+
+When you rebuild, Flutter walks the new widget tree and compares each new widget to the element already there. If the new widget has the **same type and key** as the old one, the element is *updated in place* — the render object is reused, only changed properties applied. Only when the type or key differs does Flutter tear down the element and its render object and build fresh.
+
+```dart
+// Rebuild produces a new Text widget every time...
+Text(counter.toString())
+// ...but the TextElement and RenderParagraph underneath are REUSED.
+// Only the changed string is pushed down. That's why setState is cheap.
+```
+
+This reconciliation — new immutable widgets diffed against persistent elements — is the engine room of Flutter. Keys (a later lesson) exist to control it when the default type-matching gets it wrong.
+
+<Callout title="The one-line takeaway">
+Flutter builds UI by **composing** small widgets, not subclassing. Underneath, three trees run in parallel: disposable **widgets** (descriptions), persistent **elements** (living instances that hold state), and expensive **render objects** (layout and paint). Rebuilds are cheap because Flutter reuses elements and render objects wherever the new widget matches the old by type and key.
+</Callout>
+
+export const quizTree = [
+  {
+    q: 'How does Flutter add behavior like padding to a widget?',
+    options: [
+      'By subclassing the widget',
+      'By composition — wrapping it in another widget (e.g. Padding)',
+      'By editing the render object directly',
+      'By mixins only',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which of the three trees persists across rebuilds and holds State?',
+    options: [
+      'The widget tree',
+      'The element tree',
+      'The render tree',
+      'None — all are rebuilt every frame',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When does Flutter reuse an element (and its render object) during a rebuild?',
+    options: [
+      'Never — everything is recreated',
+      'When the new widget has the same type and key as the old one at that position',
+      'Only for StatelessWidgets',
+      'Only on the first build',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which layer does the actual layout and painting?',
+    options: [
+      'The widget',
+      'The element',
+      'The RenderObject',
+      'The BuildContext',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="widgets/widgets-and-the-tree" questions={quizTree} />
+
+<ProgressTracker client:visible id="widgets/widgets-and-the-tree" />

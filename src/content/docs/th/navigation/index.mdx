@@ -1,0 +1,79 @@
+---
+title: 'Navigation & App Structure'
+description: 'หน้าจอ stack และสลับกันอย่างไร, การเปลี่ยนจาก imperative ไป declarative routing, widget ที่ scaffold แอป และสะพานไปยัง native code'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## จากหน้าจอเดียวสู่ทั้งแอป
+
+widget tree วาดหน้าจอเดียว แต่แอปจริงมีหลายหน้าจอ, มีปุ่ม back, มี deep link, มี theme และสุดท้ายต้องคุยกับ platform ข้างล่าง โมดูลนี้ว่าด้วยโครงสร้างที่ยึดทุกอย่างเข้าด้วยกัน
+
+แกนหลักคือการเปลี่ยนวิธีคิดเพียงจุดเดียว: **navigation เริ่มจากแบบ imperative (push หน้านี้, pop หน้านั้น) แล้วขยับไปเป็น declarative (route stack เป็นฟังก์ชันของ app state)** เข้าใจว่าทำไมถึงเปลี่ยน แล้วจะเข้าใจ routing สมัยใหม่ของ Flutter เกือบทั้งหมด
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+| บทเรียน | สิ่งที่คุณจะได้เรียนรู้ |
+|--------|-------------------|
+| Navigator & routes | route stack, `push`/`pop`, named route, การส่งและรับข้อมูล |
+| Declarative routing | `go_router`, URL sync, deep linking, nested route, auth redirect |
+| App scaffolding | `MaterialApp`, `Scaffold`, theming และ responsive/adaptive layout |
+| Platform channels | `MethodChannel`, `EventChannel` และสะพานไปยัง native code |
+
+## รูปร่างของแอป Flutter
+
+<Mermaid title="เลเยอร์ที่ประกอบเป็นโครงของแอป" code={shapeDiagram} />
+
+export const shapeDiagram = `flowchart TB
+  app["MaterialApp\n(theme, routing config)"] --> router["Router / Navigator\n(the route stack)"]
+  router --> scaffold["Scaffold\n(appBar, body, nav)"]
+  scaffold --> screen["your screen widgets"]
+  screen -. platform channel .-> native["native code\n(iOS / Android)"]`;
+
+บนสุดคือ `MaterialApp` ที่ต่อ theme และ routing configuration ถัดลงมา router จัดการ stack ของ route แต่ละ route render `Scaffold` — กรอบมาตรฐานที่มี app bar, body และช่อง navigation และเมื่อ Dart อย่างเดียวไม่พอ platform channel ก็ยื่นลงไปหา native code
+
+<Callout title="การเปลี่ยนมุมมอง">
+เลิกคิดว่า navigation คือ "การย้ายไปอีกหน้า" ให้คิดว่ามันคือ **การแก้ไข stack**: หน้าจอที่คุณเห็นคือ top ของ stack ของ route และทุก `push` กับ `pop` คือ operation บน stack ส่วน declarative routing ก้าวไปอีกขั้น — stack กลายเป็น *ค่าที่ derive มา* จาก app state ซึ่งเป็นเหตุผลว่าทำไม deep link และ URL บนเว็บถึงทำงานได้ทันที
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'การเปลี่ยนแปลงหลักใน navigation สมัยใหม่ของ Flutter คืออะไร?',
+    options: [
+      'จาก widget ไปเป็น function',
+      'จาก imperative (push/pop) ไปเป็น declarative (route stack เป็นฟังก์ชันของ app state)',
+      'จาก Dart ไปเป็น native',
+      'จาก mobile ไปเป็นเว็บอย่างเดียว',
+    ],
+    answer: 1,
+  },
+  {
+    q: '`MaterialApp` ที่อยู่บนสุดของแอปให้อะไรกับเรา?',
+    options: [
+      'การเชื่อมต่อ database',
+      'theme และ routing configuration',
+      'native platform code',
+      'รายการ asset',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'หน้าจอที่คุณเห็นอยู่ตอนนี้ ควรคิดว่าคือ:',
+    options: [
+      'global variable',
+      'top ของ stack ของ route',
+      'isolate แยกต่างหาก',
+      'binary ที่ compile แล้ว',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="navigation/index" />

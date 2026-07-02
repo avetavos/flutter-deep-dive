@@ -1,0 +1,146 @@
+---
+title: 'Navigator & Routes'
+description: 'Navigator 1.0 — the route stack, push and pop, MaterialPageRoute, named routes, and passing data forward and returning results back.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The route stack
+
+`Navigator` is a widget that manages a **stack of routes**. A route is a screen. The route on top of the stack is what the user sees. Navigation is just two stack operations: `push` a new route on top, or `pop` the top route off to reveal the one beneath.
+
+<Mermaid title="Navigator is a stack of routes" code={stackDiagram} />
+
+export const stackDiagram = `flowchart TB
+  subgraph stack["route stack"]
+    top["DetailScreen  (visible, top)"]
+    mid["ListScreen"]
+    bottom["HomeScreen  (bottom)"]
+  end
+  top -->|pop| mid
+  mid -->|push DetailScreen| top`;
+
+The hardware/software back button, the app-bar back arrow, and a swipe-back gesture all do the same thing: `pop` the top route.
+
+## push and pop
+
+You get the `Navigator` from the current `BuildContext` with `Navigator.of(context)`, then push a route. A `MaterialPageRoute` gives you the platform-correct transition animation for free.
+
+```dart
+// Push a new screen onto the stack.
+Navigator.of(context).push(
+  MaterialPageRoute(builder: (context) => const DetailScreen()),
+);
+
+// Pop back to the previous screen.
+Navigator.of(context).pop();
+```
+
+The `builder` is a function that returns the screen widget — it runs when the route is created, not when you call `push`.
+
+## Passing data forward
+
+The cleanest way to send data to the next screen is a plain **constructor argument**. No magic, no global state — just pass it in.
+
+```dart
+Navigator.of(context).push(
+  MaterialPageRoute(
+    builder: (context) => DetailScreen(userId: 42),
+  ),
+);
+
+// DetailScreen receives it like any widget:
+class DetailScreen extends StatelessWidget {
+  const DetailScreen({super.key, required this.userId});
+  final int userId;
+  // ...
+}
+```
+
+## Returning a result back
+
+`Navigator.push` returns a `Future` that completes when the pushed route is popped — so you can `await` a result the user chose on the next screen (a selection, a confirmation).
+
+```dart
+// Caller awaits the result of the pushed screen.
+final picked = await Navigator.of(context).push<Color>(
+  MaterialPageRoute(builder: (context) => const ColorPicker()),
+);
+if (picked != null) {
+  // use the returned Color
+}
+
+// Inside ColorPicker, return a value by passing it to pop:
+Navigator.of(context).pop(Colors.blue);
+```
+
+## Named routes
+
+For a small app you can register **named routes** in `MaterialApp` and navigate by string name. It centralizes the route table, but note: named routes get clumsy with typed arguments and deep links, which is exactly why the ecosystem moved to declarative routing (next lesson).
+
+```dart
+MaterialApp(
+  routes: {
+    '/': (context) => const HomeScreen(),
+    '/settings': (context) => const SettingsScreen(),
+  },
+);
+
+Navigator.of(context).pushNamed('/settings');
+```
+
+<Callout title="The one-line takeaway">
+`Navigator` manages a **stack of routes**; `push` adds a screen, `pop` removes it, and the back button just pops. Wrap screens in `MaterialPageRoute` for the right transition, pass data forward with plain **constructor arguments**, and get results back by `await`-ing `push` (the pushed screen returns a value via `pop(value)`). Named routes exist but scale poorly — a cue for declarative routing next.
+</Callout>
+
+export const quizNav = [
+  {
+    q: 'What data structure does Navigator manage?',
+    options: [
+      'A queue of screens',
+      'A stack of routes — the top is what the user sees',
+      'A tree of widgets',
+      'A map of URLs',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the recommended way to pass data to the next screen?',
+    options: [
+      'A global variable',
+      'A plain constructor argument on the destination widget',
+      'A platform channel',
+      'A JSON file',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you get a value back from a screen the user interacts with?',
+    options: [
+      'Read a global after it closes',
+      '`await` the Future from `push`, and have the screen return it via `pop(value)`',
+      'Use setState on the caller',
+      'You cannot return values',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why did the ecosystem move away from named routes for larger apps?',
+    options: [
+      'They are slower to render',
+      'They get clumsy with typed arguments and deep links',
+      'They cannot show animations',
+      'They only work on Android',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/navigator-and-routes" questions={quizNav} />
+
+<ProgressTracker client:visible id="navigation/navigator-and-routes" />

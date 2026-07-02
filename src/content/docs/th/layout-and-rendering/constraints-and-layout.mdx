@@ -1,0 +1,132 @@
+---
+title: 'Constraints & Layout'
+description: 'กฎเดียวที่อธิบาย layout ของ Flutter ได้ทั้งหมด — constraints ลงล่าง, size ขึ้นบน, parent วางตำแหน่ง — และทำไม unbounded constraints ถึงทำให้ app crash'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## กฎเดียว
+
+ถ้าคุณจำเรื่อง layout ของ Flutter ได้แค่อย่างเดียว จำอันนี้:
+
+> **Constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง**
+
+layout คือ pass เดียวที่ไล่ลง tree แล้วกลับขึ้นมา parent ส่ง **constraints** ให้ child แต่ละตัว — เป็น `BoxConstraints` ที่มี min/max ของ width และ height child แต่ละตัวต้องเลือก **size** ที่อยู่ในขอบเขตนั้นแล้วรายงานกลับขึ้นไป จากนั้น parent จึง **วางตำแหน่ง** child ไว้ในตัวมัน
+
+<Mermaid title="layout pass เดียว: ลงไปพร้อม constraints ขึ้นมาพร้อม size" code={ruleDiagram} />
+
+export const ruleDiagram = `flowchart TB
+  parent["Parent widget"] -->|"constraints:\nmin/max w, min/max h"| child["Child widget"]
+  child -->|"chosen size\n(within constraints)"| parent
+  parent -->|"offset\n(where to place child)"| placed["Child placed"]`;
+
+นั่นคือทั้งหมดของ algorithm ที่เหลือเป็นแค่รายละเอียดว่า widget แต่ละตัวเลือก size *อย่างไร* และส่ง constraints *แบบไหน* ต่อลงไป
+
+## ตัวอย่างเดินทีละขั้น
+
+```dart
+Center(
+  child: Container(
+    width: 100,
+    height: 100,
+    color: Colors.blue,
+  ),
+)
+```
+
+อ่านจากบนลงล่าง:
+
+1. `Center` รับ constraints จาก parent (สมมติว่าเป็นทั้งหน้าจอ: ขนาดเท่าหน้าจอพอดี)
+2. `Center` ส่ง constraints แบบ **loose** ให้ child — "เธอจะขนาดเท่าไรก็ได้ตั้งแต่ 0 จนถึงเท่าหน้าจอ"
+3. `Container` อยากมีขนาด `100x100` พอดี ซึ่งอยู่ในขอบเขต มันจึง size เป็น `100x100` แล้วรายงานขึ้นไป
+4. `Center` ใหญ่เท่าหน้าจอ แล้ววาง child `100x100` ไว้ตรงกลาง
+
+เปลี่ยน `Center` เป็น `Align`, `Padding` หรือ `SizedBox` มีแค่ขั้นที่ 2 เท่านั้นที่เปลี่ยน — คือ constraints ที่ส่งลงไป กฎไม่เคยเปลี่ยน
+
+## tight vs loose constraints
+
+constraint เป็น **tight** เมื่อ min เท่ากับ max (widget ต้องมีขนาดนั้นเป๊ะ) และเป็น **loose** เมื่อ min เป็น 0 (widget จะเป็นขนาดเท่าไรก็ได้จนถึง max)
+
+```dart
+// SizedBox บังคับ constraint แบบ tight — child ต้องเป็น 50x50
+SizedBox(width: 50, height: 50, child: coloredBox)
+
+// Center บังคับ constraint แบบ loose — child จะใหญ่ได้ถึงขนาด parent
+Center(child: coloredBox)
+```
+
+นี่คือเหตุผลที่ widget เดียวกันทำงานต่างกันภายใต้ parent ต่างกัน: `Container(color: Colors.red)` ที่ไม่ระบุ size จะเต็ม parent ภายใต้ constraint แบบ tight แต่หดจนหายภายใต้แบบ loose widget ไม่ได้เปลี่ยน — constraints ต่างหากที่เปลี่ยน
+
+## ทำไม unbounded constraints ถึง crash
+
+widget บางตัวส่ง constraints แบบ **unbounded** — max เป็น infinity — แปลว่า "เธอจะใหญ่แค่ไหนก็ได้" `ListView` แนวตั้งเช่น ให้ child มี *height* แบบ unbounded (ทิศทาง scroll ยาวได้ไม่จำกัด)
+
+เอา `Column` ไปใส่ใน `ListView` นั้นแล้วคุณจะเจอ error คลาสสิก: `Column` พยายามสูงเท่าที่ constraints ยอมให้ แต่ constraint เป็น infinite มันจึงเลือก height ที่จำกัดไม่ได้
+
+```dart
+ListView(
+  children: [
+    Column(              // ❌ RenderFlex: unbounded height
+      children: [ Text('a'), Text('b') ],
+    ),
+  ],
+)
+```
+
+วิธีแก้คือให้ child มี height ที่ bounded — wrap มันไว้, ใช้ `shrinkWrap` หรือปรับโครงสร้างให้ตัว scrollable เป็น widget ชั้นนอก พออ่าน constraints เป็น error พวกนี้อ่านเหมือนประโยคภาษาคน ไม่ใช่ปริศนา
+
+<Callout title="สรุปหนึ่งบรรทัด">
+layout คือ pass เดียว: **constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง** `BoxConstraints` เป็น **tight** (min เท่า max, บังคับ size) หรือ **loose** (min เป็น 0, size เลือกได้) widget เดียวกันทำงานต่างกันเพราะ parent ส่ง constraints ต่างกัน — และ error "unbounded constraints" ที่น่ากลัวก็แค่แปลว่า widget ถูกขอให้เต็มพื้นที่ที่ไม่มีที่สิ้นสุด อ่าน constraint flow เป็นแล้ว layout จะคาดเดาได้
+</Callout>
+
+export const quizConstraints = [
+  {
+    q: 'กฎหลักของ layout ใน Flutter คืออะไร?',
+    options: [
+      'size ลงล่าง constraints ขึ้นบน',
+      'constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง',
+      'ทุก widget เลือกพิกัดสัมบูรณ์เอง',
+      'child วางตำแหน่ง parent',
+    ],
+    answer: 1,
+  },
+  {
+    q: '"tight" constraint คืออะไร?',
+    options: [
+      'constraint ที่ min เท่ากับ max ดังนั้น child ต้องมีขนาดนั้นเป๊ะ',
+      'constraint ที่ max เป็น infinity',
+      'constraint ที่ใช้ได้กับ text เท่านั้น',
+      'constraint ที่ min เป็น 0',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ทำไมเอา Column ไปใส่ใน ListView แนวตั้งตรง ๆ ถึง error?',
+    options: [
+      'Column ไม่ใช่ child type ที่ถูกต้อง',
+      'ListView ให้ height แบบ unbounded และ Column เลือก size ที่จำกัดไม่ได้ภายใต้ constraint ที่ไม่มีที่สิ้นสุด',
+      'ใส่ child ได้ตัวเดียวใน ListView',
+      'Column ต้องมีสี',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม Container ที่ไม่ระบุ size ถึงเต็ม parent หนึ่ง แต่หดภายใต้อีก parent?',
+    options: [
+      'Container สุ่มเอา',
+      'parent ส่ง constraints ต่างกัน (tight vs loose) — widget ไม่ได้เปลี่ยน',
+      'สีมีผลกับ size',
+      'ขึ้นกับความสว่างหน้าจอ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/constraints-and-layout" questions={quizConstraints} />
+
+<ProgressTracker client:visible id="layout-and-rendering/constraints-and-layout" />

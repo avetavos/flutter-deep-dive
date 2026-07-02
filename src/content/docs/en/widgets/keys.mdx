@@ -1,0 +1,106 @@
+---
+title: 'Keys'
+description: 'When Flutter needs a key to preserve state correctly — the reconciliation problem, ValueKey/ObjectKey/UniqueKey/GlobalKey, and the classic reorder bug.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The problem keys solve
+
+Recall reconciliation: when rebuilding, Flutter matches each new widget to the existing element **by position and type**. Usually that is exactly right. But in a **list of same-typed stateful widgets**, position-matching breaks when items move.
+
+Imagine two `TodoItem` widgets (each stateful, each holding, say, a checkbox state). Swap their order in the list. Flutter sees "position 0 is still a `TodoItem`, position 1 is still a `TodoItem`" — types and positions match — so it keeps each element (and its state) exactly where it was. The *data* moved but the *state* did not. Result: you reorder the list and the checkboxes stay put on the wrong rows.
+
+<Mermaid title="Without keys, state is matched by position and stays behind" code={reorderDiagram} />
+
+export const reorderDiagram = `flowchart LR
+  subgraph before["Before swap"]
+    a0["item A (checked)"] --- a1["item B"]
+  end
+  subgraph after["After swap, NO keys"]
+    b0["item B\nbut still shows checked"] --- b1["item A\nnow unchecked"]
+  end
+  before -->|state stuck to position| after`;
+
+## Keys give an element an identity
+
+A **key** tells Flutter "this element's identity is X, not just its position." Now, when matching new widgets to elements, Flutter matches by *key* — so state follows the widget even when it moves.
+
+```dart
+// Give each item a stable key derived from its data:
+return ListView(
+  children: [
+    for (final todo in todos)
+      TodoItem(key: ValueKey(todo.id), todo: todo),
+  ],
+);
+```
+
+With `ValueKey(todo.id)`, swapping the list reorders the elements to match — each `TodoItem`'s state travels with its `id`. The rule of thumb: **you need keys when you have a list of stateful widgets whose order or membership can change.** Stateless lists rarely need them.
+
+## The four kinds of key
+
+| Key | Identity based on | Use when |
+|-----|-------------------|----------|
+| `ValueKey(v)` | a value (id, string) | Most list items — a stable data value identifies each |
+| `ObjectKey(o)` | object identity | The identifying thing is an object, not a simple value |
+| `UniqueKey()` | always unique | You want to force a *new* element (discard old state) every build |
+| `GlobalKey()` | app-wide unique | You need to access a widget state or its context from elsewhere (use sparingly) |
+
+`GlobalKey` is the heavy one: it uniquely identifies a widget across the entire app and lets you reach its `State` (e.g. `formKey.currentState!.validate()`). It is powerful but expensive and easy to misuse — prefer local keys unless you truly need cross-tree access.
+
+<Callout title="The one-line takeaway">
+Flutter matches widgets to elements by position and type, which loses state when **same-typed stateful widgets reorder** in a list — the classic "checkbox stays on the wrong row" bug. A **key** gives an element a stable identity so its state follows the widget: use `ValueKey(id)` for list items, `UniqueKey()` to force a fresh element, and `GlobalKey` (sparingly) when you must reach a widget's state from elsewhere.
+</Callout>
+
+export const quizKeys = [
+  {
+    q: 'When do you most need keys?',
+    options: [
+      'On every widget always',
+      'In a list of same-typed stateful widgets whose order or membership can change',
+      'Only on StatelessWidgets',
+      'Never — Flutter handles it automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What goes wrong when you reorder stateful list items without keys?',
+    options: [
+      'The app crashes',
+      'State is matched by position, so it stays on the old row while the data moves',
+      'All state is lost',
+      'Nothing — it works fine',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which key would you use to give each list item a stable identity from its data id?',
+    options: [
+      'UniqueKey()',
+      'ValueKey(item.id)',
+      'GlobalKey()',
+      'No key',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is special (and costly) about a GlobalKey?',
+    options: [
+      'It is unique only within one list',
+      'It is unique app-wide and lets you access a widget state/context from elsewhere — powerful but easy to misuse',
+      'It forces a rebuild every frame',
+      'It is the default key type',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="widgets/keys" questions={quizKeys} />
+
+<ProgressTracker client:visible id="widgets/keys" />

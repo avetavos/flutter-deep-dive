@@ -1,0 +1,126 @@
+---
+title: 'Testing'
+description: 'test pyramid ของ Flutter — unit test สำหรับ logic, widget test สำหรับ UI behavior, integration test สำหรับทั้งแอป และ golden test สำหรับ pixel'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## test สี่แบบ หนึ่ง pyramid
+
+Flutter ให้เครื่องมือ test สี่แบบ ซึ่งแลกความเร็วกับความสมจริง ใช้แบบเร็วเยอะ ๆ และแบบช้าน้อย ๆ
+
+<Mermaid title="Flutter test pyramid" code={pyramidDiagram} />
+
+export const pyramidDiagram = `flowchart TB
+  integ["Integration tests\n(whole app, real device) — few, slow"] --> widget["Widget tests\n(one widget tree, no device) — many, fast"]
+  widget --> unit["Unit tests\n(pure Dart logic) — most, fastest"]`;
+
+- **Unit test** ตรวจ Dart ล้วน ๆ — function, class, logic ของ Cubit ไม่มี UI ไม่มี device เร็วระดับ millisecond
+- **Widget test** pump widget เข้า test harness แล้วโต้ตอบกับมัน (tap, พิมพ์, expect) — ไม่ต้องมี device จริง ยังเร็วอยู่ นี่คือจุด sweet spot เฉพาะของ Flutter
+- **Integration test** รันทั้งแอปบน device หรือ emulator จริง ขับมันแบบ end to end — ช้า แต่สมจริงที่สุด
+- **Golden test** เก็บ pixel ที่ render ของ widget แล้วเทียบกับ reference image ที่ save ไว้ จับ visual regression
+
+## unit test
+
+```dart
+import 'package:test/test.dart';
+
+test('cart total sums item prices', () {
+  final cart = Cart()..add(Item(price: 10))..add(Item(price: 5));
+  expect(cart.total, 15);
+});
+```
+
+Dart ล้วน ๆ, `expect` ล้วน ๆ logic ส่วนใหญ่ของคุณ — pricing, validation, parsing, state transition — ควรเข้าถึงได้ด้วย test ที่ง่ายแบบนี้ ซึ่งเป็นเหตุผลที่ดีในการเก็บ logic ออกจาก widget
+
+## widget test
+
+widget test ใช้ `WidgetTester` เพื่อ build widget, find element, act และ assert — ทั้งหมดอยู่ใน memory
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+testWidgets('tapping + increments the counter', (WidgetTester tester) async {
+  await tester.pumpWidget(const MyApp());        // build the widget tree
+
+  expect(find.text('0'), findsOneWidget);        // initial state
+
+  await tester.tap(find.byIcon(Icons.add));      // interact
+  await tester.pump();                           // rebuild after setState
+
+  expect(find.text('1'), findsOneWidget);        // assert the new state
+});
+```
+
+call สำคัญ: `pumpWidget` build tree, `find` หา widget, `tap`/`enterText` โต้ตอบ และ `pump` (หรือ `pumpAndSettle` สำหรับ animation) เดินหน้า frame เพื่อให้ rebuild เกิดขึ้น ไม่ต้องมี emulator — อันนี้รันในไม่กี่วินาที
+
+## golden test
+
+```dart
+testWidgets('button matches golden', (tester) async {
+  await tester.pumpWidget(const MyButton());
+  await expectLater(
+    find.byType(MyButton),
+    matchesGoldenFile('goldens/my_button.png'),
+  );
+});
+```
+
+golden (snapshot) test ทรงพลังสำหรับ design system แต่เปราะข้าม platform และ font version — pin ให้ดีและ regenerate อย่างตั้งใจด้วย `--update-goldens`
+
+<Callout title="สรุปหนึ่งบรรทัด">
+พึ่ง pyramid: **unit test** เยอะ ๆ (Dart logic ล้วน ๆ — เหตุผลที่ควรเก็บ logic ออกจาก widget), **widget test** เยอะพอควร (`pumpWidget` → `find` → `tap` → `pump` → `expect` ไม่มี device เร็ว), **integration test** น้อย (ทั้งแอป สมจริง ช้า) และ **golden test** สำหรับ visual regression ระดับ pixel ตรงที่มันคุ้มค่า
+</Callout>
+
+export const quizTesting = [
+  {
+    q: 'widget test คืออะไร?',
+    options: [
+      'test ที่รันทั้งแอปบน device จริง',
+      'test ที่ pump widget เข้า harness ใน memory แล้วโต้ตอบกับมัน — เร็ว ไม่ต้องมี device',
+      'การเทียบ pixel snapshot',
+      'test logic Dart ล้วน ๆ ไม่มี UI',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ใน widget test `pump` ทำอะไรหลังการโต้ตอบ?',
+    options: [
+      'ลบ widget',
+      'เดินหน้า frame เพื่อให้ rebuild (เช่นหลัง setState) มีผล',
+      'ถ่าย screenshot',
+      'เริ่ม emulator',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมควรเก็บ business logic ออกจาก widget?',
+    options: [
+      'Dart บังคับ',
+      'เพื่อให้ cover ด้วย unit test ที่เร็วและง่าย แทน widget test ที่ช้ากว่า',
+      'เพื่อลดขนาดแอป',
+      'widget เก็บ logic ไม่ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'golden test จับอะไร?',
+    options: [
+      'logic error',
+      'visual/pixel regression โดยเทียบ output ที่ render กับ reference image',
+      'network failure',
+      'memory leak',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/testing" questions={quizTesting} />
+
+<ProgressTracker client:visible id="tooling-and-production/testing" />

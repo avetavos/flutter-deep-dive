@@ -1,0 +1,129 @@
+---
+title: 'Dart Language Tour'
+description: 'พื้นฐาน Dart แบบเร็ว — variable และ type inference, function และ named parameter, collection และ cascade operator ที่คุณจะเจอทุกที่ใน Flutter'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Variable และ inference
+
+Dart เป็น static typed พร้อม inference ที่แข็งแรง ใช้ `var` แล้วให้ Dart infer หรือจะ annotate เมื่อช่วยให้อ่านง่ายขึ้นก็ได้ `final` แปลว่า assign ครั้งเดียว ส่วน `const` คือค่าคงที่ตอน compile
+
+```dart
+var name = 'Ada';        // inferred String
+final age = 36;          // assign-once int
+const pi = 3.14159;      // compile-time constant
+int? maybe;              // nullable (null safety — บทถัดไป)
+
+// `final` vs `const`: final fix ตอน runtime, const fix ตอน compile-time
+final now = DateTime.now();   // OK — คำนวณตอน runtime
+// const now = DateTime.now(); // ERROR — ไม่ใช่ compile-time constant
+```
+
+`const` สำคัญมากใน Flutter: ค่าที่เป็น `const` จะถูก *canonicalize* — object `const` ที่เหมือนกันคือ instance เดียวกัน — นี่แหละที่ทำให้ Flutter ข้ามการ rebuild widget ที่เป็น `const` ได้
+
+## Function และ named parameter
+
+Function ของ Dart รองรับทั้ง positional และ **named** parameter API ทั้งหมดของ Flutter สร้างบน named parameter — constructor ของทุก widget คือกำแพงของ named parameter
+
+```dart
+// named parameter อยู่ใน {}, `required` marks ตัวที่บังคับ ตัวอื่นมี default
+Widget greeting({required String name, String prefix = 'Hello'}) {
+  return Text('$prefix, $name');
+}
+
+greeting(name: 'Ada');                  // Hello, Ada
+greeting(name: 'Ada', prefix: 'Hi');    // Hi, Ada
+
+// arrow syntax สำหรับ function ที่เป็น expression เดียว
+int square(int x) => x * x;
+```
+
+นี่คือเหตุผลที่การอ่าน code Flutter คือการอ่าน `Widget(child: ..., padding: ..., color: ...)` — named parameter ทำให้ constructor ใหญ่ ๆ อ่านง่ายและไม่ต้องสนใจลำดับ
+
+## Collection และ collection-if / for
+
+List, set, map พร้อม **collection-if** และ **collection-for** — ใช้ตลอดเพื่อ build list ของ widget แบบมีเงื่อนไข
+
+```dart
+final nums = [1, 2, 3];
+final set = {1, 2, 3};
+final map = {'a': 1, 'b': 2};
+
+// spread, collection-if, collection-for — จะใช้ข้างใน widget children:
+final children = [
+  const Header(),
+  ...items,                         // spread
+  if (isLoggedIn) const Profile(),  // element แบบมีเงื่อนไข
+  for (final n in nums) Text('$n'), // element ที่ generate ขึ้นมา
+];
+```
+
+pattern `if`/`for`-ใน-list นี้เป็น idiomatic ของ Flutter — มันแทนที่การ "สร้าง list แล้วค่อย push" ที่คุณอาจใช้ในภาษาอื่น
+
+## Cascade operator
+
+cascade `..` รัน operation หลายอันบน object เดียวกันโดยไม่ต้องเขียน reference ซ้ำ — พบบ่อยใน code แบบ configuration
+
+```dart
+final paint = Paint()
+  ..color = const Color(0xFF027DFD)
+  ..strokeWidth = 4
+  ..style = PaintingStyle.stroke;
+// แต่ละ `..` คืน Paint ตัวเดิม ดังนั้นทั้งหมดนี้ config object เดียว
+```
+
+<Callout title="สรุปหนึ่งบรรทัด">
+Dart เป็น static typed พร้อม inference ที่แข็งแรง (`var`), `final` แบบ assign ครั้งเดียว และ `const` แบบ compile-time — และ `const` พิเศษเพราะมัน canonicalize ค่า ซึ่งขับเคลื่อนการข้าม rebuild ของ Flutter **named parameter** คือเหตุผลที่ทุก widget อ่านเป็น `Widget(child: ..., color: ...)` และ **collection-if/for** คือวิธี idiomatic ในการ build list ของ widget
+</Callout>
+
+export const quizTour = [
+  {
+    q: 'ความต่างของ `final` กับ `const` ใน Dart คืออะไร?',
+    options: [
+      'เหมือนกันทุกอย่าง',
+      'final คือ assign ครั้งเดียวตอน runtime; const คือ compile-time constant (และถูก canonicalize)',
+      'const reassign ได้ final ไม่ได้',
+      'final ใช้ได้กับตัวเลขเท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม named parameter ถึงเป็นหัวใจของ Flutter?',
+    options: [
+      'ทำให้ code รันเร็วขึ้น',
+      'constructor ของ widget มี option เยอะ named parameter ทำให้อ่านง่ายและไม่ต้องสนใจลำดับ',
+      'Dart syntax บังคับให้ใช้',
+      'ช่วยลดขนาดแอป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'collection-if (`if (cond) widget`) ใน list ทำอะไร?',
+    options: [
+      'throw error',
+      'ใส่ element เข้า collection แบบมีเงื่อนไข — idiomatic สำหรับ build widget children',
+      'สร้าง list ซ้อน',
+      'รันตอน compile-time เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'cascade operator `..` ทำอะไร?',
+    options: [
+      'spread list เข้าไปในอีก list',
+      'รัน operation หลายอันบน object เดียวกันโดยไม่ต้องเขียน reference ซ้ำ',
+      'ประกาศ range',
+      'mark type ที่เป็น nullable',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="dart-foundations/dart-language-tour" questions={quizTour} />
+
+<ProgressTracker client:visible id="dart-foundations/dart-language-tour" />

@@ -1,0 +1,120 @@
+---
+title: 'setState & the Lifecycle'
+description: 'How setState marks an element dirty and triggers a rebuild, the full State lifecycle, what belongs in each hook, and the scope of a setState rebuild.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## What setState actually does
+
+`setState` does not "redraw the screen." It does one small thing: it runs your callback (which mutates fields), then marks this widget's **element** as *dirty*. On the next frame, Flutter rebuilds every dirty element by calling `build` again.
+
+```dart
+class Counter extends StatefulWidget {
+  const Counter({super.key});
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  int _count = 0;
+
+  void _increment() {
+    setState(() {
+      _count++;          // mutate state INSIDE the callback
+    });                  // then Flutter marks this element dirty
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: _increment,
+      child: Text('count: $_count'),
+    );
+  }
+}
+```
+
+Two rules fall out of this: mutate state **inside** the `setState` callback (so the change and the dirty-marking happen together), and know that `setState` schedules a rebuild for the *next frame* — it is not synchronous.
+
+## The State lifecycle
+
+A `State` object has a well-defined lifecycle. Knowing which hook does what prevents a whole class of bugs.
+
+<Mermaid title="The State lifecycle" code={lifecycleDiagram} />
+
+export const lifecycleDiagram = `flowchart TB
+  create["createState()"] --> init["initState()\none-time setup"]
+  init --> deps["didChangeDependencies()\nafter inherited deps ready"]
+  deps --> build["build()\ncalled on every rebuild"]
+  build --> update["didUpdateWidget()\nparent rebuilt with new config"]
+  update --> build
+  build --> dispose["dispose()\ncleanup"]`;
+
+- **`initState`** — one-time setup: create controllers, subscribe to streams. Runs once. You cannot use `context` for inherited widgets here reliably.
+- **`didChangeDependencies`** — runs after `initState` and again whenever an inherited dependency changes. The safe place to read `InheritedWidget`/`Provider` data that setup depends on.
+- **`build`** — called on every rebuild. Must be **pure and fast**: no side effects, no network calls, no subscriptions. Just describe the UI from current state.
+- **`didUpdateWidget`** — the parent rebuilt and gave this State a new widget config; react to changed props (e.g. re-subscribe if an `id` changed).
+- **`dispose`** — clean up: dispose controllers, cancel subscriptions. Forgetting this is the classic Flutter memory leak.
+
+## The scope of a rebuild
+
+`setState` marks *this* State's element dirty, so `build` re-runs and produces a new subtree — but Flutter is smart about it. It diffs the new widget subtree against the old element tree and only touches what changed. Still, the whole `build` method runs, so a `setState` high in the tree that rebuilds a huge subtree is a real performance concern.
+
+The practical lesson: **push `setState` as low in the tree as possible.** Isolate the changing bit into its own small `StatefulWidget` so only that tiny subtree rebuilds, not the whole page. (The performance module goes deeper on this.)
+
+<Callout title="The one-line takeaway">
+`setState` mutates your fields and marks the element **dirty**, scheduling a `build` on the next frame — always mutate inside the callback. The lifecycle has clear jobs: `initState` for one-time setup, `didChangeDependencies` for inherited-data reads, `build` (pure, fast, called often), `dispose` for cleanup. Keep `setState` as low in the tree as possible so the smallest subtree rebuilds.
+</Callout>
+
+export const quizSetState = [
+  {
+    q: 'What does setState actually do?',
+    options: [
+      'Immediately repaints the screen',
+      'Runs your callback and marks the element dirty, scheduling a rebuild on the next frame',
+      'Creates a new State object',
+      'Disposes the widget',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which lifecycle hook is the right place to dispose controllers and cancel subscriptions?',
+    options: [
+      'initState',
+      'build',
+      'dispose',
+      'didChangeDependencies',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why must the build method stay pure and side-effect-free?',
+    options: [
+      'It only runs once',
+      'It is called on every rebuild — side effects there fire repeatedly and unpredictably',
+      'Dart forbids side effects',
+      'It runs on a separate thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How do you limit how much rebuilds when state changes?',
+    options: [
+      'Call setState twice',
+      'Push setState as low in the tree as possible, isolating the changing part in its own small widget',
+      'Put all state at the app root',
+      'Avoid StatefulWidget entirely',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/setstate-and-lifecycle" questions={quizSetState} />
+
+<ProgressTracker client:visible id="state-management/setstate-and-lifecycle" />

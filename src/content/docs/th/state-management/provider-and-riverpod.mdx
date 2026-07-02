@@ -1,0 +1,130 @@
+---
+title: 'Provider & Riverpod'
+description: 'สองวิธี shared-state ที่ใช้กันมากที่สุด — Provider คือ InheritedWidget แบบ ergonomic และ Riverpod คือ provider ที่ compile-safe และแยกจาก tree'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Provider: InheritedWidget ที่ ergonomic
+
+การเขียน `InheritedWidget` ด้วยมือคือ boilerplate **Provider** ห่อ pattern นั้นด้วย API ที่สะอาด และจับคู่กับ `ChangeNotifier` — class ง่าย ๆ ที่ถือ state และเรียก `notifyListeners()` เมื่อมันเปลี่ยน
+
+```dart
+// 1. model ที่ notify listener เมื่อมันเปลี่ยน
+class CartModel extends ChangeNotifier {
+  final List<String> _items = [];
+  List<String> get items => List.unmodifiable(_items);
+
+  void add(String item) {
+    _items.add(item);
+    notifyListeners();   // บอก widget ที่ listen อยู่ให้ rebuild
+  }
+}
+
+// 2. provide มันไว้เหนือ widget ที่ต้องใช้
+ChangeNotifierProvider(
+  create: (_) => CartModel(),
+  child: const MyApp(),
+);
+
+// 3. อ่านมัน watch() rebuild เมื่อเปลี่ยน; read() ไม่
+final cart = context.watch<CartModel>();      // rebuild เมื่อ cart เปลี่ยน
+context.read<CartModel>().add('Book');         // action ครั้งเดียว ไม่ rebuild
+```
+
+ความต่างระหว่าง `watch` กับ `read` คือหัวใจทั้งหมด `context.watch<T>()` subscribe — widget rebuild เมื่อ model notify `context.read<T>()` หยิบมันครั้งเดียวโดยไม่ subscribe — ใช้ใน callback (เช่น `onPressed`) ที่คุณอยาก *ทำ* ไม่ใช่ *ฟัง* สลับสองอันนี้คือ bug ที่พบบ่อยที่สุดของ Provider (ไม่ rebuild ที่ควร หรือ rebuild มากเกิน)
+
+## Riverpod: provider ที่ไม่ผูกกับ tree
+
+**Riverpod** คือการคิดใหม่โดยผู้เขียนคนเดิมที่แก้จุดหยาบของ Provider หมัดเด็ดของมัน: provider เป็น **top-level object ไม่ผูกกับ widget tree** ซึ่งทำให้ compile-safe (อ่าน provider ที่ไม่มีอยู่ไม่ได้) และ test กับ combine ได้ง่าย
+
+```dart
+// provider ประกาศที่ top level — ไม่ได้อยู่ใน widget tree
+final counterProvider = StateNotifierProvider<Counter, int>((ref) => Counter());
+
+class Counter extends StateNotifier<int> {
+  Counter() : super(0);
+  void increment() => state++;   // การ reassign `state` จะ notify listener
+}
+
+// ใน ConsumerWidget, `ref` อ่าน provider:
+class CounterView extends ConsumerWidget {
+  const CounterView({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(counterProvider);          // rebuild เมื่อเปลี่ยน
+    return TextButton(
+      onPressed: () => ref.read(counterProvider.notifier).increment(),
+      child: Text('$count'),
+    );
+  }
+}
+```
+
+สังเกตว่ามีความต่าง `watch`/`read` แบบเดียวกันผ่าน `ref` ความต่างจาก Provider เป็นเชิงโครงสร้าง: ไม่มี `BuildContext` lookup, ไม่มี "provider not found" ตอน runtime, และ provider compose กันได้ (provider ตัวหนึ่ง `ref.watch` อีกตัวได้)
+
+## เลือกระหว่างสองตัว
+
+<Mermaid title="Provider vs Riverpod at a glance" code={compareDiagram} />
+
+export const compareDiagram = `flowchart TB
+  prov["Provider\nInheritedWidget + ChangeNotifier\nผูกกับ tree, lookup ตอน runtime"] --> use1["ดีสำหรับ app เล็ก,\nทีมที่ใช้อยู่แล้ว"]
+  rp["Riverpod\ntop-level provider\ncompile-safe, test ได้, compose ได้"] --> use2["นิยมสำหรับ app ใหม่,\nstate ซับซ้อนหรือต้อง test"]`;
+
+ทั้งคู่ยอดเยี่ยม Provider ง่ายกว่าและมีอยู่ทุกที่; Riverpod ทนทานกว่าสำหรับ app ใหญ่ที่ต้อง test และเป็นทิศทางที่ ecosystem กำลังมุ่งไป ตัวไหนก็เป็น default ที่ดีกว่า `InheritedWidget` ที่เขียนเองสำหรับ shared state จริง
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**Provider** ทำให้ `InheritedWidget` + `ChangeNotifier` ergonomic — ทักษะหลักคือ `context.watch<T>()` (subscribe แล้ว rebuild) เทียบกับ `context.read<T>()` (ทำ action โดยไม่ rebuild) **Riverpod** แยก provider ออกจาก widget tree ทำให้ compile-safe, test ได้ และ compose ได้ผ่าน `ref.watch`/`ref.read` ทั้งคู่ดีกว่า InheritedWidget เขียนเองสำหรับ shared state; Riverpod เป็น default ที่ทนทานกว่าสำหรับ app ใหม่ที่ใหญ่ขึ้น
+</Callout>
+
+export const quizProvider = [
+  {
+    q: 'ความต่างระหว่าง context.watch กับ context.read ใน Provider คืออะไร?',
+    options: [
+      'เหมือนกัน',
+      'watch subscribe แล้ว rebuild เมื่อเปลี่ยน; read หยิบค่าครั้งเดียวโดยไม่ subscribe (ใช้ใน callback)',
+      'read rebuild; watch ไม่',
+      'watch ใช้กับ Riverpod เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การเรียก notifyListeners() บน ChangeNotifier ทำอะไร?',
+    options: [
+      'dispose model',
+      'บอก widget ที่ watch มันอยู่ให้ rebuild',
+      'navigate ไปหน้าใหม่',
+      'ไม่ทำอะไรตอน runtime',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ความต่างเชิงโครงสร้างหลักของ Riverpod จาก Provider คืออะไร?',
+    options: [
+      'มันไม่รองรับ state เลย',
+      'provider เป็น top-level object ไม่ผูกกับ widget tree ทำให้ compile-safe และ test ได้',
+      'มันไม่ต้องมี build method',
+      'มันรันบน isolate แยก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อันไหนคือ bug ที่พบบ่อยที่สุดของ Provider?',
+    options: [
+      'ลืม import Dart',
+      'สับสน watch กับ read — ทำให้พลาด rebuild หรือ rebuild มากเกิน',
+      'ใช้ const constructor',
+      'ประกาศ widget มากเกิน',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/provider-and-riverpod" questions={quizProvider} />
+
+<ProgressTracker client:visible id="state-management/provider-and-riverpod" />

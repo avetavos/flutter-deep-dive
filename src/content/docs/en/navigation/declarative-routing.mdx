@@ -1,0 +1,129 @@
+---
+title: 'Declarative Routing'
+description: 'Navigator 2.0 and go_router — routing driven by app state, URL sync for the web, deep linking, nested shell routes, and auth redirects.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Why imperative push/pop breaks down
+
+Imperative navigation works fine until you need a **deep link**. When a user opens `myapp.com/orders/42` from a cold start, there is no sequence of `push` calls that happened — you must reconstruct the whole stack (Home → Orders → Order 42) from a URL. Doing that by hand with `Navigator.push` is painful and error-prone.
+
+The fix is to make the route stack a **declarative function of state**: given the current URL or app state, compute the stack. This is Navigator 2.0. Because the raw API is verbose, almost everyone uses **`go_router`**, the official package built on top of it.
+
+<Mermaid title="Declarative routing derives the stack from state" code={declDiagram} />
+
+export const declDiagram = `flowchart LR
+  state["app state / URL\n/orders/42"] --> router["go_router\n(route table)"]
+  router --> stack["computed stack\nHome then Orders then Order 42"]`;
+
+## A go_router configuration
+
+You declare the routes once, as data. `go_router` maps a path to a builder, supports typed path parameters, and keeps the browser URL in sync automatically on web.
+
+```dart
+final router = GoRouter(
+  routes: [
+    GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+    GoRoute(
+      path: '/orders/:id',                       // typed path parameter
+      builder: (context, state) {
+        final id = state.pathParameters['id']!;
+        return OrderScreen(orderId: id);
+      },
+    ),
+  ],
+);
+
+// Navigate by path — no manual stack juggling:
+context.go('/orders/42');
+```
+
+`context.go('/orders/42')` sets the location; the router recomputes the stack. On web, the URL bar updates to match, and pasting that URL reconstructs the same screen — deep linking for free.
+
+## Nested / shell routes
+
+A **shell route** wraps a set of routes in shared UI — the classic bottom-navigation app where the tab bar persists while the inner content changes. The shell stays mounted; only the child route swaps.
+
+```dart
+ShellRoute(
+  builder: (context, state, child) => ScaffoldWithNavBar(child: child),
+  routes: [
+    GoRoute(path: '/feed', builder: (context, state) => const FeedScreen()),
+    GoRoute(path: '/profile', builder: (context, state) => const ProfileScreen()),
+  ],
+);
+```
+
+## Redirects as auth guards
+
+A `redirect` runs before a route builds and can send the user elsewhere — the idiomatic place for authentication guards. Return a new path to redirect, or `null` to proceed.
+
+```dart
+GoRouter(
+  redirect: (context, state) {
+    final loggedIn = auth.isLoggedIn;
+    final goingToLogin = state.matchedLocation == '/login';
+    if (!loggedIn && !goingToLogin) return '/login'; // guard
+    if (loggedIn && goingToLogin) return '/';         // already in
+    return null;                                      // no redirect
+  },
+  routes: [ /* ... */ ],
+);
+```
+
+<Callout title="The one-line takeaway">
+Deep links break imperative `push`/`pop` because there is no push history to replay — you must build the stack from a URL. Declarative routing makes the **stack a function of state**, and `go_router` is the standard way to do it: declare routes as data with typed path parameters, get **web URL sync and deep linking** for free, wrap shared UI in **shell routes**, and put **auth guards** in `redirect`.
+</Callout>
+
+export const quizDecl = [
+  {
+    q: 'Why does imperative push/pop navigation struggle with deep links?',
+    options: [
+      'Deep links are too long',
+      'Opening a URL from cold start has no push history to replay — the whole stack must be rebuilt from the URL',
+      'push/pop cannot animate',
+      'Deep links only work on web',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the core idea of declarative routing?',
+    options: [
+      'Push each screen manually',
+      'The route stack is computed as a function of app state / the current URL',
+      'Routes are stored in a database',
+      'Every screen is an isolate',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is a shell route used for?',
+    options: [
+      'Running shell commands',
+      'Wrapping a set of routes in shared, persistent UI (like a bottom nav bar) while the inner content swaps',
+      'Encrypting routes',
+      'Native code',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where do you idiomatically put an authentication guard in go_router?',
+    options: [
+      'Inside every screen\'s build method',
+      'In a `redirect` callback that can send the user elsewhere before the route builds',
+      'In main() only',
+      'In a platform channel',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="navigation/declarative-routing" questions={quizDecl} />
+
+<ProgressTracker client:visible id="navigation/declarative-routing" />

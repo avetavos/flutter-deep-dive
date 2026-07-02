@@ -1,0 +1,116 @@
+---
+title: 'Production Concerns'
+description: 'Catching every error, crash reporting, profiling jank in profile mode, and CI/CD — the concerns that separate a demo from a product.'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Catch every error
+
+In production you want to hear about crashes before your users complain. Flutter errors arrive through two channels, and you need both:
+
+```dart
+void main() {
+  // 1. Errors thrown inside the Flutter framework (build, layout, paint).
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    reportToCrashService(details.exception, details.stack);
+  };
+
+  // 2. Errors outside the framework (async gaps, callbacks) — a guarded zone.
+  runZonedGuarded(() {
+    runApp(const MyApp());
+  }, (error, stack) {
+    reportToCrashService(error, stack);
+  });
+}
+```
+
+`FlutterError.onError` catches errors the framework raises; `runZonedGuarded` catches everything else (uncaught async errors, isolate errors via `PlatformDispatcher.instance.onError`). You can also replace the red `ErrorWidget` with a friendly fallback so a single widget failure doesn't show users a crash screen.
+
+## Crash reporting and logging
+
+Wire those handlers to a service — Sentry, Firebase Crashlytics — so real-device crashes come back with a stack trace, device info, and breadcrumbs. Two rules that matter:
+
+- **Upload symbols/debug info** for release builds (AOT strips symbols; without the mapping, stack traces are unreadable obfuscated addresses).
+- **Log deliberately.** `print` is stripped/ignored in release; use a real logger and scrub anything sensitive before it leaves the device.
+
+## Profiling jank
+
+Smoothness is a budget: ~16ms per frame for 60fps, ~8ms for 120fps. Miss it and the frame "janks." Diagnose in **profile mode** (never debug):
+
+<Mermaid title="Where a frame's time goes" code={frameDiagram} />
+
+export const frameDiagram = `flowchart LR
+  build["build\n(your widgets)"] --> layout["layout"] --> paint["paint"] --> raster["raster\n(GPU)"]
+  raster --> budget["must fit ~16ms\nor the frame janks"]`;
+
+DevTools' timeline shows per-frame cost split into UI (Dart: build/layout/paint) and raster (GPU). Common culprits: rebuilding too much (missing `const`, state too high in the tree), expensive work in `build`, big un-cached images, and missing `RepaintBoundary` around constantly-animating subtrees.
+
+## CI/CD
+
+Automate the pipeline so quality isn't a matter of memory: on every push, run `flutter analyze`, `flutter test`, then `flutter build` for each platform, and ship to TestFlight / Play internal tracks. Tools like Codemagic, Fastlane, and GitHub Actions handle the Flutter-specific signing and store upload.
+
+**A production checklist:**
+
+- Global error handling wired (`FlutterError.onError` + `runZonedGuarded`) to a crash service, with symbols uploaded.
+- A friendly `ErrorWidget` fallback in release.
+- Profiled in profile mode; no obvious jank on the target devices.
+- Flavors for dev/staging/prod; no secrets in source (`--dart-define` / secure storage).
+- CI running analyze + tests + builds on every change.
+
+<Callout title="The one-line takeaway">
+Ship with both error channels wired — `FlutterError.onError` for framework errors and `runZonedGuarded` for async ones — reporting to a crash service with **release symbols uploaded** (or traces are unreadable). Profile jank in **profile mode** using the DevTools timeline (aim under ~16ms/frame), fix it with `const`, tighter rebuild scope, and `RepaintBoundary`, and let **CI/CD** run analyze + test + build on every push.
+</Callout>
+
+export const quizProd = [
+  {
+    q: 'Why do you need both FlutterError.onError and runZonedGuarded?',
+    options: [
+      'They are redundant; either works',
+      'One catches errors from inside the Flutter framework, the other catches async/uncaught errors outside it',
+      'runZonedGuarded is only for tests',
+      'FlutterError.onError only works in debug',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why must you upload symbols/debug info for release crash reports?',
+    options: [
+      'To reduce app size',
+      'Release AOT builds strip symbols, so without the mapping stack traces are unreadable obfuscated addresses',
+      'It is required to build at all',
+      'To enable hot reload',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In which mode should you profile performance?',
+    options: [
+      'Debug',
+      'Profile mode — AOT-compiled with tooling attached, so numbers reflect reality',
+      'Release, with a debugger attached',
+      'Any mode',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which is a common cause of jank?',
+    options: [
+      'Using const constructors',
+      'Rebuilding too much (missing const, state too high) or expensive work in build',
+      'Writing unit tests',
+      'Using named parameters',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tooling-and-production/production-concerns" questions={quizProd} />
+
+<ProgressTracker client:visible id="tooling-and-production/production-concerns" />

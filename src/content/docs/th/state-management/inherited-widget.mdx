@@ -1,0 +1,109 @@
+---
+title: 'InheritedWidget'
+description: 'primitive ที่อยู่เบื้องหลัง Provider, Theme และ MediaQuery — Flutter propagate data ลง tree แบบ O(1) และ rebuild เฉพาะ widget ที่ depend อยู่'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## ปัญหาที่มันแก้
+
+การส่ง data ลง tree ลึก ๆ ด้วยมือ — ผ่านทุก constructor — เป็นเรื่องทรมาน นี่คือ "prop drilling" และมันผูก widget ตรงกลางทุกตัวเข้ากับ data ที่มันไม่ได้ใช้
+
+`InheritedWidget` คือคำตอบ built-in ของ Flutter คุณวางไว้สูงใน tree แล้ว descendant ตัวไหนก็อ่านมันได้ **ตรง ๆ** ผ่าน `context` ไม่ว่าจะลึกแค่ไหน โดยไม่มี widget ตรงกลางสักตัวต้องรู้เรื่อง `Theme`, `MediaQuery`, `Navigator` และ `Provider` ล้วนเป็น `InheritedWidget` — คุณใช้มันมาตลอด
+
+## descendant อ่านมันอย่างไร
+
+descendant เรียก `dependOnInheritedWidgetOfExactType` ซึ่งมักถูกห่อไว้ใน static method `of(context)` ตามธรรมเนียม:
+
+```dart
+class ThemeConfig extends InheritedWidget {
+  const ThemeConfig({super.key, required this.color, required super.child});
+  final Color color;
+
+  // ธรรมเนียม: static `of` ที่ register ผู้เรียกเป็น dependent
+  static ThemeConfig of(BuildContext context) {
+    final result =
+        context.dependOnInheritedWidgetOfExactType<ThemeConfig>();
+    assert(result != null, 'No ThemeConfig found in context');
+    return result!;
+  }
+
+  // เรียกเมื่อ ThemeConfig ใหม่มาแทนตัวเก่า: dependent ควร rebuild ไหม?
+  @override
+  bool updateShouldNotify(ThemeConfig oldWidget) => color != oldWidget.color;
+}
+
+// ที่ไหนก็ได้ที่อยู่ต่ำกว่ามัน:
+final color = ThemeConfig.of(context).color;
+```
+
+มีสองกลไกที่สำคัญตรงนี้ `dependOnInheritedWidgetOfExactType` ทำสองอย่างพร้อมกัน: มัน **หา** ancestor ที่ใกล้ที่สุดของ type นั้น (การ lookup ขึ้น element tree ที่เร็วและ cache ไว้) และ **register** element ที่เรียกให้เป็น dependent ส่วน `updateShouldNotify` ตัดสินว่า เมื่อ inherited widget ถูก rebuild ด้วย data ใหม่ dependent จำเป็นต้อง rebuild จริงไหม
+
+## rebuild เฉพาะ dependent
+
+นี่คือผลตอบแทน เมื่อ `InheritedWidget` update และ `updateShouldNotify` คืน true Flutter จะ rebuild **เฉพาะ widget ที่เรียก `of(context)`** — ไม่ใช่ทั้ง subtree widget ตรงกลางที่ไม่เคย depend ก็ไม่ถูกแตะ
+
+<Mermaid title="Only registered dependents rebuild on update" code={depDiagram} />
+
+export const depDiagram = `flowchart TB
+  iw["InheritedWidget\n(color เปลี่ยน)"] --> a["Widget A\n(ไม่ได้ depend)\nไม่ rebuild"]
+  iw --> b["Widget B\nเรียก of(context)\nrebuild"]
+  iw --> c["Widget C\n(ไม่ได้ depend)\nไม่ rebuild"]`;
+
+การ rebuild แบบเจาะจงนั้นคือเหตุผลที่ `InheritedWidget` scale ได้: การอ่านคือ lookup ขึ้นบนที่ราคาถูก และ update จะกระเพื่อมไปถึงแค่ dependent จริง ๆ ทุก state solution ระดับสูงกว่านี้ ล้วนเป็นกลไกนี้บวก ergonomics อยู่ข้างใต้
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`InheritedWidget` ให้ descendant ตัวไหนก็อ่าน data ผ่าน `context` ได้โดยไม่ต้อง prop-drill ใช้ `dependOnInheritedWidgetOfExactType` (ที่ทั้ง **หา** ancestor และ **register** ผู้อ่านเป็น dependent) เมื่อมัน update `updateShouldNotify` เป็นตัวคุมว่า dependent จะ rebuild ไหม — และเฉพาะ widget ที่อ่านมันจริง ๆ เท่านั้นที่ rebuild Theme, MediaQuery และ Provider ล้วนสร้างบน primitive ตัวเดียวนี้
+</Callout>
+
+export const quizInherited = [
+  {
+    q: 'InheritedWidget แก้ปัญหาอะไร?',
+    options: [
+      'network call ช้า',
+      'prop drilling — การส่ง data ลง tree ลึก ๆ ผ่านทุก constructor ด้วยมือ',
+      'การ animate widget',
+      'การ compile Dart',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'dependOnInheritedWidgetOfExactType ทำอะไร?',
+    options: [
+      'สร้าง widget ใหม่อย่างเดียว',
+      'หา ancestor ที่ใกล้ที่สุดของ type นั้น และ register ผู้เรียกเป็น dependent',
+      'dispose inherited widget',
+      'rebuild ทั้ง app',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อ InheritedWidget update widget ตัวไหน rebuild?',
+    options: [
+      'ทุก widget ใน subtree',
+      'เฉพาะ widget ที่ register เป็น dependent (เรียก of(context))',
+      'เฉพาะ root widget',
+      'ไม่มีเลย — มันไม่เคย rebuild',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'บทบาทของ updateShouldNotify คืออะไร?',
+    options: [
+      'มัน dispose controller',
+      'มันตัดสินว่า dependent ควร rebuild ไหมเมื่อ inherited widget ถูกแทนด้วย data ใหม่',
+      'มันสร้าง State object',
+      'มันจัดการ navigation',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="state-management/inherited-widget" questions={quizInherited} />
+
+<ProgressTracker client:visible id="state-management/inherited-widget" />

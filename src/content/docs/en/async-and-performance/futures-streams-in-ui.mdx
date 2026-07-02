@@ -1,0 +1,126 @@
+---
+title: 'Futures & Streams in the UI'
+description: 'Turning async data into widgets with FutureBuilder and StreamBuilder, reading AsyncSnapshot, handling loading and error states, and the create-in-build trap.'
+sidebar:
+  order: 2
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## The bridge from async to widgets
+
+You cannot `await` inside `build` — `build` must be synchronous and may run many times. So Flutter gives you two widgets that *subscribe* to async sources and rebuild when they emit: `FutureBuilder` for a one-shot `Future`, and `StreamBuilder` for a `Stream` of values.
+
+Both hand your builder an `AsyncSnapshot`, which describes the current state of the async source: are we still waiting, do we have data, or did it error?
+
+## FutureBuilder
+
+```dart
+FutureBuilder<User>(
+  future: _userFuture,               // a Future created OUTSIDE build (see the trap)
+  builder: (context, snapshot) {
+    if (snapshot.connectionState == ConnectionState.waiting) {
+      return const CircularProgressIndicator();     // loading
+    }
+    if (snapshot.hasError) {
+      return Text('Failed: ${snapshot.error}');      // error
+    }
+    final user = snapshot.data!;                     // data is ready
+    return Text(user.name);
+  },
+)
+```
+
+Read the snapshot in a fixed order: **waiting → error → data**. Handling all three (plus an empty state where relevant) is what separates a robust screen from one that flashes a null error for a moment.
+
+## StreamBuilder
+
+`StreamBuilder` is the same shape for a `Stream` — it rebuilds on every emitted value, so it suits live data (a chat feed, a location stream, a `Bloc` state).
+
+```dart
+StreamBuilder<int>(
+  stream: _tickerStream,
+  initialData: 0,
+  builder: (context, snapshot) {
+    return Text('Count: ${snapshot.data}');   // rebuilds on each new value
+  },
+)
+```
+
+## The create-in-build trap
+
+This is the single most common `FutureBuilder` bug: creating the future *inside* `build`.
+
+```dart
+// ❌ WRONG — a new future is created on every rebuild,
+//    so the request re-fires and the loading spinner flickers forever.
+Widget build(BuildContext context) {
+  return FutureBuilder(
+    future: fetchUser(42),   // <-- recreated every build
+    builder: ...,
+  );
+}
+
+// ✅ RIGHT — create it once and store it (in initState for a StatefulWidget).
+late final Future<User> _userFuture;
+@override
+void initState() {
+  super.initState();
+  _userFuture = fetchUser(42);   // created once
+}
+```
+
+Because `build` can run for many reasons (a parent rebuild, a theme change, a keyboard opening), any future created there is recreated each time — re-triggering the work and resetting the snapshot to `waiting`. Create it once, in `initState` or a state-management layer, and pass the *same* future in.
+
+<Callout title="The one-line takeaway">
+`FutureBuilder` and `StreamBuilder` subscribe to async sources and rebuild your UI from an `AsyncSnapshot` — handle **waiting, error, then data** every time. The cardinal sin is creating the `Future` inside `build`: it is recreated on every rebuild, re-firing the work and flickering the spinner. Create it once (in `initState` or your state layer) and pass the same instance in.
+</Callout>
+
+export const quizFS = [
+  {
+    q: 'Why can\'t you just await inside build?',
+    options: [
+      'await is not supported in Dart',
+      'build must be synchronous and may run many times, so you subscribe via FutureBuilder/StreamBuilder instead',
+      'It would be too fast',
+      'build only runs once',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does an AsyncSnapshot tell you?',
+    options: [
+      'The widget\'s size',
+      'The current state of the async source — waiting, has data, or has an error',
+      'The frame rate',
+      'The route stack',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What goes wrong when you create the Future inside build?',
+    options: [
+      'Nothing, it is recommended',
+      'A new future is created on every rebuild, re-firing the work and resetting the snapshot to waiting',
+      'The app will not compile',
+      'The future runs on a second thread',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where should a one-shot Future for a FutureBuilder be created?',
+    options: [
+      'Inside the builder callback',
+      'Once, in initState (or a state-management layer), then passed in as the same instance',
+      'In the widget constructor arguments every build',
+      'It does not matter',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="async-and-performance/futures-streams-in-ui" questions={quizFS} />
+
+<ProgressTracker client:visible id="async-and-performance/futures-streams-in-ui" />

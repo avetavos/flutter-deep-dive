@@ -1,0 +1,122 @@
+---
+title: 'Slivers & Scrolling'
+description: 'scrolling ทำงานจริงอย่างไร — lazy building ด้วย ListView.builder, viewport และการประกอบ scroll effect แบบ custom ด้วย CustomScrollView และ sliver'
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## lazy building คือหัวใจทั้งหมด
+
+list ที่ scroll ได้อาจมีหนึ่งหมื่น item แต่หน้าจอโชว์แค่ยี่สิบ การ build ทั้งหมื่นตัวคือหายนะ ไอเดียหลักของ scrolling ใน Flutter คือ **lazy building**: build เฉพาะ item ที่อยู่ใกล้พื้นที่มองเห็น และ recycle มันตอน scroll
+
+นี่คือเหตุผลที่ constructor ที่คุณเลือกสำคัญมาก:
+
+```dart
+// ❌ build child ทั้งหมดตั้งแต่แรก — โอเคถ้ามีไม่กี่ตัว, หายนะถ้ามีเป็นพัน
+ListView(children: [ for (final item in items) Tile(item) ])
+
+// ✅ build child ตามที่ scroll เข้ามาในพื้นที่มองเห็น
+ListView.builder(
+  itemCount: items.length,
+  itemBuilder: (context, i) => Tile(items[i]),
+)
+```
+
+`ListView.builder` (และ `GridView.builder`) เรียก `itemBuilder` เฉพาะ item ที่ viewport ต้องการ สำหรับ list ที่อาจยาว ใช้แบบ builder เสมอ
+
+## viewport และ sliver
+
+ใต้ scrollable มี **viewport** — หน้าต่างที่คุณเห็น — และข้างในมี **sliver** sliver คือพื้นที่ scroll ได้ที่รู้วิธี layout ตัวเองแบบ lazy เทียบกับ viewport `ListView` เป็นตัวสะดวกที่ห่อ sliver ตัวเดียว; เมื่อคุณต้องการ scroll effect มากกว่าหนึ่งใน scroll view เดียว คุณจะประกอบ sliver เอง
+
+<Mermaid title="viewport build เฉพาะ sliver ที่อยู่ในสายตาแบบ lazy" code={sliverDiagram} />
+
+export const sliverDiagram = `flowchart TB
+  scroll["CustomScrollView"] --> vp["Viewport\n(visible window)"]
+  vp --> s1["SliverAppBar\n(collapses on scroll)"]
+  vp --> s2["SliverList\n(builds only visible tiles)"]
+  vp --> offscreen["off-screen tiles:\nnot built yet"]`;
+
+## CustomScrollView: ประกอบ scroll effect
+
+`CustomScrollView` รับ list ของ sliver แล้ว scroll มันเป็นหนึ่งเดียว นี่คือวิธีสร้าง header ที่ collapse เหนือ list หรือวาง grid กับ list ใน scroll view เดียวกัน
+
+```dart
+CustomScrollView(
+  slivers: [
+    const SliverAppBar(
+      floating: true,
+      expandedHeight: 200,     // header ที่ collapse ตอน scroll
+    ),
+    SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, i) => Tile(items[i]),   // ยัง lazy อยู่
+        childCount: items.length,
+      ),
+    ),
+  ],
+)
+```
+
+mental model: widget ปกติกินพื้นที่กล่องคงที่; **sliver** กินพื้นที่ scroll ได้และเจรจากับ viewport ว่าจะมองเห็นมันแค่ไหน `SliverAppBar`, `SliverList`, `SliverGrid` และ `SliverToBoxAdapter` (เอา widget ปกติหย่อนลงใน list ของ sliver) คือชิ้นส่วนที่คุณเอามาประกอบ
+
+## จุดพลาดที่พบบ่อยเรื่อง scrolling
+
+- **ซ้อน scrollable** ทิศทางเดียวกัน (`ListView` ใน `ListView`) จะแย่ง scroll กันและ throw error เรื่อง unbounded constraint — ใช้ sliver หรือ `shrinkWrap` อย่างตั้งใจ
+- **`shrinkWrap: true`** ทำให้ list size ตาม content แทน viewport แต่มัน *build ทุกอย่าง* และเสีย laziness — ใช้กับ list เล็กจริง ๆ เท่านั้น
+- **ไม่ใส่ key** บน list ที่เรียงลำดับใหม่ได้ ทำให้ state ผิดตัวไปเกาะกับ item ผิดตัว (ดูบทเรียน Keys)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+scrolling สร้างบน **lazy building** — build เฉพาะ item ใกล้ viewport แล้ว recycle — ดังนั้นใช้ `ListView.builder` เสมอสำหรับอะไรที่อาจยาว **viewport** เก็บ **sliver** ซึ่งเป็นพื้นที่ scroll ได้ที่ layout แบบ lazy; ประกอบด้วย `CustomScrollView` (เช่น `SliverAppBar` ที่ collapse เหนือ `SliverList`) เมื่อ scroll view เดียวต้องการหลาย effect เลี่ยง `shrinkWrap` บน list ใหญ่ — มันทิ้ง laziness ไป
+</Callout>
+
+export const quizSlivers = [
+  {
+    q: 'ทำไมต้องใช้ ListView.builder สำหรับ list ยาว?',
+    options: [
+      'มันดูสวยกว่า',
+      'มัน build child แบบ lazy ตามความต้องการ แทนที่จะ build ทั้งหมดตั้งแต่แรก',
+      'มันจำเป็นสำหรับทุก list',
+      'มันปิด scrolling',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'sliver คืออะไร?',
+    options: [
+      'animation ชนิดหนึ่ง',
+      'พื้นที่ scroll ได้ที่ layout ตัวเองแบบ lazy เทียบกับ viewport',
+      'widget กล่องขนาดคงที่',
+      'route ของ navigation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อไรควรใช้ CustomScrollView?',
+    options: [
+      'สำหรับทุก list',
+      'เมื่อ scroll view เดียวต้องการหลาย effect เช่น header ที่ collapse เหนือ list แบบ lazy',
+      'เพื่อปิด lazy building',
+      'สำหรับ grid เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อเสียของ shrinkWrap: true บน list ใหญ่คืออะไร?',
+    options: [
+      'มันเปลี่ยนสี',
+      'มัน build child ทั้งหมด (เสีย laziness) เพื่อ size list ตาม content',
+      'มันปิดการ tap',
+      'ไม่มีข้อเสีย',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="layout-and-rendering/slivers-and-scrolling" questions={quizSlivers} />
+
+<ProgressTracker client:visible id="layout-and-rendering/slivers-and-scrolling" />
