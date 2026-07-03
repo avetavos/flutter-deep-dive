@@ -45,11 +45,13 @@ The `watch` vs `read` distinction is the whole game. `context.watch<T>()` subscr
 
 ```dart
 // A provider declared at top level — not in the widget tree.
-final counterProvider = StateNotifierProvider<Counter, int>((ref) => Counter());
+final counterProvider = NotifierProvider<Counter, int>(Counter.new);
 
-class Counter extends StateNotifier<int> {
-  Counter() : super(0);
-  void increment() => state++;   // reassigning `state` notifies listeners
+class Counter extends Notifier<int> {
+  @override
+  int build() => 0;             // the initial state, returned from build()
+
+  void increment() => state++;  // reassigning `state` notifies listeners
 }
 
 // In a ConsumerWidget, `ref` reads providers:
@@ -66,7 +68,11 @@ class CounterView extends ConsumerWidget {
 }
 ```
 
-Notice the same `watch`/`read` split via `ref`. The difference from Provider is structural: no `BuildContext` lookup, no "provider not found" at runtime, and providers compose (one provider can `ref.watch` another).
+A `Notifier<T>` returns its initial state from `build()` (not a constructor `super(initial)`), and mutating `state` notifies listeners. Notice the same `watch`/`read` split via `ref`. The difference from Provider is structural: no `BuildContext` lookup, no "provider not found" at runtime, and providers compose (one provider can `ref.watch` another).
+
+For async state, the equivalent is `AsyncNotifier` / `AsyncNotifierProvider`, whose `build()` returns a `Future`. Riverpod also offers a `@riverpod` code-generation style that derives the provider for you from an annotated class or function.
+
+> The older `StateNotifier` / `StateNotifierProvider` and `StateProvider` APIs are now **legacy** (deprecated in Riverpod 3) — you'll still see them in existing code, but new code should use `Notifier` / `NotifierProvider` (or the `@riverpod` codegen).
 
 ## Choosing between them
 
