@@ -14,7 +14,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 animation ใน Flutter แยกเป็นสองตระกูล และการเลือกให้ถูกคือทักษะเกือบทั้งหมด:
 
-- **Implicit** — คุณเปลี่ยนค่า Flutter animate *ไปหา* มันอัตโนมัติ ไม่มี controller ไม่มี lifecycle ให้จัดการ
+- **Implicit** — คุณเปลี่ยนค่า Flutter animate *ไปหา* ค่าใหม่ให้อัตโนมัติ ไม่มี controller ไม่มี lifecycle ให้จัดการ
 - **Explicit** — คุณขับ animation เองด้วย `AnimationController` ควบคุมได้เต็มที่ (repeat, reverse, sync หลายค่า, ตอบสนอง gesture) แลกกับ ticker และการ dispose
 
 เริ่มที่ implicit แล้วค่อยไป explicit เมื่อ implicit ทำสิ่งที่ต้องการไม่ได้
@@ -34,9 +34,9 @@ AnimatedContainer(
 )
 ```
 
-`TweenAnimationBuilder` generalize สิ่งนี้: ให้ `Tween` กับค่าเป้าหมาย มันจะ animate ค่าและ rebuild builder ของคุณ — implicit animation สำหรับ property ใด ๆ
+`TweenAnimationBuilder` generalize สิ่งนี้: ให้ `Tween` กับค่าเป้าหมาย จะ animate ค่าและ rebuild builder ของคุณ — implicit animation สำหรับ property ใด ๆ
 
-## Explicit: ขับมันเอง
+## Explicit: ขับ animation เอง
 
 `AnimationController` ผลิตค่าจาก 0 ถึง 1 ตลอด duration โดยถูก tick ด้วย `vsync` `Tween` map 0..1 ไปยัง range ของคุณ และ `AnimatedBuilder` rebuild เฉพาะส่วนที่ animate
 
@@ -68,14 +68,14 @@ export const animDiagram = `flowchart LR
   tween --> ab["AnimatedBuilder\nrebuild เฉพาะส่วนที่ animate"]
   ab --> ui["widget update ทุก tick"]`;
 
-สองกฎที่กันบั๊กที่พบบ่อย: controller ต้องมี `vsync` (mix in `SingleTickerProviderStateMixin`) และคุณต้อง `dispose()` มัน — controller ที่ leak จะ tick ต่อไปเรื่อย ๆ ส่งส่วนที่ไม่เปลี่ยนเป็น `child` เพื่อไม่ให้ถูก rebuild ทุก tick
+สองกฎที่กันบั๊กที่พบบ่อย: controller ต้องมี `vsync` (mix in `SingleTickerProviderStateMixin`) และคุณต้อง `dispose()` controller ทิ้ง — controller ที่ leak จะ tick ต่อไปเรื่อย ๆ ส่งส่วนที่ไม่เปลี่ยนเป็น `child` เพื่อไม่ให้ถูก rebuild ทุก tick
 
 ## Curves
 
-`Curve` (`Curves.easeInOut`, `Curves.elasticOut`, …) reshape เวลาเชิงเส้นให้เป็นการเคลื่อนไหวที่เป็นธรรมชาติ ทั้งสองตระกูลรับ curve ได้ การใช้มันคือความต่างระหว่างการ slide แบบกลไกกับการเคลื่อนไหวที่รู้สึกว่าออกแบบมา
+`Curve` (`Curves.easeInOut`, `Curves.elasticOut`, …) reshape เวลาเชิงเส้นให้เป็นการเคลื่อนไหวที่เป็นธรรมชาติ ทั้งสองตระกูลรับ curve ได้ การใส่ curve คือความต่างระหว่างการ slide แบบกลไกกับการเคลื่อนไหวที่รู้สึกว่าออกแบบมา
 
 <Callout title="สรุปหนึ่งบรรทัด">
-เลือก **implicit** animation ก่อน (`AnimatedContainer`, `TweenAnimationBuilder`) — เปลี่ยนค่าแล้ว Flutter interpolate ไปหามันโดยไม่มี lifecycle ให้จัดการ ใช้ **explicit** (`AnimationController` + `Tween` + `AnimatedBuilder`) เมื่อต้อง repeat, reverse, chain หรือขับด้วย gesture — และจำสองกฎ: ให้ `vsync` ticker และ `dispose()` มัน เพิ่ม `Curve` เพื่อการเคลื่อนไหวที่เป็นธรรมชาติ
+เลือก **implicit** animation ก่อน (`AnimatedContainer`, `TweenAnimationBuilder`) — เปลี่ยนค่าแล้ว Flutter interpolate ไปหาค่าใหม่ให้เองโดยไม่มี lifecycle ให้จัดการ ใช้ **explicit** (`AnimationController` + `Tween` + `AnimatedBuilder`) เมื่อต้อง repeat, reverse, chain หรือขับด้วย gesture — และจำสองกฎ: ให้ `vsync` ticker และ `dispose()` controller ทิ้ง เพิ่ม `Curve` เพื่อการเคลื่อนไหวที่เป็นธรรมชาติ
 </Callout>
 
 export const quizAnim = [
@@ -83,7 +83,7 @@ export const quizAnim = [
     q: 'implicit animation คืออะไร?',
     options: [
       'อันที่คุณขับ tick ต่อ tick ด้วย controller',
-      'อันที่คุณเปลี่ยนค่าเป้าหมายแล้ว Flutter animate ไปหามันอัตโนมัติ (เช่น AnimatedContainer)',
+      'อันที่คุณเปลี่ยนค่าเป้าหมายแล้ว Flutter animate ไปหาค่าใหม่ให้อัตโนมัติ (เช่น AnimatedContainer)',
       'animation ที่มองไม่เห็น',
       'animation ที่รันเฉพาะใน release mode',
     ],
@@ -103,9 +103,9 @@ export const quizAnim = [
     q: 'จะเกิดอะไรถ้าลืม dispose AnimationController?',
     options: [
       'ไม่มีอะไร',
-      'มัน leak และ tick ต่อไปเรื่อย ๆ สิ้นเปลืองทรัพยากร',
+      'leak และ tick ต่อไปเรื่อย ๆ สิ้นเปลืองทรัพยากร',
       'แอปจะ build ไม่ผ่าน',
-      'มัน dispose ตัวเองอัตโนมัติเสมอ',
+      'dispose ตัวเองอัตโนมัติเสมอ',
     ],
     answer: 1,
   },

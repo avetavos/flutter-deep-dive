@@ -1,6 +1,6 @@
 ---
 title: 'Async, Performance & Rendering'
-description: 'frame budget ที่คุณต้องปกป้อง และสองวินัยที่ปกป้องมัน — ป้อนข้อมูล async เข้า UI ให้สะอาด และกัน rebuild กับงานหนักออกจาก critical path'
+description: 'frame budget ที่คุณต้องปกป้อง และสองวินัยที่ช่วยรักษา budget นั้นไว้ — ป้อนข้อมูล async เข้า UI ให้สะอาด และกัน rebuild กับงานหนักออกจาก critical path'
 sidebar:
   order: 1
 ---
@@ -38,7 +38,7 @@ export const budgetDiagram = `flowchart TB
 งาน async ต้องไม่ block UI thread เดี่ยว และ rebuild ต้องไม่ทำมากเกินที่จำเป็น ทำสองอย่างนี้ให้ถูก Flutter จะลื่นเกือบฟรี ทำผิด ต่อให้ widget ฉลาดแค่ไหนก็ช่วยไม่ได้
 
 <Callout title="การปรับมุมมอง">
-Performance ใน Flutter แทบไม่เกี่ยวกับการทำอะไรพิสดาร — มันคือการ *ไม่* ทำสิ่งที่สิ้นเปลืองซ้ำทุก frame `Future` ที่ถูกสร้างใหม่ใน `build`, `setState` ที่ rebuild ครึ่งจอ, `const` ที่ขาดไป, หรือ parse หนัก ๆ บน UI isolate: แต่ละอย่างค่อย ๆ กิน 16ms ของคุณ ทั้งโมดูลคือการตามล่า leak เหล่านี้
+Performance ใน Flutter แทบไม่เกี่ยวกับการทำอะไรพิสดาร — แต่คือการ *ไม่* ทำสิ่งที่สิ้นเปลืองซ้ำทุก frame `Future` ที่ถูกสร้างใหม่ใน `build`, `setState` ที่ rebuild ครึ่งจอ, `const` ที่ขาดไป, หรือ parse หนัก ๆ บน UI isolate: แต่ละอย่างค่อย ๆ กิน 16ms ของคุณ ทั้งโมดูลคือการตามล่า leak เหล่านี้
 </Callout>
 
 export const quizIndex = [

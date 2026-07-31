@@ -14,7 +14,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 Flutter compile code เดียวกันสามแบบต่างกันขึ้นกับสิ่งที่คุณต้องการ:
 
-<Mermaid title="build mode สามแบบและ compilation ของมัน" code={modeDiagram} />
+<Mermaid title="build mode สามแบบและ compilation ของตัวเอง" code={modeDiagram} />
 
 export const modeDiagram = `flowchart LR
   debug["debug\nJIT · hot reload · asserts on\n(slow, dev only)"]
@@ -29,7 +29,7 @@ export const modeDiagram = `flowchart LR
 
 การแยก debug/release จริง ๆ แล้วคือการแยก compilation:
 
-- **JIT** (Just-In-Time) ใช้ใน debug compile Dart ตอนที่มันรัน — ซึ่งเป็นสิ่งที่ทำให้ hot reload เป็นไปได้ (มัน swap code ใหม่เข้าไปได้ทันที)
+- **JIT** (Just-In-Time) ใช้ใน debug compile Dart ตอนที่รัน — นั่นคือสิ่งที่ทำให้ hot reload เป็นไปได้ (swap code ใหม่เข้าไปได้ทันที)
 - **AOT** (Ahead-Of-Time) ใช้ใน profile และ release compile Dart เป็น native machine code ก่อนที่แอปจะ ship ผลลัพธ์คือ startup ที่เร็วและ performance ที่คาดเดาได้ แลกกับการไม่มี hot reload
 
 **Tree-shaking** เกิดใน AOT build: code ที่ไม่ถูกใช้ (และที่สำคัญ icon glyph ที่ไม่ถูก reference) ถูกตัดออกเพื่อให้ binary เล็ก
@@ -43,7 +43,7 @@ flutter build ipa --release          # iOS archive (App Store)
 flutter build web --release          # web bundle
 ```
 
-แต่ละ target สร้าง artifact คนละแบบจาก Dart source เดียวกัน — framework abstract platform ออกไป ส่วน build step ทำให้มันเป็นจริง
+แต่ละ target สร้าง artifact คนละแบบจาก Dart source เดียวกัน — framework abstract platform ออกไป ส่วน build step ทำให้ออกมาเป็นจริงบนแต่ละ platform
 
 ## Flavors: แอปเดียว หลาย environment
 
@@ -64,7 +64,7 @@ export const quizBuild = [
   {
     q: 'ควรใช้ build mode ไหนในการวัด performance จริง?',
     options: [
-      'Debug — มันมีเครื่องมือเยอะสุด',
+      'Debug — มีเครื่องมือเยอะสุด',
       'Profile — AOT-compiled เหมือน release แต่มี performance tooling ติดอยู่',
       'Release — แต่แนบเครื่องมือไม่ได้',
       'mode ไหนก็ให้ตัวเลขเดียวกัน',

@@ -14,9 +14,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 มี package สำหรับ state management เป็นสิบ และมีศึกใน blog อีกเป็นร้อย แต่ทั้งหมดตอบคำถามเดียวกันที่แบ่งเป็นสองส่วน:
 
-> **state ชิ้นนี้อยู่ที่ไหน และ widget ตัวไหน rebuild เมื่อมันเปลี่ยน?**
+> **state ชิ้นนี้อยู่ที่ไหน และ widget ตัวไหน rebuild เมื่อ state ชิ้นนี้เปลี่ยน?**
 
-อย่างอื่น — `setState`, `InheritedWidget`, Provider, Riverpod, BLoC — เป็นแค่กลไกคนละแบบที่ตอบคำถามนี้ พอมองแบบนี้แล้ว การเลือกระหว่างมันจะเลิกเป็นเรื่องพวกพ้องและกลายเป็นเรื่องของ scope
+อย่างอื่น — `setState`, `InheritedWidget`, Provider, Riverpod, BLoC — เป็นแค่กลไกคนละแบบที่ตอบคำถามนี้ พอมองแบบนี้แล้ว การเลือกใช้จะเลิกเป็นเรื่องพวกพ้องและกลายเป็นเรื่องของ scope
 
 ## state สองแบบ
 
@@ -52,7 +52,7 @@ export const quizIndex = [
     q: 'ทุกวิธีของ state management ตอบคำถามเดียวกันข้อไหน?',
     options: [
       'package ไหนเร็วที่สุด',
-      'state อยู่ที่ไหน และ widget ตัวไหน rebuild เมื่อมันเปลี่ยน',
+      'state อยู่ที่ไหน และ widget ตัวไหน rebuild เมื่อ state เปลี่ยน',
       'จะเลี่ยงการใช้ widget อย่างไร',
       'จะ compile ให้เร็วขึ้นอย่างไร',
     ],
@@ -72,7 +72,7 @@ export const quizIndex = [
     q: 'สำหรับ checkbox ง่าย ๆ ที่มี widget เดียวสน เครื่องมือที่ถูกต้องคือ?',
     options: [
       'global Riverpod provider',
-      'setState — เพราะมันคือ ephemeral state',
+      'setState — เพราะเป็น ephemeral state',
       'BLoC พร้อม event',
       'InheritedWidget ที่ root ของ app',
     ],

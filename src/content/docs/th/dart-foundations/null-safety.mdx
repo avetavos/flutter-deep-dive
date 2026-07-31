@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## non-nullable โดย default
 
-Dart มี **sound** null safety: type ไม่สามารถเก็บ `null` ได้เว้นแต่คุณจะบอกชัด ๆ ด้วย `?` นี่คือการันตีแบบแข็ง ไม่ใช่ lint — ถ้า type system บอกว่าค่านั้น non-null มันจะเป็น null ตอน runtime ไม่ได้จริง ๆ
+Dart มี **sound** null safety: type ไม่สามารถเก็บ `null` ได้เว้นแต่คุณจะบอกชัด ๆ ด้วย `?` นี่คือการันตีแบบแข็ง ไม่ใช่ lint — ถ้า type system บอกว่าค่านั้น non-null จะเป็น null ตอน runtime ไม่ได้จริง ๆ
 
 ```dart
 int a = 1;      // non-nullable — เป็น null ไม่ได้เลย
@@ -22,7 +22,7 @@ a = null;       // ❌ compile error: a เป็น null ไม่ได้
 b = 42;         // ✅ nullable ก็เก็บค่าจริงได้เหมือนกัน
 ```
 
-คำสำคัญคือ "sound": เพราะการันตีมันแน่นหนา compiler เลย *optimize* บนมันได้ และคุณ *เชื่อ* มันได้ widget property แบบ `String name` จะไม่มาเซอร์ไพรส์คุณด้วย null
+คำสำคัญคือ "sound": เพราะการันตีนี้แน่นหนา compiler จึง *optimize* ตามได้ และคุณก็ *เชื่อ* type ได้จริง widget property แบบ `String name` จะไม่มาเซอร์ไพรส์คุณด้วย null
 
 ## operator สี่ตัวที่คุณจะใช้ทุกวัน
 
@@ -42,7 +42,7 @@ maybeName ??= 'Default';
 final definite = maybeName!;          // String — อันตรายถ้ามันเป็น null จริง
 ```
 
-operator `!` คือตัวที่ต้องเคารพ: มันปิดปาก compiler ด้วยการ *assert* ว่า non-null และถ้าคุณผิด มันจะ throw ตอน runtime ทุก `!` คือการเดิมพันเล็ก ๆ — ใช้เมื่อคุณพิสูจน์ได้ว่าค่านั้น non-null เท่านั้น
+operator `!` คือตัวที่ต้องเคารพ: `!` สั่งปิดปาก compiler ด้วยการ *assert* ว่า non-null และถ้าคุณผิด จะ throw ตอน runtime ทุก `!` คือการเดิมพันเล็ก ๆ — ใช้เมื่อคุณพิสูจน์ได้ว่าค่านั้น non-null เท่านั้น
 
 ## flow analysis narrow ให้คุณ
 
@@ -74,7 +74,7 @@ late final String config;   // ยังไม่มีค่า แต่สั
 // ถ้าอ่านก่อน assign จะได้ LateInitializationError
 ```
 
-ใช้ `late` อย่างประหยัด — มันแลกการันตีตอน compile-time เป็นตอน runtime `late` ที่ใช้ผิดก็คือ `!` ในคราบปลอมนั่นเอง
+ใช้ `late` อย่างประหยัด — เพราะเป็นการแลกการันตีตอน compile-time ไปเป็นตอน runtime `late` ที่ใช้ผิดก็คือ `!` ในคราบปลอมนั่นเอง
 
 <Callout title="สรุปหนึ่งบรรทัด">
 Dart เป็น non-nullable โดย default; `?` opt-in ให้ type เก็บ `null` ได้ และการันตีเป็นแบบ **sound** — เชื่อได้ตอน runtime ใช้ `?.` (access ปลอดภัย), `??` (fallback) และพึ่ง **flow analysis** (การเช็ค null จะ promote ตัวแปร) แทน `!` (การเดิมพันตอน runtime) `late` เลื่อนการ initialize แต่ลดการันตีเหลือแค่ runtime — ใช้อย่างประหยัด
@@ -104,9 +104,9 @@ export const quizNull = [
   {
     q: 'ทำไม operator `!` (null assertion) ถึงเสี่ยง?',
     options: [
-      'มันช้า',
-      'มัน assert non-null เพื่อให้ compiler ผ่าน และ throw ตอน runtime ถ้าค่าเป็น null จริง',
-      'มันเปลี่ยน type อย่างถาวร',
+      'ช้า',
+      'assert non-null เพื่อให้ compiler ผ่าน และ throw ตอน runtime ถ้าค่าเป็น null จริง',
+      'เปลี่ยน type อย่างถาวร',
       'ใช้ได้กับตัวเลขเท่านั้น',
     ],
     answer: 1,

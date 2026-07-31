@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## setState ทำอะไรกันแน่
 
-`setState` ไม่ได้ "วาดหน้าจอใหม่" มันทำสิ่งเล็ก ๆ อย่างเดียว: รัน callback ของคุณ (ที่ mutate field) แล้ว mark **element** ของ widget นี้เป็น *dirty* พอถึง frame ถัดไป Flutter จะ rebuild ทุก element ที่ dirty โดยเรียก `build` อีกครั้ง
+`setState` ไม่ได้ "วาดหน้าจอใหม่" ทำสิ่งเล็ก ๆ อย่างเดียว: รัน callback ของคุณ (ที่ mutate field) แล้ว mark **element** ของ widget นี้เป็น *dirty* พอถึง frame ถัดไป Flutter จะ rebuild ทุก element ที่ dirty โดยเรียก `build` อีกครั้ง
 
 ```dart
 class Counter extends StatefulWidget {
@@ -64,7 +64,7 @@ export const lifecycleDiagram = `flowchart TB
 
 ## scope ของ rebuild
 
-`setState` mark element ของ State *นี้* เป็น dirty ดังนั้น `build` รันใหม่และผลิต subtree ใหม่ — แต่ Flutter ฉลาดเรื่องนี้ มันจะ diff widget subtree ใหม่กับ element tree เดิมและแตะเฉพาะส่วนที่เปลี่ยน ถึงอย่างนั้น `build` method ทั้งตัวก็รันอยู่ดี ดังนั้น `setState` ที่อยู่สูงใน tree แล้ว rebuild subtree ใหญ่ ๆ คือปัญหา performance จริง
+`setState` mark element ของ State *นี้* เป็น dirty ดังนั้น `build` รันใหม่และผลิต subtree ใหม่ — แต่ Flutter ฉลาดเรื่องนี้ จะ diff widget subtree ใหม่กับ element tree เดิมและแตะเฉพาะส่วนที่เปลี่ยน ถึงอย่างนั้น `build` method ทั้งตัวก็รันอยู่ดี ดังนั้น `setState` ที่อยู่สูงใน tree แล้ว rebuild subtree ใหญ่ ๆ คือปัญหา performance จริง
 
 บทเรียนเชิงปฏิบัติ: **ดัน `setState` ให้ต่ำใน tree มากที่สุด** แยกส่วนที่เปลี่ยนออกไปเป็น `StatefulWidget` เล็ก ๆ ของตัวเอง เพื่อให้เฉพาะ subtree เล็ก ๆ นั้น rebuild ไม่ใช่ทั้งหน้า (โมดูล performance เจาะลึกเรื่องนี้)
 
@@ -96,10 +96,10 @@ export const quizSetState = [
   {
     q: 'ทำไม build method ต้อง pure และไม่มี side effect?',
     options: [
-      'มันรันครั้งเดียว',
-      'มันถูกเรียกทุกครั้งที่ rebuild — side effect ตรงนั้นจะยิงซ้ำ ๆ และคาดเดาไม่ได้',
+      'รันครั้งเดียว',
+      'ถูกเรียกทุกครั้งที่ rebuild — side effect ตรงนั้นจะยิงซ้ำ ๆ และคาดเดาไม่ได้',
       'Dart ห้าม side effect',
-      'มันรันบน thread แยก',
+      'รันบน thread แยก',
     ],
     answer: 1,
   },

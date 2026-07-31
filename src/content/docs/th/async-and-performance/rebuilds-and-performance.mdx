@@ -10,9 +10,9 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## Rebuild ถูก — จนกว่ามันจะไม่ถูก
+## Rebuild ถูก — จนกว่าจะไม่ถูก
 
-การ rebuild widget subtree มักจะเร็ว: Flutter diff widget ใหม่กับ element แล้ว update เฉพาะที่เปลี่ยน ปัญหาคือทำมัน *มากเกินจำเป็น* — rebuild subtree ใหญ่ทั้งที่ชิ้นเล็กชิ้นเดียวเปลี่ยน ทุก frame ของ animation lever ด้านล่างล้วนลดงาน rebuild และ repaint ที่สูญเปล่า
+การ rebuild widget subtree มักจะเร็ว: Flutter diff widget ใหม่กับ element แล้ว update เฉพาะที่เปลี่ยน ปัญหาคือ rebuild *มากเกินจำเป็น* — rebuild subtree ใหญ่ทั้งที่ชิ้นเล็กชิ้นเดียวเปลี่ยน ทุก frame ของ animation lever ด้านล่างล้วนลดงาน rebuild และ repaint ที่สูญเปล่า
 
 ## Lever 1: const constructor
 
@@ -26,7 +26,7 @@ const Padding(
 )
 ```
 
-การใส่ `const` ทุกที่ที่ input ของ widget เป็น compile-time constant ทั้งหมด คือ performance win ที่ถูกที่สุดใน Flutter เปิด lint `prefer_const_constructors` แล้วทำตามมัน
+การใส่ `const` ทุกที่ที่ input ของ widget เป็น compile-time constant ทั้งหมด คือ performance win ที่ถูกที่สุดใน Flutter เปิด lint `prefer_const_constructors` แล้วทำตามที่ lint บอก
 
 ## Lever 2: narrow scope ของ setState
 
@@ -34,11 +34,11 @@ const Padding(
 
 ```dart
 // ❌ setState ตรงนี้ rebuild ทั้งหน้าจอเพื่อเลขตัวเดียว
-// ✅ ดึงส่วนที่เปลี่ยนออกไปเป็น StatefulWidget เล็ก ๆ ของมันเอง
+// ✅ ดึงส่วนที่เปลี่ยนออกไปเป็น StatefulWidget เล็ก ๆ ของตัวเอง
 //    ให้เฉพาะ widget นั้น rebuild ส่วนที่เหลือคง const ไว้
 ```
 
-Pattern คือ: ดัน state *ลงล่าง* ไปที่ widget เล็กที่สุดที่ต้องการมัน และคง widget รอบ ๆ ให้เป็น `const` เพื่อให้มันอยู่นิ่ง
+Pattern คือ: ดัน state *ลงล่าง* ไปที่ widget เล็กที่สุดที่ต้องใช้ และคง widget รอบ ๆ ให้เป็น `const` เพื่อให้อยู่นิ่ง
 
 ## Lever 3: subtree ที่นิ่ง และ RepaintBoundary
 
@@ -49,7 +49,7 @@ export const boundaryDiagram = `flowchart TB
   screen --> rest["const siblings\nไม่ rebuild ไม่ repaint"]
   counter --> rb["ห่อส่วนหนัก/animated\nด้วย RepaintBoundary"]`;
 
-`RepaintBoundary` ให้ subtree มี paint layer ของตัวเอง การ repaint มันจึงไม่บังคับให้เพื่อนบ้าน repaint ด้วย ห่อ animation หรือ widget ที่ update บ่อยไว้ในนั้นเพื่อจำกัดความเสียหาย
+`RepaintBoundary` ให้ subtree มี paint layer ของตัวเอง การ repaint จึงไม่ลากเพื่อนบ้าน repaint ตามไปด้วย ห่อ animation หรือ widget ที่ update บ่อยไว้ในนั้นเพื่อจำกัดความเสียหาย
 
 ## Lever 4: วัดด้วย DevTools
 
@@ -63,10 +63,10 @@ export const quizPerf = [
   {
     q: 'ทำไม const widget ช่วยเรื่อง performance?',
     options: [
-      'มัน compress widget',
-      'มันถูก canonicalize เมื่อ parent rebuild Flutter reuse instance เดิมและข้ามการ rebuild subtree นั้น',
-      'มันรันบน background isolate',
-      'มันปิด layout',
+      'compress widget',
+      'ถูก canonicalize เมื่อ parent rebuild Flutter reuse instance เดิมและข้ามการ rebuild subtree นั้น',
+      'รันบน background isolate',
+      'ปิด layout',
     ],
     answer: 1,
   },
@@ -84,7 +84,7 @@ export const quizPerf = [
     q: 'RepaintBoundary ทำอะไร?',
     options: [
       'ห้าม widget paint ตลอดไป',
-      'ให้ subtree มี paint layer ของตัวเอง การ repaint มันจึงไม่บังคับเพื่อนบ้าน repaint',
+      'ให้ subtree มี paint layer ของตัวเอง การ repaint จึงไม่ลากเพื่อนบ้าน repaint ตาม',
       'cap frame rate',
       'สร้าง isolate ใหม่',
     ],

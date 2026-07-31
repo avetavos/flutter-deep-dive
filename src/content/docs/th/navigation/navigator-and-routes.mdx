@@ -41,7 +41,7 @@ Navigator.of(context).push(
 Navigator.of(context).pop();
 ```
 
-`builder` คือ function ที่ return widget ของหน้าจอ — มันรันตอน route ถูกสร้าง ไม่ใช่ตอนคุณเรียก `push`
+`builder` คือ function ที่ return widget ของหน้าจอ — รันตอน route ถูกสร้าง ไม่ใช่ตอนคุณเรียก `push`
 
 ## ส่งข้อมูลไปข้างหน้า
 
@@ -81,7 +81,7 @@ Navigator.of(context).pop(Colors.blue);
 
 ## named route
 
-สำหรับแอปเล็ก ๆ คุณลงทะเบียน **named route** ใน `MaterialApp` แล้ว navigate ด้วยชื่อที่เป็น string ได้ มันรวม route table ไว้ที่เดียว แต่ระวัง: named route จะยุ่งยากเมื่อต้องส่ง argument ที่มี type และเมื่อทำ deep link ซึ่งเป็นเหตุผลที่ ecosystem ย้ายไป declarative routing (บทถัดไป)
+สำหรับแอปเล็ก ๆ คุณลงทะเบียน **named route** ใน `MaterialApp` แล้ว navigate ด้วยชื่อที่เป็น string ได้ วิธีนี้รวม route table ไว้ที่เดียว แต่ระวัง: named route จะยุ่งยากเมื่อต้องส่ง argument ที่มี type และเมื่อทำ deep link นั่นคือเหตุผลที่ ecosystem ย้ายไป declarative routing (บทถัดไป)
 
 ```dart
 MaterialApp(
@@ -132,10 +132,10 @@ export const quizNav = [
   {
     q: 'ทำไม ecosystem ถึงย้ายออกจาก named route สำหรับแอปใหญ่?',
     options: [
-      'มัน render ช้ากว่า',
-      'มันยุ่งยากเมื่อต้องใช้ argument ที่มี type และทำ deep link',
-      'มันแสดง animation ไม่ได้',
-      'มันทำงานเฉพาะบน Android',
+      'render ช้ากว่า',
+      'ยุ่งยากเมื่อต้องใช้ argument ที่มี type และทำ deep link',
+      'แสดง animation ไม่ได้',
+      'ทำงานเฉพาะบน Android',
     ],
     answer: 1,
   },

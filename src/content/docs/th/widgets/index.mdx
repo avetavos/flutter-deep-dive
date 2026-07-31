@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## แนวคิดเดียว
 
-Flutter มี slogan ว่า **everything is a widget** — layout, padding, ปุ่ม, ทั้งแอป ล้วนเป็น widget แต่ความจริงที่ลึกกว่านั้นคือ widget *คืออะไร*: มันคือ **description ที่ immutable** ของ UI ชิ้นหนึ่ง ณ ช่วงเวลาหนึ่ง มันไม่ใช่ของที่อยู่บนจอ มันคือสูตรของของนั้น
+Flutter มี slogan ว่า **everything is a widget** — layout, padding, ปุ่ม, ทั้งแอป ล้วนเป็น widget แต่ความจริงที่ลึกกว่านั้นคือ widget *คืออะไร*: widget คือ **description ที่ immutable** ของ UI ชิ้นหนึ่ง ณ ช่วงเวลาหนึ่ง ไม่ใช่ของที่อยู่บนจอ แต่เป็นสูตรของของนั้น
 
 เพราะ widget เป็น immutable และถูก คำตอบของ Flutter ต่อ "UI เปลี่ยนแล้ว" จึงสุดโต่ง: **ทิ้ง widget เดิมแล้ว build ใหม่** คุณไม่เคย mutate widget เลย คุณแค่บรรยาย state ใหม่ Flutter rebuild description แล้วอัปเดตเฉพาะส่วนที่ต่างจริง ๆ อย่างมีประสิทธิภาพ
 
@@ -27,7 +27,7 @@ Flutter มี slogan ว่า **everything is a widget** — layout, padding, 
 
 ## description ที่ถูก แต่ของจริงแพง
 
-ถ้า Flutter rebuild ทุกอย่างบนจอทุกเฟรม มันจะช้าจนใช้ไม่ได้ ทริกคือ widget เป็นแค่ layer บนสุดที่ถูก:
+ถ้า Flutter rebuild ทุกอย่างบนจอทุกเฟรม จะช้าจนใช้ไม่ได้ ทริกคือ widget เป็นแค่ layer บนสุดที่ถูก:
 
 <Mermaid title="สาม layer: widget ที่ถูก, element ที่อยู่ต่อเนื่อง, การ render จริง" code={layersDiagram} />
 
@@ -35,7 +35,7 @@ export const layersDiagram = `flowchart TB
   w["Widget\nimmutable description\n(rebuild อิสระ)"] --> e["Element\nliving instance\n(อยู่ต่อเนื่อง, ถือ state)"]
   e --> r["RenderObject\nlayout และ paint\n(ส่วนที่แพง)"]`;
 
-การ rebuild widget นั้นถูก ส่วน layer **element** และ **render** ที่อยู่ข้างล่างจะอยู่ต่อเนื่องและถูกอัปเดตเฉพาะจุดที่ widget ใหม่ต่างจากเดิม การแยกแบบนี้ — description ที่ทิ้งได้อยู่บน machinery ที่ทนทาน — คือเรื่องราวทั้งหมดของ performance และบทเรียนต่อไปจะทำให้มันเป็นรูปธรรม
+การ rebuild widget นั้นถูก ส่วน layer **element** และ **render** ที่อยู่ข้างล่างจะอยู่ต่อเนื่องและถูกอัปเดตเฉพาะจุดที่ widget ใหม่ต่างจากเดิม การแยกแบบนี้ — description ที่ทิ้งได้อยู่บน machinery ที่ทนทาน — คือเรื่องราวทั้งหมดของ performance และบทเรียนต่อไปจะทำให้เรื่องนี้เป็นรูปธรรม
 
 <Callout title="การเปลี่ยนมุมมอง">
 เลิกคิดว่า widget คือ "ปุ่มบนจอ" widget คือ *description* ที่ immutable ที่คุณ rebuild ตลอดเวลา ส่วน object จริงบนจออยู่ต่ำลงไปหนึ่ง layer และถูกนำกลับมาใช้ซ้ำ พอเข้าใจตรงนี้ คำถามอย่าง "ทำไม build method ทั้งอันถึงรันใหม่?" ก็เลิกน่ากลัว — การรัน build ควรจะถูกอยู่แล้ว

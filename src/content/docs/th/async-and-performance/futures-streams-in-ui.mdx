@@ -11,7 +11,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## สะพานจาก async ไปเป็น widget
 
-คุณ `await` ใน `build` ไม่ได้ — `build` ต้องเป็น synchronous และอาจรันหลายครั้ง Flutter เลยให้ widget สองตัวที่ *subscribe* แหล่งข้อมูล async แล้ว rebuild เมื่อมันปล่อยค่า: `FutureBuilder` สำหรับ `Future` แบบ one-shot และ `StreamBuilder` สำหรับ `Stream` ที่มีหลายค่า
+คุณ `await` ใน `build` ไม่ได้ — `build` ต้องเป็น synchronous และอาจรันหลายครั้ง Flutter เลยให้ widget สองตัวที่ *subscribe* แหล่งข้อมูล async แล้ว rebuild เมื่อมีค่าใหม่ปล่อยออกมา: `FutureBuilder` สำหรับ `Future` แบบ one-shot และ `StreamBuilder` สำหรับ `Stream` ที่มีหลายค่า
 
 ทั้งคู่ส่ง `AsyncSnapshot` มาให้ builder ของคุณ ซึ่งบอก state ปัจจุบันของแหล่ง async: ยังรออยู่, มีข้อมูลแล้ว, หรือ error?
 
@@ -37,7 +37,7 @@ FutureBuilder<User>(
 
 ## StreamBuilder
 
-`StreamBuilder` มีรูปแบบเดียวกันสำหรับ `Stream` — มัน rebuild ทุกค่าที่ปล่อยออกมา จึงเหมาะกับข้อมูล live (chat feed, location stream, `Bloc` state)
+`StreamBuilder` มีรูปแบบเดียวกันสำหรับ `Stream` — rebuild ทุกครั้งที่ stream ปล่อยค่าใหม่ จึงเหมาะกับข้อมูล live (chat feed, location stream, `Bloc` state)
 
 ```dart
 StreamBuilder<int>(
@@ -72,10 +72,10 @@ void initState() {
 }
 ```
 
-เพราะ `build` รันได้หลายสาเหตุ (parent rebuild, เปลี่ยน theme, keyboard เด้งขึ้น) future ที่สร้างตรงนั้นจึงถูกสร้างใหม่ทุกครั้ง — trigger งานซ้ำและ reset snapshot กลับเป็น `waiting` สร้างมันครั้งเดียวใน `initState` หรือใน state-management layer แล้วส่ง future *ตัวเดิม* เข้าไป
+เพราะ `build` รันได้หลายสาเหตุ (parent rebuild, เปลี่ยน theme, keyboard เด้งขึ้น) future ที่สร้างตรงนั้นจึงถูกสร้างใหม่ทุกครั้ง — trigger งานซ้ำและ reset snapshot กลับเป็น `waiting` ให้สร้าง future ครั้งเดียวใน `initState` หรือใน state-management layer แล้วส่ง future *ตัวเดิม* เข้าไป
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`FutureBuilder` และ `StreamBuilder` subscribe แหล่ง async แล้ว rebuild UI จาก `AsyncSnapshot` — จง handle **waiting, error, แล้ว data** ทุกครั้ง บาปร้ายแรงคือสร้าง `Future` ข้างใน `build`: มันถูกสร้างใหม่ทุก rebuild ยิงงานซ้ำและทำ spinner กระพริบ สร้างครั้งเดียว (ใน `initState` หรือ state layer) แล้วส่ง instance เดิมเข้าไป
+`FutureBuilder` และ `StreamBuilder` subscribe แหล่ง async แล้ว rebuild UI จาก `AsyncSnapshot` — จง handle **waiting, error, แล้ว data** ทุกครั้ง บาปร้ายแรงคือสร้าง `Future` ข้างใน `build`: future จะถูกสร้างใหม่ทุก rebuild ยิงงานซ้ำและทำ spinner กระพริบ สร้างครั้งเดียว (ใน `initState` หรือ state layer) แล้วส่ง instance เดิมเข้าไป
 </Callout>
 
 export const quizFS = [
@@ -84,7 +84,7 @@ export const quizFS = [
     options: [
       'Dart ไม่รองรับ await',
       'build ต้องเป็น synchronous และอาจรันหลายครั้ง จึง subscribe ผ่าน FutureBuilder/StreamBuilder แทน',
-      'มันจะเร็วเกินไป',
+      'จะเร็วเกินไป',
       'build รันแค่ครั้งเดียว',
     ],
     answer: 1,

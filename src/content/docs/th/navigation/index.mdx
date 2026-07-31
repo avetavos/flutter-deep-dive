@@ -38,7 +38,7 @@ export const shapeDiagram = `flowchart TB
 บนสุดคือ `MaterialApp` ที่ต่อ theme และ routing configuration ถัดลงมา router จัดการ stack ของ route แต่ละ route render `Scaffold` — กรอบมาตรฐานที่มี app bar, body และช่อง navigation และเมื่อ Dart อย่างเดียวไม่พอ platform channel ก็ยื่นลงไปหา native code
 
 <Callout title="การเปลี่ยนมุมมอง">
-เลิกคิดว่า navigation คือ "การย้ายไปอีกหน้า" ให้คิดว่ามันคือ **การแก้ไข stack**: หน้าจอที่คุณเห็นคือ top ของ stack ของ route และทุก `push` กับ `pop` คือ operation บน stack ส่วน declarative routing ก้าวไปอีกขั้น — stack กลายเป็น *ค่าที่ derive มา* จาก app state ซึ่งเป็นเหตุผลว่าทำไม deep link และ URL บนเว็บถึงทำงานได้ทันที
+เลิกคิดว่า navigation คือ "การย้ายไปอีกหน้า" ให้คิดว่าเป็น **การแก้ไข stack**: หน้าจอที่คุณเห็นคือ top ของ stack ของ route และทุก `push` กับ `pop` คือ operation บน stack ส่วน declarative routing ก้าวไปอีกขั้น — stack กลายเป็น *ค่าที่ derive มา* จาก app state นั่นคือเหตุผลว่าทำไม deep link และ URL บนเว็บถึงทำงานได้ทันที
 </Callout>
 
 export const quizIndex = [

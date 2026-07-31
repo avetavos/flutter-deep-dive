@@ -25,7 +25,7 @@ export const loopDiagram = `flowchart LR
 
 ## Future และ async/await
 
-**`Future<T>`** คือค่าที่จะมีทีหลัง — ผลของ async operation `async`/`await` ให้คุณเขียนมันเหมือนเป็น sequential
+**`Future<T>`** คือค่าที่จะมีทีหลัง — ผลของ async operation `async`/`await` ให้คุณเขียนโค้ด async ให้อ่านเหมือนโค้ด sequential
 
 ```dart
 Future<User> fetchUser(int id) async {
@@ -44,7 +44,7 @@ Future<void> load() async {
 }
 ```
 
-function ที่เป็น `async` คืน `Future` เสมอ `await` แกะมันออก และที่สำคัญ — error จาก future ที่ await จะโผล่มาเป็น exception ปกติที่ `try`/`catch` ได้ ใน Flutter คุณแทบไม่ `await` ใน `build` แต่ส่ง `Future` ให้ `FutureBuilder` แทน (โมดูลถัดไป)
+function ที่เป็น `async` คืน `Future` เสมอ `await` แกะค่าข้างในออกมา และที่สำคัญ — error จาก future ที่ await จะโผล่มาเป็น exception ปกติที่ `try`/`catch` ได้ ใน Flutter คุณแทบไม่ `await` ใน `build` แต่ส่ง `Future` ให้ `FutureBuilder` แทน (โมดูลถัดไป)
 
 ## Stream: หลายค่าตามเวลา
 
@@ -81,7 +81,7 @@ export const quizAsync = [
       'code รันบน CPU thread ที่สอง',
       'อย่า block thread เดียว — งานรันที่อื่นแล้ว schedule callback เมื่อเสร็จ',
       'code ถูก compile ล่วงหน้า',
-      'มันปิด event loop',
+      'ปิด event loop',
     ],
     answer: 1,
   },

@@ -12,9 +12,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## ทำไม imperative push/pop ถึงพังเมื่อเจอ deep link
 
-navigation แบบ imperative ทำงานได้ดีจนกว่าคุณต้องทำ **deep link** เมื่อ user เปิด `myapp.com/orders/42` จาก cold start มันไม่มีลำดับการ `push` ที่เกิดขึ้นมาก่อน — คุณต้องประกอบ stack ทั้งหมด (Home → Orders → Order 42) ขึ้นมาใหม่จาก URL การทำแบบนั้นด้วยมือด้วย `Navigator.push` เจ็บปวดและผิดพลาดง่าย
+navigation แบบ imperative ทำงานได้ดีจนกว่าคุณต้องทำ **deep link** เมื่อ user เปิด `myapp.com/orders/42` จาก cold start ไม่มีลำดับการ `push` ที่เกิดขึ้นมาก่อน — คุณต้องประกอบ stack ทั้งหมด (Home → Orders → Order 42) ขึ้นมาใหม่จาก URL การทำแบบนั้นด้วยมือด้วย `Navigator.push` เจ็บปวดและผิดพลาดง่าย
 
-ทางแก้คือทำให้ route stack เป็น **ฟังก์ชันของ state แบบ declarative**: กำหนด URL หรือ app state ปัจจุบันมา แล้วคำนวณ stack ออกมา นี่คือ Navigator 2.0 และเพราะ API ดิบ ๆ ของมัน verbose เกือบทุกคนจึงใช้ **`go_router`** ซึ่งเป็น package ทางการที่สร้างทับมันอีกที
+ทางแก้คือทำให้ route stack เป็น **ฟังก์ชันของ state แบบ declarative**: กำหนด URL หรือ app state ปัจจุบันมา แล้วคำนวณ stack ออกมา นี่คือ Navigator 2.0 และเพราะ API ดิบ ๆ ของตัวเอง verbose เกือบทุกคนจึงใช้ **`go_router`** ที่เป็น package ทางการที่สร้างทับ Navigator 2.0 อีกที
 
 <Mermaid title="declarative routing derive stack จาก state" code={declDiagram} />
 
@@ -48,7 +48,7 @@ context.go('/orders/42');
 
 ## nested / shell route
 
-**shell route** ห่อชุดของ route ไว้ใน UI ร่วมกัน — แอปแบบ bottom-navigation คลาสสิกที่ tab bar อยู่คงที่ในขณะที่เนื้อหาข้างในเปลี่ยน shell ยังคง mount อยู่ มีแต่ child route ที่สลับ
+**shell route** ห่อชุดของ route ไว้ใน UI ร่วมกัน — แอปแบบ bottom-navigation คลาสสิกที่ tab bar อยู่คงที่ ส่วนเนื้อหาข้างในเปลี่ยนไป shell ยังคง mount อยู่ มีแต่ child route ที่สลับ
 
 ```dart
 ShellRoute(
@@ -106,7 +106,7 @@ export const quizDecl = [
     q: 'shell route ใช้ทำอะไร?',
     options: [
       'รันคำสั่ง shell',
-      'ห่อชุดของ route ไว้ใน UI ร่วมกันที่คงอยู่ (เช่น bottom nav bar) ในขณะที่เนื้อหาข้างในสลับ',
+      'ห่อชุดของ route ไว้ใน UI ร่วมกันที่คงอยู่ (เช่น bottom nav bar) ส่วนเนื้อหาข้างในสลับไปมา',
       'เข้ารหัส route',
       'native code',
     ],

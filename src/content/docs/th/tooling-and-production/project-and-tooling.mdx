@@ -51,11 +51,11 @@ flutter doctor               # diagnose your local toolchain
 flutter analyze              # static analysis / lints
 ```
 
-`flutter doctor` คือสิ่งแรกที่ควรรันเมื่ออะไรผิดปกติ — มันเช็ค SDK, device toolchain และ IDE plugin แล้วบอกคุณตรง ๆ ว่าขาดอะไร
+`flutter doctor` คือสิ่งแรกที่ควรรันเมื่ออะไรผิดปกติ — ตรวจ SDK, device toolchain และ IDE plugin แล้วบอกคุณตรง ๆ ว่าขาดอะไร
 
 ## DevTools
 
-**DevTools** คือชุดเครื่องมือบน browser สำหรับ inspect แอปที่กำลังรัน: widget inspector (แตะ widget เห็น tree และ constraints ของมัน), performance/timeline view (หา jank), memory view และ network view มันคือวิธีที่คุณจะ *เห็น* tree และ pipeline ที่โมดูลก่อน ๆ อธิบายไว้
+**DevTools** คือชุดเครื่องมือบน browser สำหรับ inspect แอปที่กำลังรัน: widget inspector (แตะ widget เห็น tree และ constraints ของตัวเอง), performance/timeline view (หา jank), memory view และ network view นี่คือวิธีที่คุณจะ *เห็น* tree และ pipeline ที่โมดูลก่อน ๆ อธิบายไว้
 
 ## Hot reload vs hot restart
 
@@ -64,7 +64,7 @@ flutter analyze              # static analysis / lints
 - **Hot reload** (`r`) inject source ที่เปลี่ยนเข้าไปในแอปที่ *กำลังรัน* แล้ว rebuild widget tree — **State ถูกเก็บไว้** เร็วระดับต่ำกว่าวินาที และเป็นเหตุผลที่ทำให้การ dev Flutter รู้สึกเร็ว
 - **Hot restart** (`R`) ทิ้ง state ของแอปแล้วเริ่มใหม่จาก `main()` — ช้ากว่า แต่เริ่มจากศูนย์สะอาด ๆ
 
-hot reload มีข้อจำกัด มัน re-run `build` แต่ **ไม่** re-run `initState` หรือ `main()` ที่เปลี่ยน และ apply บางการเปลี่ยนแปลงไม่ได้ (การ eval `const` ใหม่, การเปลี่ยน shape ของ enum/class, global variable initializer) เมื่อการเปลี่ยนแปลงดูเหมือนไม่ติด คำตอบมักคือ hot restart
+hot reload มีข้อจำกัด: re-run `build` ให้ แต่ **ไม่** re-run `initState` หรือ `main()` ที่เปลี่ยน และ apply บางการเปลี่ยนแปลงไม่ได้ (การ eval `const` ใหม่, การเปลี่ยน shape ของ enum/class, global variable initializer) เมื่อการเปลี่ยนแปลงดูเหมือนไม่ติด คำตอบมักคือ hot restart
 
 <Callout title="สรุปหนึ่งบรรทัด">
 `pubspec.yaml` ประกาศ dependency (ที่ ship), `dev_dependencies` (ใช้ตอน build/test เท่านั้น) และ asset ที่ถูก bundle — การลืม entry asset คือ bug "not found" คลาสสิก flutter CLI รันทุกอย่าง (เริ่มด้วย `flutter doctor` เมื่อติดขัด), DevTools ให้ inspect tree และ timeline ที่กำลังรัน และ **hot reload** เก็บ State ไว้พร้อม re-run `build` — แต่การเปลี่ยน `initState`, `main` หรือ shape ของ class ต้อง **hot restart**
@@ -95,7 +95,7 @@ export const quizTooling = [
     q: 'ทำไมการเปลี่ยน code อาจไม่ปรากฏหลัง hot reload?',
     options: [
       'hot reload ใช้ไม่ได้เลย',
-      'มัน re-run build แต่ไม่ re-run initState/main หรือการเปลี่ยน shape บางอย่าง — พวกนั้นต้อง hot restart',
+      're-run build แต่ไม่ re-run initState/main หรือการเปลี่ยน shape บางอย่าง — พวกนั้นต้อง hot restart',
       'สาเหตุเดียวคือลืม save ไฟล์',
       'hot reload ต้องใช้ release mode',
     ],

@@ -16,7 +16,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 > **Constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง**
 
-layout คือ pass เดียวที่ไล่ลง tree แล้วกลับขึ้นมา parent ส่ง **constraints** ให้ child แต่ละตัว — เป็น `BoxConstraints` ที่มี min/max ของ width และ height child แต่ละตัวต้องเลือก **size** ที่อยู่ในขอบเขตนั้นแล้วรายงานกลับขึ้นไป จากนั้น parent จึง **วางตำแหน่ง** child ไว้ในตัวมัน
+layout คือ pass เดียวที่ไล่ลง tree แล้วกลับขึ้นมา parent ส่ง **constraints** ให้ child แต่ละตัว — เป็น `BoxConstraints` ที่มี min/max ของ width และ height child แต่ละตัวต้องเลือก **size** ที่อยู่ในขอบเขตนั้นแล้วรายงานกลับขึ้นไป จากนั้น parent จึง **วางตำแหน่ง** child ลงในพื้นที่ของตัวเอง
 
 <Mermaid title="layout pass เดียว: ลงไปพร้อม constraints ขึ้นมาพร้อม size" code={ruleDiagram} />
 
@@ -43,7 +43,7 @@ Center(
 
 1. `Center` รับ constraints จาก parent (สมมติว่าเป็นทั้งหน้าจอ: ขนาดเท่าหน้าจอพอดี)
 2. `Center` ส่ง constraints แบบ **loose** ให้ child — "เธอจะขนาดเท่าไรก็ได้ตั้งแต่ 0 จนถึงเท่าหน้าจอ"
-3. `Container` อยากมีขนาด `100x100` พอดี ซึ่งอยู่ในขอบเขต มันจึง size เป็น `100x100` แล้วรายงานขึ้นไป
+3. `Container` อยากมีขนาด `100x100` พอดี ซึ่งอยู่ในขอบเขต จึง size เป็น `100x100` แล้วรายงานขึ้นไป
 4. `Center` ใหญ่เท่าหน้าจอ แล้ววาง child `100x100` ไว้ตรงกลาง
 
 เปลี่ยน `Center` เป็น `Align`, `Padding` หรือ `SizedBox` มีแค่ขั้นที่ 2 เท่านั้นที่เปลี่ยน — คือ constraints ที่ส่งลงไป กฎไม่เคยเปลี่ยน
@@ -66,7 +66,7 @@ Center(child: coloredBox)
 
 widget บางตัวส่ง constraints แบบ **unbounded** — max เป็น infinity — แปลว่า "เธอจะใหญ่แค่ไหนก็ได้" `ListView` แนวตั้งเช่น ให้ child มี *height* แบบ unbounded (ทิศทาง scroll ยาวได้ไม่จำกัด)
 
-เอา `Column` ไปใส่ใน `ListView` นั้นแล้วคุณจะเจอ error คลาสสิก: `Column` พยายามสูงเท่าที่ constraints ยอมให้ แต่ constraint เป็น infinite มันจึงเลือก height ที่จำกัดไม่ได้
+เอา `Column` ไปใส่ใน `ListView` นั้นแล้วคุณจะเจอ error คลาสสิก: `Column` พยายามสูงเท่าที่ constraints ยอมให้ แต่ constraint เป็น infinite จึงเลือก height ที่จำกัดไม่ได้
 
 ```dart
 ListView(
@@ -78,7 +78,7 @@ ListView(
 )
 ```
 
-วิธีแก้คือให้ child มี height ที่ bounded — wrap มันไว้, ใช้ `shrinkWrap` หรือปรับโครงสร้างให้ตัว scrollable เป็น widget ชั้นนอก พออ่าน constraints เป็น error พวกนี้อ่านเหมือนประโยคภาษาคน ไม่ใช่ปริศนา
+วิธีแก้คือให้ child มี height ที่ bounded — wrap child ไว้, ใช้ `shrinkWrap` หรือปรับโครงสร้างให้ตัว scrollable เป็น widget ชั้นนอก พออ่าน constraints เป็น error พวกนี้อ่านเหมือนประโยคภาษาคน ไม่ใช่ปริศนา
 
 <Callout title="สรุปหนึ่งบรรทัด">
 layout คือ pass เดียว: **constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง** `BoxConstraints` เป็น **tight** (min เท่า max, บังคับ size) หรือ **loose** (min เป็น 0, size เลือกได้) widget เดียวกันทำงานต่างกันเพราะ parent ส่ง constraints ต่างกัน — และ error "unbounded constraints" ที่น่ากลัวก็แค่แปลว่า widget ถูกขอให้เต็มพื้นที่ที่ไม่มีที่สิ้นสุด อ่าน constraint flow เป็นแล้ว layout จะคาดเดาได้

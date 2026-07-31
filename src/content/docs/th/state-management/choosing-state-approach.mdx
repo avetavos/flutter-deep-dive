@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## การตัดสินใจ ให้ง่าย
 
-ตอนนี้คุณรู้กลไกแล้ว การเลือกระหว่างมันส่วนใหญ่เป็นเรื่องของ **scope และความซับซ้อน** และมันเดินตาม decision path สั้น ๆ:
+ตอนนี้คุณรู้กลไกแล้ว การเลือกใช้ส่วนใหญ่เป็นเรื่องของ **scope และความซับซ้อน** และเดินตาม decision path สั้น ๆ:
 
 <Mermaid title="Which approach to reach for" code={decideDiagram} />
 
@@ -30,7 +30,7 @@ export const decideDiagram = `flowchart TB
 
 ## Lifting state up
 
-เมื่อ sibling widget สองตัวต้องการ state เดียวกัน ย้ายมันไปที่ common ancestor ที่ใกล้ที่สุดแล้วส่งลงมา — **lifting state up** นี่คือสิ่งแรกที่ควรลองก่อนหยิบ shared-state package ใด ๆ
+เมื่อ sibling widget สองตัวต้องการ state เดียวกัน ให้ย้าย state ขึ้นไปไว้ที่ common ancestor ที่ใกล้ที่สุดแล้วส่งลงมา — **lifting state up** นี่คือสิ่งแรกที่ควรลองก่อนหยิบ shared-state package ใด ๆ
 
 | สถานการณ์ | state ควรอยู่ที่ไหน |
 |-----------|-----------------------------|
@@ -43,7 +43,7 @@ export const decideDiagram = `flowchart TB
 
 นิสัยที่สำคัญที่สุดคือการจัดหมวด state ให้ถูก:
 
-- **Ephemeral state** — index ของ `PageView`, form field, animation อยู่ใน `State` เสียมันตอน rebuild ก็ไม่เป็นไร
+- **Ephemeral state** — index ของ `PageView`, form field, animation อยู่ใน `State` หายไปตอน rebuild ก็ไม่เป็นไร
 - **App state** — auth, cart, settings, cached server data share และมักถูก persist อยู่ใน store นอก widget ตัวใดตัวหนึ่ง
 
 สำหรับอะไรที่เกิน app เล่น ๆ layer หน้าที่พวกนี้เพื่อไม่ให้พันกัน:
@@ -52,7 +52,7 @@ export const decideDiagram = `flowchart TB
 - **State/logic layer** — provider, BLoC, notifier ถือและ transition state
 - **Data layer** — repository และ service คุยกับ API, database, device
 
-การเก็บ business logic และ data access ออกจาก widget คือสิ่งที่ทำให้ app test ได้และรอดเมื่อมันโตขึ้น — ไม่ว่าจะเลือก state package ตัวไหน
+การเก็บ business logic และ data access ออกจาก widget คือสิ่งที่ทำให้ app test ได้และรอดเมื่อ app โตขึ้น — ไม่ว่าจะเลือก state package ตัวไหน
 
 <Callout title="สรุปหนึ่งบรรทัด">
 จับคู่เครื่องมือกับ scope: `setState` สำหรับ **ephemeral** state ที่ widget เดียวเป็นเจ้าของ, Provider/Riverpod สำหรับ **shared** state, BLoC สำหรับ flow ที่ **ซับซ้อนและ test ได้** — และลอง **lift state up** ไปที่ parent ร่วมก่อนเพิ่ม package ใด ๆ จัดหมวดทุกชิ้นของ state เป็น ephemeral หรือ app state และ layer app จริงเป็น UI, state/logic และ data เพื่อให้ widget โง่และ logic test ได้
@@ -83,7 +83,7 @@ export const quizChoosing = [
     q: 'ประโยชน์ของการ layer app เป็น UI, state/logic และ data คืออะไร?',
     options: [
       'ทำให้ app เล็กลง',
-      'business logic และ data access อยู่นอก widget ทำให้ app test ได้เมื่อมันโต',
+      'business logic และ data access อยู่นอก widget ทำให้ app test ได้เมื่อโตขึ้น',
       'ลบความต้องการ state',
       'เลี่ยงการใช้ Dart',
     ],

@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## Stateless: description ล้วน ๆ
 
-`StatelessWidget` ไม่มี mutable state ของตัวเอง เมื่อให้ input เดิม (constructor argument) `build` ของมันจะคืน UI เดิมเสมอ ถ้า input ไม่เปลี่ยน มันก็ไม่ต้องเปลี่ยน
+`StatelessWidget` ไม่มี mutable state ของตัวเอง เมื่อให้ input เดิม (constructor argument) `build` ของตัวเองจะคืน UI เดิมเสมอ ถ้า input ไม่เปลี่ยน UI ก็ไม่ต้องเปลี่ยน
 
 ```dart
 class Greeting extends StatelessWidget {
@@ -24,7 +24,7 @@ class Greeting extends StatelessWidget {
 }
 ```
 
-ทุกอย่างที่มันต้องใช้เป็น `final` และถูกส่งเข้ามา เลือก `StatelessWidget` เมื่อ widget แค่ render input ของมัน — ซึ่งเป็น widget ส่วนใหญ่
+ทุกอย่างที่ต้องใช้เป็น `final` และถูกส่งเข้ามา เลือก `StatelessWidget` เมื่อ widget แค่ render input ของตัวเอง — ที่เป็น widget ส่วนใหญ่
 
 ## Stateful: state ที่อยู่นานกว่า widget
 
@@ -56,7 +56,7 @@ class _CounterState extends State<Counter> {
 
 ## ทำไมต้องแยก? เพื่อให้ state อยู่รอดข้าม rebuild
 
-Widget ถูกทิ้งและสร้างใหม่ทุก rebuild — มันจึง *ถือ* state ที่ต้องอยู่ต่อเนื่องไม่ได้ ส่วน object `State` ถูกถือโดย **element** ที่อยู่ต่อเนื่องข้าม rebuild นั่นคือเหตุผลทั้งหมดของการออกแบบเป็นสอง class
+Widget ถูกทิ้งและสร้างใหม่ทุก rebuild จึง *ถือ* state ที่ต้องอยู่ต่อเนื่องไม่ได้ ส่วน object `State` ถูกถือโดย **element** ที่อยู่ต่อเนื่องข้าม rebuild นั่นคือเหตุผลทั้งหมดของการออกแบบเป็นสอง class
 
 <Mermaid title="widget ถูกสร้างใหม่ ส่วน State อยู่ต่อเนื่องบน element" code={splitDiagram} />
 
@@ -64,10 +64,10 @@ export const splitDiagram = `flowchart TB
   w1["Counter widget\n(rebuild, ทิ้ง)"] -.->|createState ครั้งเดียว| s["_CounterState\n(อยู่ต่อเนื่องบน element,\nเก็บ _count)"]
   w2["Counter widget\n(instance ใหม่ build ถัดไป)"] -.->|ใช้ State เดิมซ้ำ| s`;
 
-เมื่อ parent rebuild และสร้าง `Counter` widget *ตัวใหม่* Flutter จะ match มันกับ element ที่มีอยู่แล้วส่ง `_CounterState` *ตัวเดิม* กลับไป — `_count` จึงถูกรักษาไว้ widget ใหม่ แต่ state เดิม (`didUpdateWidget` ให้ State react กับข้อมูลของ widget ใหม่ได้ ส่วน lifecycle เต็ม ๆ อยู่ในโมดูล State Management)
+เมื่อ parent rebuild และสร้าง `Counter` widget *ตัวใหม่* Flutter จะ match widget ตัวใหม่นั้นกับ element ที่มีอยู่แล้วส่ง `_CounterState` *ตัวเดิม* กลับไป — `_count` จึงถูกรักษาไว้ widget ใหม่ แต่ state เดิม (`didUpdateWidget` ให้ State react กับข้อมูลของ widget ใหม่ได้ ส่วน lifecycle เต็ม ๆ อยู่ในโมดูล State Management)
 
 <Callout title="สรุปหนึ่งบรรทัด">
-ใช้ `StatelessWidget` สำหรับ UI ที่เป็น pure function ของ input (widget ส่วนใหญ่) ใช้ `StatefulWidget` เมื่อ UI เปลี่ยนตามเวลา — แต่ widget ยังคง immutable และ mutable data อยู่ใน object `State` แยกต่างหาก ถือโดย element ที่อยู่ต่อเนื่อง เรียก `setState` เพื่อ mutate *พร้อม* trigger rebuild ถ้าไม่มีมัน framework จะไม่มีทางรู้ว่าต้องอัปเดต
+ใช้ `StatelessWidget` สำหรับ UI ที่เป็น pure function ของ input (widget ส่วนใหญ่) ใช้ `StatefulWidget` เมื่อ UI เปลี่ยนตามเวลา — แต่ widget ยังคง immutable และ mutable data อยู่ใน object `State` แยกต่างหาก ถือโดย element ที่อยู่ต่อเนื่อง เรียก `setState` เพื่อ mutate *พร้อม* trigger rebuild ถ้าไม่เรียก framework จะไม่มีทางรู้ว่าต้องอัปเดต
 </Callout>
 
 export const quizStateful = [
@@ -105,7 +105,7 @@ export const quizStateful = [
     q: 'ควรเลือก StatelessWidget เมื่อไร?',
     options: [
       'เมื่อ widget ต้องการ animation controller',
-      'เมื่อ widget แค่ render input ของมันและไม่มี state ของตัวเอง',
+      'เมื่อ widget แค่ render input ของตัวเองและไม่มี state ของตัวเอง',
       'เฉพาะสำหรับ root ของแอป',
       'ไม่เคย — ใช้ StatefulWidget เสมอ',
     ],

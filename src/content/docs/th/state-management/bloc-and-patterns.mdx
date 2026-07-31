@@ -52,10 +52,10 @@ context.read<CounterCubit>().increment();
 
 ## เมื่อไร ceremony ถึงคุ้ม
 
-BLoC มีโครงสร้างมากกว่า `setState` หรือ Provider และโครงสร้างนั้นคือต้นทุนที่คุณจ่ายล่วงหน้า มันคืนทุนเมื่อ:
+BLoC มีโครงสร้างมากกว่า `setState` หรือ Provider และโครงสร้างนั้นคือต้นทุนที่คุณจ่ายล่วงหน้า ซึ่งคืนทุนเมื่อ:
 
 - app **ใหญ่** และคุณอยากได้ business logic เป็น unit ที่ test ได้ แยกจาก UI อย่างสมบูรณ์
-- state transition **ซับซ้อน** — event เยอะ, async flow, และคุณอยากให้มันชัดเจนและ trace ได้
+- state transition **ซับซ้อน** — event เยอะ, async flow, และคุณอยากให้ transition ชัดเจนและ trace ได้
 - **ทีม** ได้ประโยชน์จาก pattern เดียวที่ enforce ทั่ว codebase
 
 สำหรับ app เล็กหรือ local state ของหน้าเดียว BLoC คือ over-engineering — `setState` หรือ `ChangeNotifier` ง่าย ๆ ชัดกว่า ทักษะคือการจับคู่ ceremony กับความซับซ้อน
@@ -71,7 +71,7 @@ export const quizBloc = [
       'state ถูก mutate ที่ไหนก็ได้',
       'unidirectional data flow — event/method เข้า, state ออก, UI rebuild จาก state',
       'widget เก็บ business logic',
-      'มันเลี่ยง build method',
+      'เลี่ยง build method',
     ],
     answer: 1,
   },
@@ -81,17 +81,17 @@ export const quizBloc = [
       'Cubit ใช้สำหรับ animation เท่านั้น',
       'Cubit ใช้ method ที่ emit state ตรง ๆ; BLoC เต็มรูปเพิ่ม Event class ที่ชัดเจน',
       'Cubit ถือ state ไม่ได้',
-      'มันไม่เกี่ยวกัน',
+      'ไม่เกี่ยวกัน',
     ],
     answer: 1,
   },
   {
     q: 'ทำไม BLoC ถึงถือว่า test ได้?',
     options: [
-      'มันไม่ต้องการ test',
-      'คุณ feed event ให้มันแล้ว assert ลำดับ state ที่ emit ได้แน่นอน โดยไม่ต้องมี widget',
-      'มันรัน test อัตโนมัติ',
-      'มัน disable state',
+      'ไม่ต้องการ test',
+      'คุณ feed event เข้าไปแล้ว assert ลำดับ state ที่ emit ได้แน่นอน โดยไม่ต้องมี widget',
+      'รัน test อัตโนมัติ',
+      'disable state',
     ],
     answer: 1,
   },

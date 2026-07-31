@@ -22,7 +22,7 @@ Column(
 )
 ```
 
-`Column` เป็น unbounded ตามแกนหลักของมันเว้นแต่จะถูก constrain (นึกถึง error ของ ListView จากบทเรียนที่แล้ว) โดย default มัน size ตัวเองตาม child (`MainAxisSize.max` เต็ม, `MainAxisSize.min` หด)
+`Column` เป็น unbounded ตามแกนหลักของตัวเองเว้นแต่จะถูก constrain (นึกถึง error ของ ListView จากบทเรียนที่แล้ว) โดย default `Column` จะ size ตัวเองตาม child (`MainAxisSize.max` เต็ม, `MainAxisSize.min` หด)
 
 ## Expanded และ Flexible: แบ่งพื้นที่ว่าง
 
@@ -37,7 +37,7 @@ Row(
 )
 ```
 
-ความต่าง: `Expanded` บังคับให้ child *เต็ม* ส่วนแบ่งของมัน (constraint แบบ tight) ส่วน `Flexible` ให้ child ใหญ่ได้ *ถึง* ส่วนแบ่งแต่ไม่เกิน (แบบ loose) ใช้ `Expanded` เมื่ออยากให้ child ยืด, ใช้ `Flexible` เมื่ออยากให้กินไม่เกินส่วนแบ่ง
+ความต่าง: `Expanded` บังคับให้ child *เต็ม* ส่วนแบ่งของตัวเอง (constraint แบบ tight) ส่วน `Flexible` ให้ child ใหญ่ได้ *ถึง* ส่วนแบ่งแต่ไม่เกิน (แบบ loose) ใช้ `Expanded` เมื่ออยากให้ child ยืด, ใช้ `Flexible` เมื่ออยากให้กินไม่เกินส่วนแบ่ง
 
 ## Stack และ Positioned: child ที่ซ้อนกัน
 
@@ -56,11 +56,11 @@ Stack(
 )
 ```
 
-child ที่ไม่ได้ positioned จะ size ตาม stack และจัดตำแหน่งด้วย `alignment` ของมัน; ตัวที่ positioned จะถูกวางตาม offset ของขอบ
+child ที่ไม่ได้ positioned จะ size ตาม stack และจัดตำแหน่งด้วย `alignment` ของตัวเอง; ตัวที่ positioned จะถูกวางตาม offset ของขอบ
 
 ## Container และตัวช่วยแบบทำงานเดียว
 
-`Container` เป็นตัวสะดวกที่ *ประกอบ* widget ง่าย ๆ หลายตัวเข้าด้วยกัน — padding, margin, decoration, constraints, alignment — รวมเป็นตัวเดียว มันสะดวก แต่ข้างในมันก็แค่ stack ของ `Padding`, `DecoratedBox`, `ConstrainedBox` และ `Align`
+`Container` เป็นตัวสะดวกที่ *ประกอบ* widget ง่าย ๆ หลายตัวเข้าด้วยกัน — padding, margin, decoration, constraints, alignment — รวมเป็นตัวเดียว สะดวกก็จริง แต่ข้างในก็แค่ stack ของ `Padding`, `DecoratedBox`, `ConstrainedBox` และ `Align`
 
 <Mermaid title="Container ประกอบขึ้นจาก widget ง่าย ๆ" code={containerDiagram} />
 
@@ -106,9 +106,9 @@ export const quizWidgets = [
     q: 'จะปักหมุด child ไว้มุมขวาบนของ Stack อย่างไร?',
     options: [
       'ใช้ crossAxisAlignment',
-      'wrap มันด้วย Positioned พร้อม offset right และ top',
+      'wrap ด้วย Positioned พร้อม offset right และ top',
       'ใช้ Column',
-      'ตั้งสีของมัน',
+      'ตั้งสีของตัวเอง',
     ],
     answer: 1,
   },
@@ -118,7 +118,7 @@ export const quizWidgets = [
       'Container ถูก deprecated',
       'widget แบบทำงานเดียวชัดกว่าและมักเก็บ const constructor ไว้ได้; Container ก็แค่ประกอบ widget พวกนั้นอยู่ดี',
       'Container มี child ไม่ได้',
-      'มัน render เร็วกว่าบน GPU เท่านั้น',
+      'render เร็วกว่าบน GPU เท่านั้น',
     ],
     answer: 1,
   },

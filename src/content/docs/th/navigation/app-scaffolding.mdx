@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## MaterialApp ที่ root
 
-`MaterialApp` คือ widget ที่คุณห่อทั้งแอปไว้ มันให้สิ่งที่ทุกหน้าจอต้องใช้: theme, routing config, localization และกลไก `Navigator`/`Overlay` มี `CupertinoApp` เป็นตัวพี่น้องสำหรับแอปสไตล์ iOS และ `WidgetsApp` ถ้าคุณไม่ต้องการ design language ทั้งสองแบบ
+`MaterialApp` คือ widget ที่คุณห่อทั้งแอปไว้ และให้สิ่งที่ทุกหน้าจอต้องใช้: theme, routing config, localization และกลไก `Navigator`/`Overlay` มี `CupertinoApp` เป็นตัวพี่น้องสำหรับแอปสไตล์ iOS และ `WidgetsApp` ถ้าคุณไม่ต้องการ design language ทั้งสองแบบ
 
 ```dart
 void main() => runApp(const MyApp());
@@ -33,7 +33,7 @@ class MyApp extends StatelessWidget {
 
 ## Scaffold: กรอบหน้าจอมาตรฐาน
 
-ภายในแต่ละ route `Scaffold` ให้ช่อง layout มาตรฐานของ Material — app bar, body, floating action button, bottom navigation bar และ drawer มันยังจัดการเรื่องการซ้อนทับ เช่น keyboard บนหน้าจอ ให้คุณด้วย
+ภายในแต่ละ route `Scaffold` ให้ช่อง layout มาตรฐานของ Material — app bar, body, floating action button, bottom navigation bar และ drawer `Scaffold` ยังจัดการเรื่องการซ้อนทับ เช่น keyboard บนหน้าจอ ให้คุณด้วย
 
 ```dart
 Scaffold(
@@ -60,10 +60,10 @@ Text('Title', style: Theme.of(context).textTheme.titleLarge);
 
 ## responsive และ adaptive layout
 
-แอปเดียวกันรันบนโทรศัพท์, foldable, tablet และเว็บ หน้าจอจึงต้องปรับตามพื้นที่ที่มันได้รับ
+แอปเดียวกันรันบนโทรศัพท์, foldable, tablet และเว็บ หน้าจอจึงต้องปรับตามพื้นที่ที่ได้รับ
 
 - **`MediaQuery.of(context).size`** ให้ขนาดของหน้าจอ — มีประโยชน์สำหรับ breakpoint ระดับ global
-- **`LayoutBuilder`** ให้ constraint ของ *ช่องเฉพาะ* ที่ widget อยู่ — ดีกว่าสำหรับการตัดสินใจ local เพราะมันตอบสนองต่อพื้นที่ที่มีจริง ไม่ใช่ทั้งหน้าจอ
+- **`LayoutBuilder`** ให้ constraint ของ *ช่องเฉพาะ* ที่ widget อยู่ — ดีกว่าสำหรับการตัดสินใจ local เพราะตอบสนองต่อพื้นที่ที่มีจริง ไม่ใช่ทั้งหน้าจอ
 
 ```dart
 LayoutBuilder(
@@ -112,17 +112,17 @@ export const quizScaffold = [
   {
     q: 'ทำไมควรอ่านสีจาก `Theme.of(context)` แทนการ hardcode?',
     options: [
-      'มันเร็วกว่าตอน runtime',
-      'มันทำให้ dark mode และการ rebrand เป็นการแก้แค่บรรทัดเดียวแทนที่จะแก้ทุกที่',
+      'เร็วกว่าตอน runtime',
+      'ทำให้ dark mode และการ rebrand เป็นการแก้แค่บรรทัดเดียวแทนที่จะแก้ทุกที่',
       'สี hardcode ผิดกฎใน Dart',
-      'มันลดขนาดแอป',
+      'ลดขนาดแอป',
     ],
     answer: 1,
   },
   {
     q: 'เมื่อไรที่ LayoutBuilder เหมาะกว่า MediaQuery สำหรับการตัดสินใจเรื่อง layout?',
     options: [
-      'ไม่มีเลย — มันเหมือนกัน',
+      'ไม่มีเลย — เหมือนกันทุกอย่าง',
       'เมื่อคุณต้องการตอบสนองต่อ constraint ของช่องเฉพาะที่ widget อยู่ ไม่ใช่ทั้งหน้าจอ',
       'เฉพาะบนเว็บ',
       'เฉพาะสำหรับ text',

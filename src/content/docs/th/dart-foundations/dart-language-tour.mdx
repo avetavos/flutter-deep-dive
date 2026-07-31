@@ -63,7 +63,7 @@ final children = [
 ];
 ```
 
-pattern `if`/`for`-ใน-list นี้เป็น idiomatic ของ Flutter — มันแทนที่การ "สร้าง list แล้วค่อย push" ที่คุณอาจใช้ในภาษาอื่น
+pattern `if`/`for`-ใน-list นี้เป็น idiomatic ของ Flutter — ใช้แทนการ "สร้าง list แล้วค่อย push" ที่คุณอาจใช้ในภาษาอื่น
 
 ## Cascade operator
 
@@ -78,7 +78,7 @@ final paint = Paint()
 ```
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Dart เป็น static typed พร้อม inference ที่แข็งแรง (`var`), `final` แบบ assign ครั้งเดียว และ `const` แบบ compile-time — และ `const` พิเศษเพราะมัน canonicalize ค่า ซึ่งขับเคลื่อนการข้าม rebuild ของ Flutter **named parameter** คือเหตุผลที่ทุก widget อ่านเป็น `Widget(child: ..., color: ...)` และ **collection-if/for** คือวิธี idiomatic ในการ build list ของ widget
+Dart เป็น static typed พร้อม inference ที่แข็งแรง (`var`), `final` แบบ assign ครั้งเดียว และ `const` แบบ compile-time — และ `const` พิเศษเพราะ canonicalize ค่า ซึ่งขับเคลื่อนการข้าม rebuild ของ Flutter **named parameter** คือเหตุผลที่ทุก widget อ่านเป็น `Widget(child: ..., color: ...)` และ **collection-if/for** คือวิธี idiomatic ในการ build list ของ widget
 </Callout>
 
 export const quizTour = [

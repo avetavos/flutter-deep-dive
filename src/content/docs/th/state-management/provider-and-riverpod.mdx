@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## Provider: InheritedWidget ที่ ergonomic
 
-การเขียน `InheritedWidget` ด้วยมือคือ boilerplate **Provider** ห่อ pattern นั้นด้วย API ที่สะอาด และจับคู่กับ `ChangeNotifier` — class ง่าย ๆ ที่ถือ state และเรียก `notifyListeners()` เมื่อมันเปลี่ยน
+การเขียน `InheritedWidget` ด้วยมือคือ boilerplate **Provider** ห่อ pattern นั้นด้วย API ที่สะอาด และจับคู่กับ `ChangeNotifier` — class ง่าย ๆ ที่ถือ state และเรียก `notifyListeners()` เมื่อ state เปลี่ยน
 
 ```dart
 // 1. model ที่ notify listener เมื่อมันเปลี่ยน
@@ -37,11 +37,11 @@ final cart = context.watch<CartModel>();      // rebuild เมื่อ cart �
 context.read<CartModel>().add('Book');         // action ครั้งเดียว ไม่ rebuild
 ```
 
-ความต่างระหว่าง `watch` กับ `read` คือหัวใจทั้งหมด `context.watch<T>()` subscribe — widget rebuild เมื่อ model notify `context.read<T>()` หยิบมันครั้งเดียวโดยไม่ subscribe — ใช้ใน callback (เช่น `onPressed`) ที่คุณอยาก *ทำ* ไม่ใช่ *ฟัง* สลับสองอันนี้คือ bug ที่พบบ่อยที่สุดของ Provider (ไม่ rebuild ที่ควร หรือ rebuild มากเกิน)
+ความต่างระหว่าง `watch` กับ `read` คือหัวใจทั้งหมด `context.watch<T>()` subscribe — widget rebuild เมื่อ model notify `context.read<T>()` หยิบค่าครั้งเดียวโดยไม่ subscribe — ใช้ใน callback (เช่น `onPressed`) ที่คุณอยาก *ทำ* ไม่ใช่ *ฟัง* สลับสองอันนี้คือ bug ที่พบบ่อยที่สุดของ Provider (ไม่ rebuild ที่ควร หรือ rebuild มากเกิน)
 
 ## Riverpod: provider ที่ไม่ผูกกับ tree
 
-**Riverpod** คือการคิดใหม่โดยผู้เขียนคนเดิมที่แก้จุดหยาบของ Provider หมัดเด็ดของมัน: provider เป็น **top-level object ไม่ผูกกับ widget tree** ซึ่งทำให้ compile-safe (อ่าน provider ที่ไม่มีอยู่ไม่ได้) และ test กับ combine ได้ง่าย
+**Riverpod** คือการคิดใหม่โดยผู้เขียนคนเดิมที่แก้จุดหยาบของ Provider หมัดเด็ดของตัวเอง: provider เป็น **top-level object ไม่ผูกกับ widget tree** ซึ่งทำให้ compile-safe (อ่าน provider ที่ไม่มีอยู่ไม่ได้) และ test กับ combine ได้ง่าย
 
 ```dart
 // provider ประกาศที่ top level — ไม่ได้อยู่ใน widget tree
@@ -72,7 +72,7 @@ class CounterView extends ConsumerWidget {
 
 สำหรับ async state ตัวเทียบเท่าคือ `AsyncNotifier` / `AsyncNotifierProvider` ที่ `build()` คืน `Future` นอกจากนี้ Riverpod ยังมีสไตล์ code-generation ผ่าน `@riverpod` ที่ generate provider ให้จาก class หรือ function ที่ annotate ไว้
 
-> API เดิมอย่าง `StateNotifier` / `StateNotifierProvider` และ `StateProvider` ตอนนี้เป็น **legacy** (deprecated ใน Riverpod 3) — คุณยังเจอมันใน code เดิมได้ แต่ code ใหม่ควรใช้ `Notifier` / `NotifierProvider` (หรือ `@riverpod` codegen)
+> API เดิมอย่าง `StateNotifier` / `StateNotifierProvider` และ `StateProvider` ตอนนี้เป็น **legacy** (deprecated ใน Riverpod 3) — คุณยังเจอใน code เดิมได้ แต่ code ใหม่ควรใช้ `Notifier` / `NotifierProvider` (หรือ `@riverpod` codegen)
 
 ## เลือกระหว่างสองตัว
 
@@ -103,7 +103,7 @@ export const quizProvider = [
     q: 'การเรียก notifyListeners() บน ChangeNotifier ทำอะไร?',
     options: [
       'dispose model',
-      'บอก widget ที่ watch มันอยู่ให้ rebuild',
+      'บอก widget ที่ watch อยู่ให้ rebuild',
       'navigate ไปหน้าใหม่',
       'ไม่ทำอะไรตอน runtime',
     ],
@@ -112,10 +112,10 @@ export const quizProvider = [
   {
     q: 'ความต่างเชิงโครงสร้างหลักของ Riverpod จาก Provider คืออะไร?',
     options: [
-      'มันไม่รองรับ state เลย',
+      'ไม่รองรับ state เลย',
       'provider เป็น top-level object ไม่ผูกกับ widget tree ทำให้ compile-safe และ test ได้',
-      'มันไม่ต้องมี build method',
-      'มันรันบน isolate แยก',
+      'ไม่ต้องมี build method',
+      'รันบน isolate แยก',
     ],
     answer: 1,
   },

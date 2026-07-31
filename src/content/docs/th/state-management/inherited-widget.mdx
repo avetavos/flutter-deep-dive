@@ -10,13 +10,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## ปัญหาที่มันแก้
+## ปัญหาที่แก้
 
-การส่ง data ลง tree ลึก ๆ ด้วยมือ — ผ่านทุก constructor — เป็นเรื่องทรมาน นี่คือ "prop drilling" และมันผูก widget ตรงกลางทุกตัวเข้ากับ data ที่มันไม่ได้ใช้
+การส่ง data ลง tree ลึก ๆ ด้วยมือ — ผ่านทุก constructor — เป็นเรื่องทรมาน นี่คือ "prop drilling" และผูก widget ตรงกลางทุกตัวเข้ากับ data ที่ไม่ได้ใช้
 
-`InheritedWidget` คือคำตอบ built-in ของ Flutter คุณวางไว้สูงใน tree แล้ว descendant ตัวไหนก็อ่านมันได้ **ตรง ๆ** ผ่าน `context` ไม่ว่าจะลึกแค่ไหน โดยไม่มี widget ตรงกลางสักตัวต้องรู้เรื่อง `Theme`, `MediaQuery`, `Navigator` และ `Provider` ล้วนเป็น `InheritedWidget` — คุณใช้มันมาตลอด
+`InheritedWidget` คือคำตอบ built-in ของ Flutter คุณวางไว้สูงใน tree แล้ว descendant ตัวไหนก็อ่านค่าได้ **ตรง ๆ** ผ่าน `context` ไม่ว่าจะลึกแค่ไหน โดยไม่มี widget ตรงกลางสักตัวต้องรู้เรื่อง `Theme`, `MediaQuery`, `Navigator` และ `Provider` ล้วนเป็น `InheritedWidget` — คุณใช้กันมาตลอดอยู่แล้ว
 
-## descendant อ่านมันอย่างไร
+## descendant อ่านค่าอย่างไร
 
 descendant เรียก `dependOnInheritedWidgetOfExactType` ซึ่งมักถูกห่อไว้ใน static method `of(context)` ตามธรรมเนียม:
 
@@ -38,11 +38,11 @@ class ThemeConfig extends InheritedWidget {
   bool updateShouldNotify(ThemeConfig oldWidget) => color != oldWidget.color;
 }
 
-// ที่ไหนก็ได้ที่อยู่ต่ำกว่ามัน:
+// ที่ไหนก็ได้ที่อยู่ต่ำกว่า:
 final color = ThemeConfig.of(context).color;
 ```
 
-มีสองกลไกที่สำคัญตรงนี้ `dependOnInheritedWidgetOfExactType` ทำสองอย่างพร้อมกัน: มัน **หา** ancestor ที่ใกล้ที่สุดของ type นั้น (การ lookup ขึ้น element tree ที่เร็วและ cache ไว้) และ **register** element ที่เรียกให้เป็น dependent ส่วน `updateShouldNotify` ตัดสินว่า เมื่อ inherited widget ถูก rebuild ด้วย data ใหม่ dependent จำเป็นต้อง rebuild จริงไหม
+มีสองกลไกที่สำคัญตรงนี้ `dependOnInheritedWidgetOfExactType` ทำสองอย่างพร้อมกัน: **หา** ancestor ที่ใกล้ที่สุดของ type นั้น (การ lookup ขึ้น element tree ที่เร็วและ cache ไว้) และ **register** element ที่เรียกให้เป็น dependent ส่วน `updateShouldNotify` ตัดสินว่า เมื่อ inherited widget ถูก rebuild ด้วย data ใหม่ dependent จำเป็นต้อง rebuild จริงไหม
 
 ## rebuild เฉพาะ dependent
 
@@ -58,7 +58,7 @@ export const depDiagram = `flowchart TB
 การ rebuild แบบเจาะจงนั้นคือเหตุผลที่ `InheritedWidget` scale ได้: การอ่านคือ lookup ขึ้นบนที่ราคาถูก และ update จะกระเพื่อมไปถึงแค่ dependent จริง ๆ ทุก state solution ระดับสูงกว่านี้ ล้วนเป็นกลไกนี้บวก ergonomics อยู่ข้างใต้
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`InheritedWidget` ให้ descendant ตัวไหนก็อ่าน data ผ่าน `context` ได้โดยไม่ต้อง prop-drill ใช้ `dependOnInheritedWidgetOfExactType` (ที่ทั้ง **หา** ancestor และ **register** ผู้อ่านเป็น dependent) เมื่อมัน update `updateShouldNotify` เป็นตัวคุมว่า dependent จะ rebuild ไหม — และเฉพาะ widget ที่อ่านมันจริง ๆ เท่านั้นที่ rebuild Theme, MediaQuery และ Provider ล้วนสร้างบน primitive ตัวเดียวนี้
+`InheritedWidget` ให้ descendant ตัวไหนก็อ่าน data ผ่าน `context` ได้โดยไม่ต้อง prop-drill ใช้ `dependOnInheritedWidgetOfExactType` (ที่ทั้ง **หา** ancestor และ **register** ผู้อ่านเป็น dependent) เมื่อ inherited widget update `updateShouldNotify` เป็นตัวคุมว่า dependent จะ rebuild ไหม — และเฉพาะ widget ที่อ่าน data นั้นจริง ๆ เท่านั้นที่ rebuild Theme, MediaQuery และ Provider ล้วนสร้างบน primitive ตัวเดียวนี้
 </Callout>
 
 export const quizInherited = [
@@ -88,17 +88,17 @@ export const quizInherited = [
       'ทุก widget ใน subtree',
       'เฉพาะ widget ที่ register เป็น dependent (เรียก of(context))',
       'เฉพาะ root widget',
-      'ไม่มีเลย — มันไม่เคย rebuild',
+      'ไม่มีเลย — ไม่เคย rebuild',
     ],
     answer: 1,
   },
   {
     q: 'บทบาทของ updateShouldNotify คืออะไร?',
     options: [
-      'มัน dispose controller',
-      'มันตัดสินว่า dependent ควร rebuild ไหมเมื่อ inherited widget ถูกแทนด้วย data ใหม่',
-      'มันสร้าง State object',
-      'มันจัดการ navigation',
+      'dispose controller',
+      'ตัดสินว่า dependent ควร rebuild ไหมเมื่อ inherited widget ถูกแทนด้วย data ใหม่',
+      'สร้าง State object',
+      'จัดการ navigation',
     ],
     answer: 1,
   },

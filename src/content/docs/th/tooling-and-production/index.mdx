@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## จาก code สู่แอปที่ ship จริง
 
-การเขียน widget เป็นแค่ครึ่งเดียวของงาน อีกครึ่งคือเครื่องมือรอบ ๆ มัน: toolchain ที่รัน code ของคุณ, test ที่พิสูจน์ว่ามันทำงาน, build mode ที่แปลง Dart เป็น native binary ที่เร็ว และเรื่อง production ที่ตัดสินว่า user จริงจะมีวันที่ดีหรือไม่
+การเขียน widget เป็นแค่ครึ่งเดียวของงาน อีกครึ่งคือเครื่องมือรอบ ๆ code ของคุณ: toolchain ที่รัน code ของคุณ, test ที่พิสูจน์ว่าทำงาน, build mode ที่แปลง Dart เป็น native binary ที่เร็ว และเรื่อง production ที่ตัดสินว่า user จริงจะมีวันที่ดีหรือไม่
 
 โมดูลนี้คือครึ่งหลังนั้น — ส่วนที่แยก demo ออกจาก product
 
@@ -37,7 +37,7 @@ export const flowDiagram = `flowchart LR
 แต่ละ stage มีเครื่องมือของตัวเองและ failure mode ของตัวเอง เส้นเรื่องหลัก: Flutter optimize หนักมากเพื่อ inner loop ที่เร็ว (hot reload) แล้วสลับไปใช้ compilation strategy คนละแบบเลย (AOT) ตอน release — เข้าใจการแยกนี้แล้วจะเข้าใจ tooling เกือบทั้งหมด
 
 <Callout title="การเปลี่ยนวิธีคิด">
-ตอน develop Flutter รัน code ด้วย JIT compiler เพื่อให้ hot-reload การเปลี่ยนแปลงได้ในไม่ถึงวินาที ตอน release มันจะ compile ล่วงหน้าเป็น native machine code เพื่อความเร็วและขนาดที่เล็ก มันคือ runtime สองแบบสำหรับ code เดียวกัน — ซึ่งเป็นเหตุผลว่าทำไม "ทำงานได้ใน debug" ไม่เคยเป็นข้ออ้างเดียวกันกับ "ทำงานได้ใน release"
+ตอน develop Flutter รัน code ด้วย JIT compiler เพื่อให้ hot-reload การเปลี่ยนแปลงได้ในไม่ถึงวินาที ตอน release จะ compile ล่วงหน้าเป็น native machine code เพื่อความเร็วและขนาดที่เล็ก นี่คือ runtime สองแบบสำหรับ code เดียวกัน — นั่นคือเหตุผลว่าทำไม "ทำงานได้ใน debug" ไม่เคยเป็นข้ออ้างเดียวกันกับ "ทำงานได้ใน release"
 </Callout>
 
 export const quizIndex = [

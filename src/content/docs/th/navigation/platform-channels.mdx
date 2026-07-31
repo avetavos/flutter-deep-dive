@@ -12,7 +12,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## เมื่อ Dart อย่างเดียวไม่พอ
 
-Flutter วาด pixel ของตัวเอง แต่บางอย่างอยู่แค่ใน native OS — ระดับแบตเตอรี่, sensor เฉพาะ, platform SDK, secure enclave การจะเข้าถึงมัน Flutter ใช้ **platform channel**: ท่อส่งข้อความแบบ async ที่มี type ระหว่าง Dart code กับ native (Kotlin/Java บน Android, Swift/Objective-C บน iOS)
+Flutter วาด pixel ของตัวเอง แต่บางอย่างอยู่แค่ใน native OS — ระดับแบตเตอรี่, sensor เฉพาะ, platform SDK, secure enclave การจะเข้าถึงของพวกนี้ Flutter ใช้ **platform channel**: ท่อส่งข้อความแบบ async ที่มี type ระหว่าง Dart code กับ native (Kotlin/Java บน Android, Swift/Objective-C บน iOS)
 
 โมเดลก็คือ async message passing แบบเดียวกับที่คุณรู้จักจาก Dart อยู่แล้ว: คุณส่งข้อความ, ฝั่ง native จัดการ แล้ว `Future` complete พร้อมคำตอบ ไม่มีอะไร block UI thread
 
@@ -26,7 +26,7 @@ export const channelDiagram = `flowchart LR
 
 ## MethodChannel: เรียก native method
 
-`MethodChannel` ตั้งชื่อท่อและให้คุณ `invokeMethod` บนมัน การเรียกเป็น async และ return `Future` พร้อมผลลัพธ์จาก native argument และผลลัพธ์เป็น type มาตรฐาน (number, string, list, map) ที่ถูก serialize ข้ามขอบเขต
+`MethodChannel` ตั้งชื่อท่อและให้คุณ `invokeMethod` บนท่อนั้น การเรียกเป็น async และ return `Future` พร้อมผลลัพธ์จาก native argument และผลลัพธ์เป็น type มาตรฐาน (number, string, list, map) ที่ถูก serialize ข้ามขอบเขต
 
 ```dart
 const channel = MethodChannel('samples.app/battery');
@@ -46,7 +46,7 @@ Future<int> getBatteryLevel() async {
 
 ## EventChannel: stream ของ native event
 
-ในขณะที่ `MethodChannel` คือการเรียกหนึ่งครั้งและตอบหนึ่งครั้ง **`EventChannel`** ส่ง **stream** ของ event จาก native — sensor update, การเปลี่ยน connectivity, location มัน map ไปเป็น Dart `Stream` คุณจึง consume มันแบบเดียวกับ stream อื่น ๆ
+`MethodChannel` คือการเรียกหนึ่งครั้งตอบหนึ่งครั้ง ส่วน **`EventChannel`** ส่ง **stream** ของ event จาก native — sensor update, การเปลี่ยน connectivity, location ซึ่ง map ไปเป็น Dart `Stream` คุณจึง consume ได้แบบเดียวกับ stream อื่น ๆ
 
 ```dart
 const events = EventChannel('samples.app/accelerometer');
@@ -62,7 +62,7 @@ Stream<AccelData> accelerometer() {
 
 ## การ declare asset
 
-ไม่ใช่เรื่อง native แต่เป็นส่วนหนึ่งของโครงสร้างแอป: รูปภาพ, font และ JSON ที่คุณ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้มันไปกับแอป
+ไม่ใช่เรื่อง native แต่เป็นส่วนหนึ่งของโครงสร้างแอป: รูปภาพ, font และ JSON ที่คุณ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้ถูกรวมไปกับแอป
 
 ```yaml
 flutter:
@@ -81,7 +81,7 @@ Image.asset('assets/images/logo.png');
 ```
 
 <Callout title="สรุปหนึ่งบรรทัด">
-platform channel คือท่อส่งข้อความแบบ async ที่มี type ไปหา native code ใช้ `MethodChannel` สำหรับการเรียกครั้งเดียว (`invokeMethod` return `Future`) และ `EventChannel` สำหรับ **stream** ของ native event (มันกลายเป็น Dart `Stream`) ให้ใช้ **plugin** ที่ดูแลดีแทนการเขียน channel เองสำหรับความต้องการทั่วไป และแยกต่างหาก: **asset** ที่ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้ไปกับแอป
+platform channel คือท่อส่งข้อความแบบ async ที่มี type ไปหา native code ใช้ `MethodChannel` สำหรับการเรียกครั้งเดียว (`invokeMethod` return `Future`) และ `EventChannel` สำหรับ **stream** ของ native event (ฝั่ง Dart จะได้เป็น `Stream`) ให้ใช้ **plugin** ที่ดูแลดีแทนการเขียน channel เองสำหรับความต้องการทั่วไป และแยกต่างหาก: **asset** ที่ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้ไปกับแอป
 </Callout>
 
 export const quizChannels = [
@@ -98,7 +98,7 @@ export const quizChannels = [
   {
     q: 'ความต่างระหว่าง MethodChannel กับ EventChannel คืออะไร?',
     options: [
-      'มันเหมือนกัน',
+      'เหมือนกัน',
       'MethodChannel คือเรียกครั้งเดียวตอบครั้งเดียว (Future); EventChannel ส่ง stream ของ native event (Stream)',
       'MethodChannel สำหรับ iOS, EventChannel สำหรับ Android',
       'EventChannel เป็น synchronous',
@@ -121,7 +121,7 @@ export const quizChannels = [
       'ใน main.dart',
       'ใน `pubspec.yaml` ใต้ส่วน flutter',
       'ใน native project เท่านั้น',
-      'มันถูกตรวจจับอัตโนมัติ ไม่ต้อง declare',
+      'ถูกตรวจจับอัตโนมัติ ไม่ต้อง declare',
     ],
     answer: 1,
   },
