@@ -52,6 +52,8 @@ export const frameDiagram = `flowchart LR
 
 timeline ของ DevTools แสดง cost ต่อ frame แยกเป็น UI (Dart: build/layout/paint) และ raster (GPU) ตัวการยอดฮิต: rebuild เยอะเกิน (ลืม `const`, state อยู่สูงเกินใน tree), งานแพงใน `build`, รูปใหญ่ที่ไม่ cache และการลืม `RepaintBoundary` รอบ subtree ที่ animate ตลอด
 
+มีข้อควรระวังตอนอ่านการแยกนี้บน desktop: ตอนนี้ Flutter **รวม UI thread กับ raster thread เข้าด้วยกัน** บน macOS และ Windows (ตั้งแต่ 3.35) และบน Linux (ตั้งแต่ 3.41) สองเฟสยังทำงานตามลำดับเหมือนเดิม แต่ไม่ได้รันขนานกันคนละ thread แล้ว ดังนั้น cost ของ raster จะโผล่มาในรูปของเวลาที่ UI thread เอาไป build ไม่ได้ ส่วนฝั่ง mobile ยังมี raster thread แยกอยู่ ไม่ว่าทางไหน budget ก็เท่าเดิม — ทั้ง frame มีเวลา ~16ms
+
 ## CI/CD
 
 automate pipeline เพื่อให้คุณภาพไม่ขึ้นกับความจำ: ทุก push ให้รัน `flutter analyze`, `flutter test` แล้ว `flutter build` แต่ละ platform และ ship ไป TestFlight / Play internal track เครื่องมืออย่าง Codemagic, Fastlane และ GitHub Actions จัดการเรื่อง signing และ store upload เฉพาะของ Flutter ให้

@@ -1,6 +1,6 @@
 ---
 title: 'Build & Release'
-description: 'Debug, profile, and release modes, JIT vs AOT compilation, tree-shaking, flavors for environments, and the per-platform build outputs.'
+description: 'Debug, profile, and release modes, JIT vs AOT compilation, tree-shaking, flavors for environments, the per-platform build outputs, and what each platform expects from a Flutter 3.47 app.'
 sidebar:
   order: 4
 ---
@@ -56,6 +56,23 @@ flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
 
 `--dart-define` passes compile-time constants your code reads via `String.fromEnvironment` — the clean way to inject per-environment values without committing secrets into source.
 
+## What the platforms expect in 2026
+
+The build command is stable, but what it produces underneath has moved. Four shifts matter when you ship a Flutter 3.47 app:
+
+- **Impeller is the default renderer everywhere.** It became the default on iOS and Android earlier; Flutter 3.47 makes it the default on macOS, Windows, and Linux too. Impeller compiles its shaders at build time rather than on first use, which removes the classic "first run of an animation stutters" problem that Skia's runtime shader compilation caused.
+- **Apple minimums went up.** Flutter 3.47 requires **iOS 15** (was 13) and **macOS 12** (was 10.15). Check your `Podfile` platform line and App Store deployment target before upgrading.
+- **Swift Package Manager is the path forward.** CocoaPods is in maintenance mode and most of the popular iOS plugins have already migrated. New projects should use SwiftPM; existing ones keep working, but an unmigrated plugin will eventually become a blocker.
+- **Android projects use built-in Kotlin.** Since 3.44 the Kotlin toolchain ships with Flutter instead of being declared per project, so generated Android projects no longer pin their own Kotlin plugin version.
+
+One larger change is in motion: **Material and Cupertino are moving out of the framework into standalone `material_ui` and `cupertino_ui` packages** (both at 1.0 on pub.dev). It is opt-in today, with formal deprecation of the in-framework versions planned, and there is a migration fix:
+
+```bash
+dart fix --apply --code=migrate_design_widgets
+```
+
+Nothing breaks if you ignore it for now — but new projects that want the design system to version independently of the SDK can adopt the packages already.
+
 <Callout title="The one-line takeaway">
 Flutter builds three ways: **debug** (JIT, hot reload, dev only), **profile** (AOT + perf tools — the only honest place to measure speed), and **release** (AOT, optimized, tree-shaken — what ships). Hot reload exists because debug is JIT; fast release apps exist because release is AOT. Use **flavors** + `--dart-define` to build dev/staging/prod from one codebase.
 </Callout>
@@ -98,6 +115,16 @@ export const quizBuild = [
       'Producing dev/staging/prod builds with different config from one codebase',
       'Speeding up hot reload',
       'Writing tests',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does Impeller becoming the default renderer reduce first-run animation stutter?',
+    options: [
+      'It skips rendering the first frame',
+      'It compiles shaders at build time instead of on first use',
+      'It lowers the frame rate to 30fps',
+      'It disables animations in release builds',
     ],
     answer: 1,
   },

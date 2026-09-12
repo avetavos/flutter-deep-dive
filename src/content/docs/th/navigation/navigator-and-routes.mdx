@@ -29,7 +29,7 @@ export const stackDiagram = `flowchart TB
 
 ## push และ pop
 
-คุณเอา `Navigator` มาจาก `BuildContext` ปัจจุบันด้วย `Navigator.of(context)` แล้ว push route ตัว `MaterialPageRoute` ให้ transition animation ที่ถูกต้องตาม platform มาฟรี
+คุณเอา `Navigator` มาจาก `BuildContext` ปัจจุบันด้วย `Navigator.of(context)` แล้ว push route ตัว `MaterialPageRoute` ให้ transition animation ที่ถูกต้องตาม platform มาฟรี — และคำว่า "ถูกต้องตาม platform" ก็ขยับไปเรื่อย ๆ: ตั้งแต่ Flutter 3.38 transition default ของ Android คือ `PredictiveBackPageTransitionBuilder` ซึ่งเดินตาม back gesture ของผู้ใช้และ preview หน้าปลายทางข้างล่างให้เห็นระหว่างลาก คุณได้มันมาโดยไม่ต้องแก้ code เพราะ `MaterialPageRoute` อ่าน transition มาจาก theme
 
 ```dart
 // Push a new screen onto the stack.

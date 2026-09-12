@@ -29,7 +29,7 @@ The hardware/software back button, the app-bar back arrow, and a swipe-back gest
 
 ## push and pop
 
-You get the `Navigator` from the current `BuildContext` with `Navigator.of(context)`, then push a route. A `MaterialPageRoute` gives you the platform-correct transition animation for free.
+You get the `Navigator` from the current `BuildContext` with `Navigator.of(context)`, then push a route. A `MaterialPageRoute` gives you the platform-correct transition animation for free — and "platform-correct" is a moving target: since Flutter 3.38 the default Android page transition is `PredictiveBackPageTransitionBuilder`, which follows the user's back gesture and previews the destination screen underneath as they drag. You get it without changing any code, because `MaterialPageRoute` reads the transition from the theme.
 
 ```dart
 // Push a new screen onto the stack.

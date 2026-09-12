@@ -1,6 +1,6 @@
 ---
 title: 'Build & Release'
-description: 'debug, profile และ release mode, JIT vs AOT compilation, tree-shaking, flavor สำหรับแต่ละ environment และ build output แต่ละ platform'
+description: 'debug, profile และ release mode, JIT vs AOT compilation, tree-shaking, flavor สำหรับแต่ละ environment, build output แต่ละ platform และสิ่งที่แต่ละ platform คาดหวังจากแอป Flutter 3.47'
 sidebar:
   order: 4
 ---
@@ -56,6 +56,23 @@ flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
 
 `--dart-define` ส่ง compile-time constant ที่ code อ่านผ่าน `String.fromEnvironment` — วิธีที่สะอาดในการ inject ค่าแต่ละ environment โดยไม่ commit secret เข้า source
 
+## สิ่งที่แต่ละ platform คาดหวังในปี 2026
+
+คำสั่ง build ยังเหมือนเดิม แต่สิ่งที่มันสร้างข้างล่างเปลี่ยนไปแล้ว มี 4 เรื่องที่สำคัญเวลา ship แอป Flutter 3.47:
+
+- **Impeller เป็น renderer default ทุก platform แล้ว** มันเป็น default บน iOS และ Android มาก่อนหน้านี้ ส่วน Flutter 3.47 ทำให้เป็น default บน macOS, Windows และ Linux ด้วย Impeller compile shader ตอน build แทนที่จะ compile ตอนใช้ครั้งแรก จึงกำจัดปัญหาคลาสสิก "animation กระตุกตอนเล่นรอบแรก" ที่เกิดจากการ compile shader ตอน runtime ของ Skia
+- **ขั้นต่ำฝั่ง Apple ขยับขึ้น** Flutter 3.47 ต้องใช้ **iOS 15** (เดิม 13) และ **macOS 12** (เดิม 10.15) เช็กบรรทัด platform ใน `Podfile` และ deployment target บน App Store ก่อน upgrade
+- **Swift Package Manager คือทางข้างหน้า** CocoaPods อยู่ใน maintenance mode แล้ว และ plugin iOS ยอดนิยมส่วนใหญ่ migrate ไปแล้ว โปรเจกต์ใหม่ควรใช้ SwiftPM ส่วนของเดิมยังทำงานได้ แต่ plugin ที่ยังไม่ migrate จะกลายเป็นตัวติดขัดในที่สุด
+- **โปรเจกต์ Android ใช้ Kotlin ที่มากับ Flutter** ตั้งแต่ 3.44 Kotlin toolchain มาพร้อม Flutter แทนที่จะประกาศแยกในแต่ละโปรเจกต์ โปรเจกต์ Android ที่ generate ออกมาจึงไม่ต้อง pin เวอร์ชัน Kotlin plugin ของตัวเองอีก
+
+มีการเปลี่ยนแปลงก้อนใหญ่กว่านั้นที่กำลังเดินอยู่: **Material และ Cupertino กำลังย้ายออกจาก framework ไปเป็น package แยก `material_ui` และ `cupertino_ui`** (ทั้งคู่อยู่ที่ 1.0 บน pub.dev) ตอนนี้ยังเป็นแบบ opt-in โดยมีแผนจะ deprecate ตัวที่อยู่ใน framework อย่างเป็นทางการ และมี fix สำหรับ migrate ให้:
+
+```bash
+dart fix --apply --code=migrate_design_widgets
+```
+
+ถ้ายังไม่ทำตอนนี้ก็ไม่มีอะไรพัง — แต่โปรเจกต์ใหม่ที่อยากให้ design system มีเวอร์ชันแยกจาก SDK สามารถเริ่มใช้ package พวกนี้ได้แล้ว
+
 <Callout title="สรุปหนึ่งบรรทัด">
 Flutter build สามแบบ: **debug** (JIT, hot reload, dev เท่านั้น), **profile** (AOT + perf tools — ที่เดียวที่วัดความเร็วได้จริง) และ **release** (AOT, optimize, tree-shaken — ตัวที่ ship) hot reload มีได้เพราะ debug เป็น JIT; release ที่เร็วมีได้เพราะ release เป็น AOT ใช้ **flavor** + `--dart-define` เพื่อ build dev/staging/prod จาก codebase เดียว
 </Callout>
@@ -98,6 +115,16 @@ export const quizBuild = [
       'สร้าง build dev/staging/prod ด้วย config ต่างกันจาก codebase เดียว',
       'เร่ง hot reload',
       'เขียน test',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมการที่ Impeller เป็น renderer default ถึงลดอาการ animation กระตุกตอนเล่นรอบแรก?',
+    options: [
+      'มันข้ามการ render frame แรกไปเลย',
+      'มัน compile shader ตอน build แทนที่จะ compile ตอนใช้ครั้งแรก',
+      'มันลด frame rate ลงเหลือ 30fps',
+      'มันปิด animation ใน release build',
     ],
     answer: 1,
   },
