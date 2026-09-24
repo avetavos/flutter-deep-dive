@@ -52,7 +52,7 @@ export const frameDiagram = `flowchart LR
 
 DevTools' timeline shows per-frame cost split into UI (Dart: build/layout/paint) and raster (GPU). Common culprits: rebuilding too much (missing `const`, state too high in the tree), expensive work in `build`, big un-cached images, and missing `RepaintBoundary` around constantly-animating subtrees.
 
-One caveat when reading that split on desktop: Flutter now **merges the UI and raster threads** on macOS and Windows (since 3.35) and on Linux (since 3.41). The two phases still happen in order, but they no longer run concurrently on separate threads, so raster cost shows up as time the UI thread cannot spend building. Mobile keeps the separate raster thread. Either way the budget is the same — the frame has ~16ms total.
+One caveat when reading that split: Flutter now **runs the UI thread on the platform thread** — the two are merged by default since 3.29 on iOS and Android, 3.35 on macOS and Windows, and the 3.4x releases on Linux, so Dart FFI can call native APIs that must run on the main thread. The raster thread stays separate on every platform, so the UI/raster rows in the overlay mean what they always did; what changed is that slow platform-channel or native work on the main thread now shows up directly as time the UI thread cannot spend building. Either way the budget is the same — the frame has ~16ms total. See the breaking-change notes for [macOS and Windows](https://docs.flutter.dev/release/breaking-changes/macos-windows-merged-threads) and [Linux](https://docs.flutter.dev/release/breaking-changes/linux-merged-threads).
 
 ## CI/CD
 
