@@ -17,11 +17,11 @@ Dart เป็น static typed พร้อม inference ที่แข็ง�
 var name = 'Ada';        // inferred String
 final age = 36;          // assign-once int
 const pi = 3.14159;      // compile-time constant
-int? maybe;              // nullable (null safety — บทถัดไป)
+int? maybe;              // nullable (null safety — next lesson)
 
-// `final` vs `const`: final fix ตอน runtime, const fix ตอน compile-time
-final now = DateTime.now();   // OK — คำนวณตอน runtime
-// const now = DateTime.now(); // ERROR — ไม่ใช่ compile-time constant
+// `final` vs `const`: final is runtime-fixed, const is compile-time-fixed.
+final now = DateTime.now();   // OK — computed at runtime
+// const now = DateTime.now(); // ERROR — not a compile-time constant
 ```
 
 `const` สำคัญมากใน Flutter: ค่าที่เป็น `const` จะถูก *canonicalize* — object `const` ที่เหมือนกันคือ instance เดียวกัน — นี่แหละที่ทำให้ Flutter ข้ามการ rebuild widget ที่เป็น `const` ได้
@@ -31,7 +31,7 @@ final now = DateTime.now();   // OK — คำนวณตอน runtime
 Function ของ Dart รองรับทั้ง positional และ **named** parameter API ทั้งหมดของ Flutter สร้างบน named parameter — constructor ของทุก widget คือกำแพงของ named parameter
 
 ```dart
-// named parameter อยู่ใน {}, `required` marks ตัวที่บังคับ ตัวอื่นมี default
+// Named parameters in {}, `required` marks the mandatory ones, others have defaults.
 Widget greeting({required String name, String prefix = 'Hello'}) {
   return Text('$prefix, $name');
 }
@@ -39,7 +39,7 @@ Widget greeting({required String name, String prefix = 'Hello'}) {
 greeting(name: 'Ada');                  // Hello, Ada
 greeting(name: 'Ada', prefix: 'Hi');    // Hi, Ada
 
-// arrow syntax สำหรับ function ที่เป็น expression เดียว
+// Arrow syntax for single-expression functions
 int square(int x) => x * x;
 ```
 
@@ -54,12 +54,12 @@ final nums = [1, 2, 3];
 final set = {1, 2, 3};
 final map = {'a': 1, 'b': 2};
 
-// spread, collection-if, collection-for — จะใช้ข้างใน widget children:
+// Spread, collection-if, collection-for — you'll use these inside widget children:
 final children = [
   const Header(),
   ...items,                         // spread
-  if (isLoggedIn) const Profile(),  // element แบบมีเงื่อนไข
-  for (final n in nums) Text('$n'), // element ที่ generate ขึ้นมา
+  if (isLoggedIn) const Profile(),  // conditional element
+  for (final n in nums) Text('$n'), // generated elements
 ];
 ```
 
@@ -74,7 +74,7 @@ final paint = Paint()
   ..color = const Color(0xFF027DFD)
   ..strokeWidth = 4
   ..style = PaintingStyle.stroke;
-// แต่ละ `..` คืน Paint ตัวเดิม ดังนั้นทั้งหมดนี้ config object เดียว
+// Each `..` returns the same Paint, so this configures one object.
 ```
 
 <Callout title="สรุปหนึ่งบรรทัด">

@@ -25,7 +25,7 @@ class ThemeConfig extends InheritedWidget {
   const ThemeConfig({super.key, required this.color, required super.child});
   final Color color;
 
-  // ธรรมเนียม: static `of` ที่ register ผู้เรียกเป็น dependent
+  // Convention: a static `of` that registers the caller as a dependent.
   static ThemeConfig of(BuildContext context) {
     final result =
         context.dependOnInheritedWidgetOfExactType<ThemeConfig>();
@@ -33,12 +33,12 @@ class ThemeConfig extends InheritedWidget {
     return result!;
   }
 
-  // เรียกเมื่อ ThemeConfig ใหม่มาแทนตัวเก่า: dependent ควร rebuild ไหม?
+  // Called when a new ThemeConfig replaces the old one: should dependents rebuild?
   @override
   bool updateShouldNotify(ThemeConfig oldWidget) => color != oldWidget.color;
 }
 
-// ที่ไหนก็ได้ที่อยู่ต่ำกว่า:
+// Anywhere below it:
 final color = ThemeConfig.of(context).color;
 ```
 

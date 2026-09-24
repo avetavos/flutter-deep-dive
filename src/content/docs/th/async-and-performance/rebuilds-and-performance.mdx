@@ -19,7 +19,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 `const` widget ถูกสร้างตอน compile time และถูก canonicalize เมื่อ parent rebuild Flutter เห็น instance `const` ตัวเดิม แล้ว **ข้ามการ rebuild subtree นั้นทั้งก้อน**
 
 ```dart
-// subtree นี้เป็น const — build ครั้งเดียวและถูกข้ามทุก parent rebuild
+// This subtree is const — it is built once and skipped on every parent rebuild.
 const Padding(
   padding: EdgeInsets.all(16),
   child: Text('Static label'),
@@ -33,9 +33,9 @@ const Padding(
 `setState` rebuild output ของ `build` *ทั้งหมด* ของ `State` นั้น ถ้าหน้าจอยักษ์เรียก `setState` เพื่อ counter เล็ก ๆ ทั้งหน้าจอก็ rebuild
 
 ```dart
-// ❌ setState ตรงนี้ rebuild ทั้งหน้าจอเพื่อเลขตัวเดียว
-// ✅ ดึงส่วนที่เปลี่ยนออกไปเป็น StatefulWidget เล็ก ๆ ของตัวเอง
-//    ให้เฉพาะ widget นั้น rebuild ส่วนที่เหลือคง const ไว้
+// ❌ setState here rebuilds the entire screen for one number.
+// ✅ Pull the changing part into its own small StatefulWidget,
+//    so only that widget rebuilds. Keep the rest as const siblings.
 ```
 
 Pattern คือ: ดัน state *ลงล่าง* ไปที่ widget เล็กที่สุดที่ต้องใช้ และคง widget รอบ ๆ ให้เป็น `const` เพื่อให้อยู่นิ่ง

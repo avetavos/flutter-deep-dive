@@ -15,11 +15,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 Dart มี **sound** null safety: type ไม่สามารถเก็บ `null` ได้เว้นแต่คุณจะบอกชัด ๆ ด้วย `?` นี่คือการันตีแบบแข็ง ไม่ใช่ lint — ถ้า type system บอกว่าค่านั้น non-null จะเป็น null ตอน runtime ไม่ได้จริง ๆ
 
 ```dart
-int a = 1;      // non-nullable — เป็น null ไม่ได้เลย
-int? b = null;  // nullable — ? opt-in ให้เป็น null ได้
+int a = 1;      // non-nullable — can never be null
+int? b = null;  // nullable — the ? opts in to null
 
-a = null;       // ❌ compile error: a เป็น null ไม่ได้
-b = 42;         // ✅ nullable ก็เก็บค่าจริงได้เหมือนกัน
+a = null;       // ❌ compile error: a cannot be null
+b = 42;         // ✅ a nullable can also hold a real value
 ```
 
 คำสำคัญคือ "sound": เพราะการันตีนี้แน่นหนา compiler จึง *optimize* ตามได้ และคุณก็ *เชื่อ* type ได้จริง widget property แบบ `String name` จะไม่มาเซอร์ไพรส์คุณด้วย null
@@ -29,17 +29,17 @@ b = 42;         // ✅ nullable ก็เก็บค่าจริงได้
 ```dart
 String? maybeName;
 
-// ?.  — null-aware access: เรียกก็ต่อเมื่อไม่ null ไม่งั้นทั้งก้อนเป็น null
-final len = maybeName?.length;        // int? — เป็น null ถ้า maybeName เป็น null
+// ?.  — null-aware access: call only if not null, else the whole thing is null
+final len = maybeName?.length;        // int? — null if maybeName is null
 
-// ??  — if-null: ให้ค่า fallback เมื่อฝั่งซ้ายเป็น null
-final safe = maybeName ?? 'Guest';    // String — ไม่มีทางเป็น null
+// ??  — if-null: provide a fallback when the left side is null
+final safe = maybeName ?? 'Guest';    // String — never null
 
-// ??= — assign ก็ต่อเมื่อตอนนี้เป็น null
+// ??= — assign only if currently null
 maybeName ??= 'Default';
 
-// !   — null assertion: "ฉันสัญญาว่าอันนี้ไม่ null" (throw ถ้าคุณคิดผิด)
-final definite = maybeName!;          // String — อันตรายถ้ามันเป็น null จริง
+// !   — null assertion: "I promise this isn't null" (throws if you're wrong)
+final definite = maybeName!;          // String — DANGER if it's actually null
 ```
 
 operator `!` คือตัวที่ต้องเคารพ: `!` สั่งปิดปาก compiler ด้วยการ *assert* ว่า non-null และถ้าคุณผิด จะ throw ตอน runtime ทุก `!` คือการเดิมพันเล็ก ๆ — ใช้เมื่อคุณพิสูจน์ได้ว่าค่านั้น non-null เท่านั้น
@@ -51,7 +51,7 @@ operator `!` คือตัวที่ต้องเคารพ: `!` สั�
 ```dart
 void greet(String? name) {
   if (name == null) return;
-  // จากตรงนี้ลงไป Dart รู้ว่า name เป็น String (ไม่ใช่ String?) — ไม่ต้องใช้ !
+  // From here down, Dart KNOWS name is String (not String?) — no ! needed.
   print(name.toUpperCase());
 }
 ```
@@ -70,8 +70,8 @@ export const flowDiagram = `flowchart TB
 `late` บอกว่า "อันนี้จะเป็น non-null ตอนที่มีใครอ่าน แค่ตอนประกาศยังไม่มีค่า" มีประโยชน์กับค่าที่ set ใน `initState` หรือคำนวณครั้งเดียว
 
 ```dart
-late final String config;   // ยังไม่มีค่า แต่สัญญาว่าจะมีก่อนอ่านครั้งแรก
-// ถ้าอ่านก่อน assign จะได้ LateInitializationError
+late final String config;   // no value yet, but promised before first read
+// If you read it before assigning, you get a LateInitializationError.
 ```
 
 ใช้ `late` อย่างประหยัด — เพราะเป็นการแลกการันตีตอน compile-time ไปเป็นตอน runtime `late` ที่ใช้ผิดก็คือ `!` ในคราบปลอมนั่นเอง

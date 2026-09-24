@@ -17,10 +17,10 @@ list ที่ scroll ได้อาจมีหนึ่งหมื่น ite
 นี่คือเหตุผลที่ constructor ที่คุณเลือกสำคัญมาก:
 
 ```dart
-// ❌ build child ทั้งหมดตั้งแต่แรก — โอเคถ้ามีไม่กี่ตัว, หายนะถ้ามีเป็นพัน
+// ❌ Builds ALL children up front — fine for a few, fatal for thousands.
 ListView(children: [ for (final item in items) Tile(item) ])
 
-// ✅ build child ตามที่ scroll เข้ามาในพื้นที่มองเห็น
+// ✅ Builds children on demand as they scroll into view.
 ListView.builder(
   itemCount: items.length,
   itemBuilder: (context, i) => Tile(items[i]),
@@ -50,11 +50,11 @@ CustomScrollView(
   slivers: [
     const SliverAppBar(
       floating: true,
-      expandedHeight: 200,     // header ที่ collapse ตอน scroll
+      expandedHeight: 200,     // a header that collapses as you scroll
     ),
     SliverList(
       delegate: SliverChildBuilderDelegate(
-        (context, i) => Tile(items[i]),   // ยัง lazy อยู่
+        (context, i) => Tile(items[i]),   // still lazy
         childCount: items.length,
       ),
     ),

@@ -65,7 +65,7 @@ The build command is stable, but what it produces underneath has moved. Four shi
 - **Swift Package Manager is the path forward.** CocoaPods is in maintenance mode and most of the popular iOS plugins have already migrated. New projects should use SwiftPM; existing ones keep working, but an unmigrated plugin will eventually become a blocker.
 - **Android projects use built-in Kotlin.** Since 3.44 the Kotlin toolchain ships with Flutter instead of being declared per project, so generated Android projects no longer pin their own Kotlin plugin version.
 
-One larger change is in motion: **Material and Cupertino are moving out of the framework into standalone `material_ui` and `cupertino_ui` packages** (both at 1.0 on pub.dev). It is opt-in today, with formal deprecation of the in-framework versions planned, and there is a migration fix:
+One larger change is in motion: **Material and Cupertino are moving out of the framework into standalone `material_ui` and `cupertino_ui` packages** (both already past 1.0 on pub.dev — see [pub.dev/packages/material_ui](https://pub.dev/packages/material_ui)). It is opt-in today, with formal deprecation of the in-framework versions planned, and there is a migration fix:
 
 ```bash
 dart fix --apply --code=migrate_design_widgets

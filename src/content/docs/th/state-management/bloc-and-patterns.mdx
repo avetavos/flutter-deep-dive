@@ -31,20 +31,20 @@ export const flowDiagram = `sequenceDiagram
 library ของ BLoC มาพร้อมสองแบบ **Cubit** คือแบบที่ง่ายกว่า — ไม่มี event class คุณแค่เรียก method ที่ `emit` state ใหม่ เริ่มที่นี่
 
 ```dart
-// state ไหลออก; method คือ input
+// State flows out; methods are the inputs.
 class CounterCubit extends Cubit<int> {
   CounterCubit() : super(0);          // initial state
 
-  void increment() => emit(state + 1); // emit state ใหม่
+  void increment() => emit(state + 1); // emit a new state
   void reset() => emit(0);
 }
 
-// ใน UI: BlocBuilder rebuild เมื่อมี state ใหม่ถูก emit
+// In the UI: BlocBuilder rebuilds when a new state is emitted.
 BlocBuilder<CounterCubit, int>(
   builder: (context, count) => Text('$count'),
 );
 
-// trigger input:
+// Trigger an input:
 context.read<CounterCubit>().increment();
 ```
 

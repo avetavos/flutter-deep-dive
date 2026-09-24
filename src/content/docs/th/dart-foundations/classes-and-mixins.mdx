@@ -18,17 +18,17 @@ constructor ของ Dart รวยกว่าภาษาส่วนให�
 class Point {
   final double x, y;
 
-  // default constructor พร้อม `this.` shorthand — assign field ตรง ๆ
+  // Default constructor with `this.` shorthand — assigns fields directly.
   const Point(this.x, this.y);
 
-  // named constructor — อีกวิธีในการสร้าง
+  // Named constructor — a second way to build one.
   const Point.origin() : x = 0, y = 0;
 
-  // factory constructor — คืน instance ที่ cache ไว้/เป็น subtype ได้ ไม่จำเป็นต้องสร้างใหม่
+  // Factory constructor — can return a cached/subtype instance, not just a fresh one.
   factory Point.fromMap(Map<String, double> m) => Point(m['x']!, m['y']!);
 }
 
-const p = Point(1, 2);       // const construction — canonicalize
+const p = Point(1, 2);       // const construction — canonicalized
 final o = Point.origin();
 ```
 
@@ -51,7 +51,7 @@ mixin Validator {
   bool isValid(String s) => s.isNotEmpty;
 }
 
-// compose หลายความสามารถด้วย `with`:
+// Compose several capabilities with `with`:
 class Form with Logger, Validator {
   void submit(String value) {
     if (isValid(value)) log('submitting $value');

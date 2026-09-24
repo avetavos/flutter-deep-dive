@@ -15,26 +15,26 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 การเขียน `InheritedWidget` ด้วยมือคือ boilerplate **Provider** ห่อ pattern นั้นด้วย API ที่สะอาด และจับคู่กับ `ChangeNotifier` — class ง่าย ๆ ที่ถือ state และเรียก `notifyListeners()` เมื่อ state เปลี่ยน
 
 ```dart
-// 1. model ที่ notify listener เมื่อมันเปลี่ยน
+// 1. A model that notifies listeners when it changes.
 class CartModel extends ChangeNotifier {
   final List<String> _items = [];
   List<String> get items => List.unmodifiable(_items);
 
   void add(String item) {
     _items.add(item);
-    notifyListeners();   // บอก widget ที่ listen อยู่ให้ rebuild
+    notifyListeners();   // tell listening widgets to rebuild
   }
 }
 
-// 2. provide มันไว้เหนือ widget ที่ต้องใช้
+// 2. Provide it above the widgets that need it.
 ChangeNotifierProvider(
   create: (_) => CartModel(),
   child: const MyApp(),
 );
 
-// 3. อ่านมัน watch() rebuild เมื่อเปลี่ยน; read() ไม่
-final cart = context.watch<CartModel>();      // rebuild เมื่อ cart เปลี่ยน
-context.read<CartModel>().add('Book');         // action ครั้งเดียว ไม่ rebuild
+// 3. Read it. watch() rebuilds on change; read() does not.
+final cart = context.watch<CartModel>();      // rebuilds when cart changes
+context.read<CartModel>().add('Book');         // one-off action, no rebuild
 ```
 
 ความต่างระหว่าง `watch` กับ `read` คือหัวใจทั้งหมด `context.watch<T>()` subscribe — widget rebuild เมื่อ model notify `context.read<T>()` หยิบค่าครั้งเดียวโดยไม่ subscribe — ใช้ใน callback (เช่น `onPressed`) ที่คุณอยาก *ทำ* ไม่ใช่ *ฟัง* สลับสองอันนี้คือ bug ที่พบบ่อยที่สุดของ Provider (ไม่ rebuild ที่ควร หรือ rebuild มากเกิน)
@@ -44,22 +44,22 @@ context.read<CartModel>().add('Book');         // action ครั้งเด�
 **Riverpod** คือการคิดใหม่โดยผู้เขียนคนเดิมที่แก้จุดหยาบของ Provider หมัดเด็ดของตัวเอง: provider เป็น **top-level object ไม่ผูกกับ widget tree** ซึ่งทำให้ compile-safe (อ่าน provider ที่ไม่มีอยู่ไม่ได้) และ test กับ combine ได้ง่าย
 
 ```dart
-// provider ประกาศที่ top level — ไม่ได้อยู่ใน widget tree
+// A provider declared at top level — not in the widget tree.
 final counterProvider = NotifierProvider<Counter, int>(Counter.new);
 
 class Counter extends Notifier<int> {
   @override
-  int build() => 0;             // initial state คืนออกมาจาก build()
+  int build() => 0;             // the initial state, returned from build()
 
-  void increment() => state++;  // การ reassign `state` จะ notify listener
+  void increment() => state++;  // reassigning `state` notifies listeners
 }
 
-// ใน ConsumerWidget, `ref` อ่าน provider:
+// In a ConsumerWidget, `ref` reads providers:
 class CounterView extends ConsumerWidget {
   const CounterView({super.key});
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final count = ref.watch(counterProvider);          // rebuild เมื่อเปลี่ยน
+    final count = ref.watch(counterProvider);          // rebuilds on change
     return TextButton(
       onPressed: () => ref.read(counterProvider.notifier).increment(),
       child: Text('$count'),

@@ -32,7 +32,7 @@ export const reorderDiagram = `flowchart LR
 **key** บอก Flutter ว่า "identity ของ element นี้คือ X ไม่ใช่แค่ตำแหน่งของตัวเอง" ตอนนี้ เมื่อ match widget ใหม่กับ element Flutter จะ match ด้วย *key* — state จึงตาม widget ไปแม้ widget จะย้ายที่
 
 ```dart
-// ให้แต่ละ item มี key ที่เสถียรจากข้อมูลของตัวเอง:
+// Give each item a stable key derived from its data:
 return ListView(
   children: [
     for (final todo in todos)

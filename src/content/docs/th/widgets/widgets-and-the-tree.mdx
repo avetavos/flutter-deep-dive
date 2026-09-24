@@ -60,10 +60,10 @@ export const treesDiagram = `flowchart LR
 เมื่อคุณ rebuild Flutter จะเดิน widget tree ใหม่และเทียบ widget ใหม่แต่ละตัวกับ element ที่มีอยู่ ถ้า widget ใหม่มี **type และ key เดียวกัน** กับตัวเก่า element จะถูก *update ในที่เดิม* — render object ถูกใช้ซ้ำ อัปเดตเฉพาะ property ที่เปลี่ยน เฉพาะเมื่อ type หรือ key ต่างเท่านั้น Flutter จึงรื้อ element กับ render object แล้ว build ใหม่
 
 ```dart
-// การ rebuild สร้าง Text widget ใหม่ทุกครั้ง...
+// Rebuild produces a new Text widget every time...
 Text(counter.toString())
-// ...แต่ TextElement และ RenderParagraph ข้างล่างถูกใช้ซ้ำ
-// มีแค่ string ที่เปลี่ยนถูกส่งลงไป นี่คือเหตุผลที่ setState ถูก
+// ...but the TextElement and RenderParagraph underneath are REUSED.
+// Only the changed string is pushed down. That's why setState is cheap.
 ```
 
 การ reconciliation นี้ — widget ใหม่ที่ immutable ถูก diff กับ element ที่อยู่ต่อเนื่อง — คือห้องเครื่องของ Flutter Key (บทเรียนถัดไป) มีไว้ควบคุมการ reconcile นี้เมื่อการ match ด้วย type แบบ default ทำผิด

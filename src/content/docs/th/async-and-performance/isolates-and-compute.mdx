@@ -21,13 +21,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 สำหรับ "รัน expensive pure function นี้นอก main isolate" แบบทั่วไป Flutter ให้ `compute()` ส่ง top-level (หรือ static) function กับ argument ของตัวเอง จะสร้าง background isolate ขึ้นมา รัน function ที่นั่น แล้วคืนผลเป็น `Future`
 
 ```dart
-// top-level function — จำเป็น เพราะต้องรันบน isolate อื่น
+// A top-level function — required, because it must run on another isolate.
 List<Item> parseItems(String jsonStr) {
   final raw = jsonDecode(jsonStr) as List;
-  return raw.map((e) => Item.fromJson(e)).toList();   // งานหนัก
+  return raw.map((e) => Item.fromJson(e)).toList();   // heavy work
 }
 
-// บน UI isolate — offload มัน แล้ว await ผลโดยไม่ jank:
+// On the UI isolate — offload it, and await the result without janking:
 final items = await compute(parseItems, hugeJsonString);
 ```
 

@@ -19,7 +19,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 ```dart
 @override
 Widget build(BuildContext context) {
-  // ✅ ดี: แค่บรรยาย UI จาก state ปัจจุบัน
+  // ✅ Good: just describe UI from current state.
   return Text('Count: $_count');
 }
 ```
@@ -27,9 +27,9 @@ Widget build(BuildContext context) {
 ```dart
 @override
 Widget build(BuildContext context) {
-  // ❌ แย่: side effect ใน build อันนี้ยิงทุก rebuild
-  _apiClient.fetchUser();      // network call — leak, ยิงซ้ำ ๆ
-  _controller = AnimationController(vsync: this); // สร้างใหม่ทุก build!
+  // ❌ Bad: side effects in build. This fires on EVERY rebuild.
+  _apiClient.fetchUser();      // network call — leaks, fires repeatedly
+  _controller = AnimationController(vsync: this); // recreated every build!
   return Text('...');
 }
 ```
@@ -43,9 +43,9 @@ side effect — network call, สร้าง controller, subscribe stream — �
 ```dart
 @override
 Widget build(BuildContext context) {
-  // context รู้ว่าเราอยู่ตรงไหน จึงค้น ancestor ได้:
-  final theme = Theme.of(context);          // Theme ที่ใกล้ที่สุดเหนือเรา
-  final media = MediaQuery.of(context);     // MediaQuery ที่ใกล้ที่สุดเหนือเรา
+  // context knows WHERE we are, so it can search ancestors:
+  final theme = Theme.of(context);          // nearest Theme above us
+  final media = MediaQuery.of(context);     // nearest MediaQuery above us
   return Text('Screen is ${media.size.width} wide', style: theme.textTheme.bodyMedium);
 }
 ```

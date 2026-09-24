@@ -16,8 +16,8 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ```dart
 Column(
-  mainAxisAlignment: MainAxisAlignment.spaceBetween, // ตามแกนแนวตั้ง
-  crossAxisAlignment: CrossAxisAlignment.start,      // ขวาง (แนวนอน)
+  mainAxisAlignment: MainAxisAlignment.spaceBetween, // along the vertical axis
+  crossAxisAlignment: CrossAxisAlignment.start,      // across (horizontal)
   children: const [ Text('top'), Text('middle'), Text('bottom') ],
 )
 ```
@@ -31,8 +31,8 @@ Column(
 ```dart
 Row(
   children: [
-    Expanded(flex: 2, child: blueBox),  // ได้ 2/3 ของพื้นที่ว่าง
-    Expanded(flex: 1, child: redBox),   // ได้ 1/3
+    Expanded(flex: 2, child: blueBox),  // takes 2/3 of the free space
+    Expanded(flex: 1, child: redBox),   // takes 1/3
   ],
 )
 ```
@@ -50,7 +50,7 @@ Stack(
     Positioned(
       right: 0,
       top: 0,
-      child: const Badge(),  // ปักไว้มุมขวาบน
+      child: const Badge(),  // pinned to the top-right corner
     ),
   ],
 )

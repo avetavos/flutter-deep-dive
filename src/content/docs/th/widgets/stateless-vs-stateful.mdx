@@ -39,10 +39,10 @@ class Counter extends StatefulWidget {
 }
 
 class _CounterState extends State<Counter> {
-  int _count = 0; // mutable state อยู่ตรงนี้ ไม่ใช่บน widget
+  int _count = 0; // mutable state lives HERE, not on the widget
 
   void _increment() {
-    setState(() => _count++); // บอก Flutter ให้ rebuild ด้วย state ใหม่
+    setState(() => _count++); // tell Flutter to rebuild with new state
   }
 
   @override

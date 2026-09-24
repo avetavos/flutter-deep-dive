@@ -29,17 +29,17 @@ export const loopDiagram = `flowchart LR
 
 ```dart
 Future<User> fetchUser(int id) async {
-  final response = await http.get(Uri.parse('/users/$id')); // รอ แต่ไม่ block
+  final response = await http.get(Uri.parse('/users/$id')); // waits, doesn't block
   return User.fromJson(response.body);
 }
 
-// เรียกใช้:
+// Calling it:
 Future<void> load() async {
   try {
     final user = await fetchUser(42);
     print(user.name);
   } catch (e) {
-    print('failed: $e');   // future ที่ await จะ throw error ที่ try/catch ได้
+    print('failed: $e');   // awaited futures throw errors you can try/catch
   }
 }
 ```
@@ -51,16 +51,16 @@ function ที่เป็น `async` คืน `Future` เสมอ `await` �
 **`Stream<T>`** เหมือน Future ที่ส่งค่า *หลายค่า* — ลำดับของ event ตามเวลา: ข้อความ web-socket, ค่า sensor, input ของ user, การเปลี่ยนแปลงของ database
 
 ```dart
-Stream<int> ticker() async* {   // async* ทำให้เป็น Stream; yield emit ค่า
+Stream<int> ticker() async* {   // async* makes a Stream; yield emits a value
   for (var i = 1; i <= 3; i++) {
     await Future.delayed(const Duration(seconds: 1));
-    yield i;                    // emit 1, แล้ว 2, แล้ว 3
+    yield i;                    // emits 1, then 2, then 3
   }
 }
 
-// consume ด้วย await-for หรือ .listen:
+// Consume with await-for or .listen:
 await for (final tick in ticker()) {
-  print(tick);                  // 1, 2, 3 — หนึ่งค่าต่อวินาที
+  print(tick);                  // 1, 2, 3 — one per second
 }
 ```
 

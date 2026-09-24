@@ -27,10 +27,10 @@ widget ตระกูล `AnimatedFoo` (`AnimatedContainer`, `AnimatedOpacity`,
 AnimatedContainer(
   duration: const Duration(milliseconds: 300),
   curve: Curves.easeInOut,
-  width: _expanded ? 200 : 100,     // เปลี่ยนค่านี้ (เช่นใน setState)...
+  width: _expanded ? 200 : 100,     // change this (e.g. in setState)...
   height: 100,
   color: Colors.blue,
-  // ...แล้ว Flutter จะ animate จาก width เดิมไป width ใหม่อย่างลื่น
+  // ...and Flutter smoothly animates from the old width to the new one.
 )
 ```
 
@@ -43,19 +43,19 @@ AnimatedContainer(
 ```dart
 class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
-    vsync: this,                                  // ticker (เหตุที่ต้องใช้ mixin)
+    vsync: this,                                  // the ticker (why we need the mixin)
     duration: const Duration(seconds: 1),
   )..repeat(reverse: true);
 
   @override
-  void dispose() { _c.dispose(); super.dispose(); }   // dispose controller เสมอ
+  void dispose() { _c.dispose(); super.dispose(); }   // ALWAYS dispose the controller
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _c,
       builder: (context, child) => Opacity(opacity: _c.value, child: child),
-      child: const FlutterLogo(),                 // build ครั้งเดียว ไม่ rebuild ทุก tick
+      child: const FlutterLogo(),                 // built once, not rebuilt each tick
     );
   }
 }

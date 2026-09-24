@@ -53,10 +53,10 @@ Center(
 constraint เป็น **tight** เมื่อ min เท่ากับ max (widget ต้องมีขนาดนั้นเป๊ะ) และเป็น **loose** เมื่อ min เป็น 0 (widget จะเป็นขนาดเท่าไรก็ได้จนถึง max)
 
 ```dart
-// SizedBox บังคับ constraint แบบ tight — child ต้องเป็น 50x50
+// SizedBox imposes a tight constraint — the child MUST be 50x50.
 SizedBox(width: 50, height: 50, child: coloredBox)
 
-// Center บังคับ constraint แบบ loose — child จะใหญ่ได้ถึงขนาด parent
+// Center imposes a loose constraint — the child may be up to the parent size.
 Center(child: coloredBox)
 ```
 

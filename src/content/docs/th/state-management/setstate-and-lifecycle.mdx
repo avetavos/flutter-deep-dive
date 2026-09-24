@@ -26,8 +26,8 @@ class _CounterState extends State<Counter> {
 
   void _increment() {
     setState(() {
-      _count++;          // mutate state ข้างใน callback
-    });                  // แล้ว Flutter mark element นี้เป็น dirty
+      _count++;          // mutate state INSIDE the callback
+    });                  // then Flutter marks this element dirty
   }
 
   @override

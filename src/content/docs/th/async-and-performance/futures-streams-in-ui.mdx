@@ -19,7 +19,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ```dart
 FutureBuilder<User>(
-  future: _userFuture,               // Future ที่สร้าง OUTSIDE build (ดูกับดัก)
+  future: _userFuture,               // a Future created OUTSIDE build (see the trap)
   builder: (context, snapshot) {
     if (snapshot.connectionState == ConnectionState.waiting) {
       return const CircularProgressIndicator();     // loading
@@ -27,7 +27,7 @@ FutureBuilder<User>(
     if (snapshot.hasError) {
       return Text('Failed: ${snapshot.error}');      // error
     }
-    final user = snapshot.data!;                     // ข้อมูลพร้อมแล้ว
+    final user = snapshot.data!;                     // data is ready
     return Text(user.name);
   },
 )
@@ -44,7 +44,7 @@ StreamBuilder<int>(
   stream: _tickerStream,
   initialData: 0,
   builder: (context, snapshot) {
-    return Text('Count: ${snapshot.data}');   // rebuild ทุกค่าใหม่
+    return Text('Count: ${snapshot.data}');   // rebuilds on each new value
   },
 )
 ```
@@ -54,21 +54,21 @@ StreamBuilder<int>(
 นี่คือบั๊ก `FutureBuilder` ที่พบบ่อยที่สุด: สร้าง future *ข้างใน* `build`
 
 ```dart
-// ❌ ผิด — future ตัวใหม่ถูกสร้างทุก rebuild
-//    request จึงยิงซ้ำ และ loading spinner กระพริบไม่จบ
+// ❌ WRONG — a new future is created on every rebuild,
+//    so the request re-fires and the loading spinner flickers forever.
 Widget build(BuildContext context) {
   return FutureBuilder(
-    future: fetchUser(42),   // <-- สร้างใหม่ทุก build
+    future: fetchUser(42),   // <-- recreated every build
     builder: ...,
   );
 }
 
-// ✅ ถูก — สร้างครั้งเดียวแล้วเก็บไว้ (ใน initState สำหรับ StatefulWidget)
+// ✅ RIGHT — create it once and store it (in initState for a StatefulWidget).
 late final Future<User> _userFuture;
 @override
 void initState() {
   super.initState();
-  _userFuture = fetchUser(42);   // สร้างครั้งเดียว
+  _userFuture = fetchUser(42);   // created once
 }
 ```
 
