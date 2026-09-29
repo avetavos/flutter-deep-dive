@@ -1,6 +1,6 @@
 ---
 title: 'Choosing an Approach'
-description: 'A decision guide — setState for ephemeral state, Provider/Riverpod for shared, BLoC for complex flows — plus lifting state up and layering your app.'
+description: 'A decision guide refreshed with what the module actually proved — rebuild scope, testability, boilerplate, codegen dependency, and learning curve for setState, InheritedWidget, Provider, Riverpod, and BLoC — plus ephemeral vs app state and layering.'
 sidebar:
   order: 6
 ---
@@ -9,28 +9,44 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The decision, made simple
 
-You now know the mechanisms. Choosing between them is mostly about **scope and complexity**, and it follows a short decision path:
+You now know the mechanisms — not from description, but from real tests run against each one in this module: a lifecycle order proven with a widget test, a rebuild count that stayed flat for a non-dependent, a `ProviderScope`-missing crash captured verbatim, a `non_exhaustive_switch_expression` from the analyzer. Choosing between them is mostly about **scope and complexity**, and it follows a short decision path:
 
 <Mermaid title="Which approach to reach for" code={decideDiagram} />
 
 export const decideDiagram = `flowchart TB
   q1{"Does more than one widget\nneed this state?"} -->|no| ss["setState\n(ephemeral / local)"]
-  q1 -->|yes| q2{"Complex flows,\nlarge app, high testability?"}
-  q2 -->|no| prov["Provider / Riverpod\n(shared app state)"]
-  q2 -->|yes| bloc["BLoC / Cubit\n(unidirectional, testable)"]`;
+  q1 -->|yes| q2{"Does it need per-parameter\ncaching, granular rebuilds,\nor first-class async?"}
+  q2 -->|yes| rp["Riverpod\n(compile-safe, testable, .select/.family)"]
+  q2 -->|no, small app or\nteam already knows it| prov["Provider\n(InheritedWidget + ChangeNotifier)"]
+  q1 -->|yes, AND flows are\ncomplex/async-heavy| q3{"Do you need exhaustive,\ntraceable, unit-testable\nstate transitions?"}
+  q3 -->|yes| bloc["BLoC / Cubit\n(sealed events, unidirectional)"]
+  q3 -->|no| prov`;
 
-- **One widget cares?** `setState`. Don't add a package for a checkbox.
-- **Several widgets share it?** Provider or Riverpod. Riverpod for new/larger apps.
-- **Complex, async-heavy, needs to be testable in isolation?** BLoC/Cubit.
+- **One widget cares?** `setState`. Don't add a package for a checkbox — proven in the [setState & the Lifecycle lesson](/flutter/en/state-management/setstate-and-lifecycle/): the whole lifecycle (`initState` → `didChangeDependencies` → `build` → `dispose`) is already there for free.
+- **Several widgets share it, and you want per-parameter caching, `.select()`-level rebuild control, or first-class async state?** Riverpod — proven in the [Provider & Riverpod lesson](/flutter/en/state-management/provider-and-riverpod/) with real `.autoDispose`/`.family` disposal and `AsyncNotifier` loading/data/error tests.
+- **Several widgets share it, the app/team is smaller, and `InheritedWidget`-shaped state is enough?** Provider — the same mechanism as raw `InheritedWidget`, proven in the [InheritedWidget lesson](/flutter/en/state-management/inherited-widget/), with nicer syntax.
+- **Complex, async-heavy, needs exhaustively-checked, traceable state transitions?** BLoC/Cubit — proven in the [BLoC & Patterns lesson](/flutter/en/state-management/bloc-and-patterns/) with a real `non_exhaustive_switch_expression` and a `blocTest` asserting an exact state sequence.
 
-There's no prize for using the heaviest tool. A real app happily mixes all three: `setState` for local UI bits, a couple of Riverpod providers for shared state, and BLoC only where the complexity truly warrants it.
+There's no prize for using the heaviest tool. A real app happily mixes all four: `setState` for local UI bits, a couple of Riverpod providers for shared state, and BLoC only where the complexity truly warrants it.
+
+## What each lesson actually proved
+
+| Approach | Rebuild scope | Testability | Boilerplate | Codegen dependency | Learning curve |
+| --- | --- | --- | --- | --- | --- |
+| `setState` | The whole `State`'s `build()` — push it low in the tree to limit blast radius | `flutter_test` widget tests only; no unit-testable logic layer | Minimal — no extra classes | None | Lowest — it's the widget lifecycle itself |
+| `InheritedWidget` | Only elements that called `dependOnInheritedWidgetOfExactType`/`InheritedModel.inheritFrom` — proven with build counters that stayed flat for non-dependents | Widget tests; logic and UI are entangled unless you extract it yourself | You write `of(context)` + `updateShouldNotify` (+ `updateShouldNotifyDependent` for `InheritedModel`) by hand | None | Moderate — the mechanism is simple, the ceremony is manual |
+| Provider | Same as `InheritedWidget` (it's built directly on it) — `context.watch` rebuilds, `context.read` doesn't | Widget tests; `ChangeNotifier` logic is unit-testable in isolation from widgets | Low — `ChangeNotifierProvider` + a `ChangeNotifier` subclass | None | Low — familiar OOP shape (a class that calls `notifyListeners()`) |
+| Riverpod (hand-written) | `ref.watch` rebuilds; `.select()` narrows to one derived field — proven to skip rebuilds for unrelated field changes | `ProviderContainer` tests with zero widgets; `ProviderScope(overrides:)` proven for widget-level fakes | Moderate — `NotifierProvider<X, Y>(X.new)` per provider | None | Moderate — new vocabulary (`ref`, `provider`, `container`), but no `BuildContext` lookups to reason about |
+| Riverpod (`@riverpod` codegen) | Same as hand-written; `.autoDispose` is the default — proven directly in generated `isAutoDispose: true` output | Same as hand-written | Least of the three Riverpod styles — types and boilerplate generated | **`build_runner` in the loop** — a real generated `.g.dart` file your analyzer checks, proven in this module | Moderate-high — same Riverpod vocabulary plus a codegen step to understand |
+| BLoC/Cubit | `BlocBuilder`'s `buildWhen`/`BlocListener`'s `listenWhen` — proven to keep a build counter flat across four irrelevant state changes | Highest — `blocTest` asserts an exact emitted-state sequence with zero widgets, proven in this module | Highest — sealed event classes, a `switch`/`on<T>` handler, `Equatable` on every state/event | None required (Equatable/bloc_test are ergonomics, not codegen) | Highest — event/state modeling discipline on top of everything else |
 
 ## Lifting state up
 
-When two sibling widgets need the same state, move it to their nearest common ancestor and pass it down — **lifting state up**. This is the first thing to try before reaching for any shared-state package.
+When two sibling widgets need the same state, move it to their nearest common ancestor and pass it down — **lifting state up**. This is the first thing to try before reaching for any shared-state package, because it needs none of the machinery above.
 
 | Situation | Where the state should live |
 |-----------|-----------------------------|
@@ -39,23 +55,142 @@ When two sibling widgets need the same state, move it to their nearest common an
 | Many widgets across the tree | A shared store (Provider/Riverpod) |
 | App-wide, complex, async | A BLoC/Cubit layer |
 
-## Ephemeral vs app state, and layering
+## Ephemeral vs app state, with concrete examples
 
-The single most important habit is classifying state correctly:
+The single most important habit is classifying state correctly — get this wrong and you either over-engineer a checkbox or lose data a user expected to persist across screens.
 
-- **Ephemeral state** — a `PageView` index, a form field, an animation. Lives in a `State`. Losing it on rebuild is fine.
-- **App state** — auth, cart, settings, cached server data. Shared and often persisted. Belongs in a store outside any one widget.
+**Ephemeral state** — lives in one `State`, fine to lose on rebuild/hot restart, no other widget needs it:
+
+```dart
+// lib/ephemeral_example.dart
+import 'package:flutter/material.dart';
+
+/// Ephemeral: a PageView's current index only this widget (and its direct
+/// children) care about — fine to lose on hot restart, fine to hold with
+/// plain setState.
+class OnboardingPager extends StatefulWidget {
+  const OnboardingPager({super.key});
+  @override
+  State<OnboardingPager> createState() => _OnboardingPagerState();
+}
+
+class _OnboardingPagerState extends State<OnboardingPager> {
+  int _page = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('Page $_page of 3'),
+        TextButton(
+          onPressed: () => setState(() => _page = (_page + 1) % 3),
+          child: const Text('Next'),
+        ),
+      ],
+    );
+  }
+}
+```
+
+Other ephemeral examples: a `TextEditingController`'s current text before submit, whether a `Card` is expanded, an `AnimationController`'s current value, a form field's validation error before the next submit attempt.
+
+**App state** — shared across screens, often persisted, outlives any one widget's lifetime:
+
+- Auth: is the user logged in, and who are they (needed by the root router, a profile screen, and an API client all at once).
+- Cart contents in a shopping app (needed by a badge in the app bar, the cart screen, and checkout).
+- Cached server data (a list of products fetched once, read from many screens without refetching).
+- App-wide settings (theme, locale) read by the root `MaterialApp` and changed from a settings screen three navigations away.
+
+App state belongs in Riverpod/Provider (or BLoC for the complex, async-heavy cases) — proven throughout this module to survive widget rebuilds, be reachable without prop-drilling, and be testable in isolation from any specific screen.
+
+## Layering a real app
 
 For anything beyond a toy app, layer these responsibilities so they don't tangle:
 
 - **UI layer** — widgets. Renders state, sends inputs. No business logic.
-- **State/logic layer** — providers, BLoCs, notifiers. Holds and transitions state.
+- **State/logic layer** — providers, BLoCs, notifiers. Holds and transitions state. This is the layer every proof in this module's four lessons targeted directly with widget-free tests.
 - **Data layer** — repositories and services. Talks to APIs, databases, device.
 
-Keeping business logic and data access out of widgets is what makes an app testable and survivable as it grows — regardless of which state package you picked.
+Keeping business logic and data access out of widgets is what makes an app testable and survivable as it grows — regardless of which state package you picked. The [Three Trees internals lesson](/flutter/en/flutter-internals/three-trees/) covers the element/widget mechanics every layer above ultimately rides on.
+
+## Mental Model
+
+Every approach in this module answers the same two questions differently: "where does the state actually live?" and "who gets told when it changes, and how precisely?" `setState` keeps both answers inside one `State` object. `InheritedWidget`/Provider move the *storage* out into the tree but keep the *notification* mechanism identical (a dependency list, checked on every update). Riverpod moves storage **out of the tree entirely** and replaces the dependency list with typed provider objects that can depend on each other. BLoC keeps storage in one dedicated object too, but replaces "whoever asked last" with an explicit, closed set of named inputs (`sealed` events) — the deliberate trade of flexibility for provability. None of these are "better" in the abstract; each is a different point on the same scope/traceability/ceremony trade-off, proven concretely in this module rather than asserted.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `setState` everywhere, even for shared state | Zero packages, zero ceremony | Real prop-drilling once more than one screen needs the same value |
+| Provider/Riverpod for everything, even one widget's local toggle | Consistency — one mental model app-wide | Real overhead — a provider, a notifier, a `ref`/`context` lookup for something `setState` would do in one line |
+| BLoC for a whole app, including trivial screens | Uniform pattern, easy onboarding for BLoC-fluent teams | Sealed event classes and `switch` handlers for state that never needed exhaustiveness checking in the first place |
+| Mixing all four by scope (this lesson's actual recommendation) | Each piece of state uses the least ceremony that's still correct | Requires the judgment this lesson exists to build — no single rule replaces classifying the state correctly |
+
+## Common Misconceptions
+
+- **"There's one correct state management solution for a whole app."** Every proof in this module was about a *mechanism*, not a mandate — real apps mix `setState`, Riverpod, and BLoC by scope, exactly as the decision flow above does.
+- **"Riverpod is strictly better than Provider, so always use it."** The [Provider & Riverpod lesson](/flutter/en/state-management/provider-and-riverpod/) proved Provider is not deprecated and remains a reasonable choice for a small app or a team already fluent in it — Riverpod's advantages (`.autoDispose`, `.select()`, compile-safety) matter most exactly where this lesson's decision flow routes you to it: larger, more complex, more testable-by-default apps.
+- **"BLoC's sealed events and switch statements are overkill everywhere."** They're overkill for a checkbox, and exactly the right tool the moment you need the analyzer to guarantee every event is handled — proven with a real `non_exhaustive_switch_expression` in the BLoC lesson.
+- **"Lifting state up is old-fashioned — just reach for a provider."** It's still the correct first move for two siblings sharing one value; reaching for a shared store before trying this adds a dependency for a problem a plain constructor parameter already solves.
+- **"Ephemeral vs app state is just a naming convention, not a real distinction."** It determines correctness, not just style: ephemeral state in a shared store outlives its usefulness and leaks; app state trapped in one widget's `setState` is lost the moment that widget rebuilds from scratch or a sibling needs the same value.
+
+## Reading AI-generated code
+
+The most common AI-generated architecture mistake in this module's domain isn't a syntax bug at all — it's picking the wrong scope for a piece of state, which compiles clean and only shows up as a real bug (drift, staleness, or duplicated ceremony) once the app grows past the AI's one-screen context window.
+
+```dart
+// screen_a.dart — AI-generated, screen 1 of 3
+class CartScreenA extends StatefulWidget {
+  const CartScreenA({super.key});
+  @override
+  State<CartScreenA> createState() => _CartScreenAState();
+}
+
+class _CartScreenAState extends State<CartScreenA> {
+  int _cartCount = 0; // ❌ app state, trapped in one screen's local setState
+
+  void _addItem() => setState(() => _cartCount++);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(appBar: AppBar(title: Text('Cart ($_cartCount)')), body: /* ... */ const SizedBox());
+  }
+}
+```
+
+The cart badge on every *other* screen (a product list, a checkout button) each generated its own separate `_cartCount` field the same way — four independent copies of what should be one shared value, each one only updated by its own screen's local actions, silently drifting out of sync the moment an item is added from a different screen than the one showing a stale badge.
+
+Before trusting generated state-management code, check:
+
+- Does more than one screen/widget subtree need this value? If yes and it's implemented with local `setState`, that's the exact bug above — ephemeral machinery holding app state.
+- Is a `StatefulWidget`'s local field ever read or duplicated in a *different* `StatefulWidget`? That duplication is the tell — the value needed lifting or a shared store, not a second local copy.
+- Is Riverpod/BLoC reached for on a value only one widget ever reads (a `PageView` index, a single `Card`'s expanded flag)? That's the opposite mistake — real, provable overhead (an extra provider/notifier/event class) for a value `setState` already handles in one line.
+- For anything shared: is it actually placed in a provider/notifier/BLoC that outlives the screen that first created it, or is it re-created (and its previous value lost) every time that screen is pushed again?
+
+<SpotTheBug code={`// AI-generated: "add a dark mode toggle"
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool _darkMode = false; // read by MaterialApp's theme, three screens up
+
+  @override
+  Widget build(BuildContext context) {
+    return SwitchListTile(
+      value: _darkMode,
+      onChanged: (v) => setState(() => _darkMode = v),
+      title: const Text('Dark mode'),
+    );
+  }
+}`}>
+This compiles clean and the switch visibly toggles — but `_darkMode` is local to `SettingsScreen`'s own `State`, and the comment gives away the real bug: the root `MaterialApp`'s `theme`/`darkTheme`/`themeMode` needs this value, and it lives three screens away from where this toggle actually is. Toggling it here changes nothing anywhere else in the app — the classic symptom of app state (read by a distant, unrelated widget) implemented with ephemeral machinery (local `setState`, visible only to this one screen). The fix is exactly the classification this lesson teaches: `_darkMode` is app state, so it belongs in a Riverpod `Notifier`/Provider `ChangeNotifier` created above `MaterialApp`, with this screen calling `ref.read(themeModeProvider.notifier).toggle()` (or the Provider equivalent) instead of holding its own copy.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-Match the tool to the scope: `setState` for **ephemeral** state one widget owns, Provider/Riverpod for **shared** state, BLoC for **complex, testable** flows — and try **lifting state up** to a common parent before adding any package. Classify every piece of state as ephemeral or app state, and layer real apps into UI, state/logic, and data so widgets stay dumb and logic stays testable.
+Match the tool to the scope, using what this module actually proved, not just described: `setState` for **ephemeral** state one widget owns (proven cheapest, zero ceremony), Provider/`InheritedWidget` for **shared** state in smaller apps (proven to rebuild only registered dependents), Riverpod when you need per-parameter caching/`.select()`-level rebuild control/first-class async (proven with real `.autoDispose` disposal and `AsyncNotifier` error handling), and BLoC for **complex, exhaustively-checked, highly testable** flows (proven with a real analyzer error and `blocTest`'s exact-sequence assertions). Try **lifting state up** to a common parent before adding any package. Classify every piece of state as ephemeral or app state — most real bugs in this space are a misclassification, not a syntax error — and layer real apps into UI, state/logic, and data so widgets stay dumb and logic stays testable.
 </Callout>
 
 export const quizChoosing = [
@@ -68,6 +203,7 @@ export const quizChoosing = [
       'Use a static global variable',
     ],
     answer: 1,
+    explain: 'Lifting state up needs no package at all — it is the first, cheapest move before reaching for Provider, Riverpod, or BLoC.',
   },
   {
     q: 'Which state belongs in a shared store rather than a single widget?',
@@ -78,26 +214,51 @@ export const quizChoosing = [
       'A local text field\'s value',
     ],
     answer: 2,
+    explain: 'App state (auth, cart) is read by many unrelated widgets across the tree — exactly the case InheritedWidget/Provider/Riverpod exist for, proven throughout this module.',
   },
   {
-    q: 'What is the benefit of layering an app into UI, state/logic, and data layers?',
+    q: 'Per the refreshed trade-off table in this lesson, what is the real, proven cost specific to Riverpod\'s @riverpod codegen style (vs hand-written providers)?',
     options: [
-      'It makes the app smaller',
-      'Business logic and data access stay out of widgets, keeping the app testable as it grows',
-      'It removes the need for state',
-      'It avoids using Dart',
+      'It cannot express async state at all',
+      'build_runner enters the build loop, and a real generated .g.dart file exists that your analyzer checks — proven directly in the Provider & Riverpod lesson\'s generated isAutoDispose: true output',
+      'It has no learning curve at all',
+      'It is not testable',
     ],
     answer: 1,
+    explain: 'Hand-written Riverpod providers need no codegen step; @riverpod trades that for less boilerplate and inferred types, at the cost of a real build_runner dependency.',
   },
   {
-    q: 'Can a real app mix setState, Riverpod, and BLoC?',
+    q: 'What did the BLoC & Patterns lesson prove about testability that this lesson\'s table reflects as BLoC\'s highest-scoring column?',
     options: [
-      'No, you must pick exactly one',
-      'Yes — use setState for local bits, providers for shared state, and BLoC only where complexity warrants',
-      'Only in tests',
-      'Only if you avoid widgets',
+      'BLoC cannot be unit tested at all',
+      'blocTest asserts the exact, ordered sequence of emitted states with zero widgets involved',
+      'BLoC can only be tested with widget tests',
+      'Testability is identical across all four approaches',
     ],
     answer: 1,
+    explain: 'blocTest\'s expect: () => [...] compares an exact sequence of emitted states by value (thanks to Equatable), the most precise testability proof of any approach in this module.',
+  },
+  {
+    q: 'In the SpotTheBug dark-mode example, what is the actual bug, and why does it compile clean?',
+    options: [
+      'A syntax error in the SwitchListTile widget',
+      'App state (a theme setting read by the root MaterialApp) was implemented as ephemeral state (local setState in one distant screen) — it compiles fine because nothing about that is a type error, only a scope mistake',
+      'setState was called outside build()',
+      'The widget is missing a key',
+    ],
+    answer: 1,
+    explain: 'The classification mistake — ephemeral machinery holding app state — is the single most common real bug in this domain, and it never shows up as a compiler error.',
+  },
+  {
+    q: 'What is the practical difference in "rebuild scope" proven between setState and BlocBuilder\'s buildWhen (or Riverpod\'s .select())?',
+    options: [
+      'They are identical in every case',
+      'setState rebuilds its whole State\'s build() (push it low in the tree to limit that); buildWhen/.select() let you rebuild only for a specific, chosen slice of a shared state\'s change — proven with a build counter that stayed flat across four irrelevant events',
+      'setState never rebuilds anything',
+      'buildWhen always rebuilds on every state change, same as no buildWhen at all',
+    ],
+    answer: 1,
+    explain: 'The BLoC lesson proved capBannerBuildCount stayed at 1 through four state changes that did not satisfy buildWhen\'s predicate — a strictly finer-grained control than setState\'s all-or-nothing rebuild of one State.',
   },
 ];
 

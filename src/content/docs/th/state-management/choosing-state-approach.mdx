@@ -1,6 +1,6 @@
 ---
 title: 'Choosing an Approach'
-description: 'decision guide — setState สำหรับ ephemeral state, Provider/Riverpod สำหรับ shared, BLoC สำหรับ flow ซับซ้อน — พร้อมการ lift state up และ layer app'
+description: 'decision guide ที่รีเฟรชด้วยสิ่งที่โมดูลนี้พิสูจน์จริง — rebuild scope, testability, boilerplate, codegen dependency และ learning curve สำหรับ setState, InheritedWidget, Provider, Riverpod และ BLoC พร้อม ephemeral vs app state และการ layer'
 sidebar:
   order: 6
 ---
@@ -9,28 +9,44 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## การตัดสินใจ ให้ง่าย
 
-ตอนนี้คุณรู้กลไกแล้ว การเลือกใช้ส่วนใหญ่เป็นเรื่องของ **scope และความซับซ้อน** และเดินตาม decision path สั้น ๆ:
+ตอนนี้คุณรู้กลไกแล้ว — ไม่ใช่จากคำอธิบาย แต่จาก test จริงที่รันกับแต่ละตัวในโมดูลนี้: ลำดับ lifecycle ที่พิสูจน์ด้วย widget test, build count ที่นิ่งสำหรับ non-dependent, crash ที่ `ProviderScope` หายไปที่ capture มาตรง ๆ, `non_exhaustive_switch_expression` จาก analyzer การเลือกใช้ส่วนใหญ่เป็นเรื่องของ **scope และความซับซ้อน** และเดินตาม decision path สั้น ๆ:
 
-<Mermaid title="Which approach to reach for" code={decideDiagram} />
+<Mermaid title="เลือกวิธีไหนดี" code={decideDiagram} />
 
 export const decideDiagram = `flowchart TB
   q1{"มี widget มากกว่าหนึ่งตัว\nที่ต้องการ state นี้ไหม?"} -->|ไม่| ss["setState\n(ephemeral / local)"]
-  q1 -->|ใช่| q2{"flow ซับซ้อน,\napp ใหญ่, ต้อง test สูงไหม?"}
-  q2 -->|ไม่| prov["Provider / Riverpod\n(shared app state)"]
-  q2 -->|ใช่| bloc["BLoC / Cubit\n(unidirectional, test ได้)"]`;
+  q1 -->|ใช่| q2{"ต้องการ cache ต่อ parameter,\nrebuild แบบละเอียด,\nหรือ async แบบ first-class ไหม?"}
+  q2 -->|ใช่| rp["Riverpod\n(compile-safe, test ได้, .select/.family)"]
+  q2 -->|ไม่, app เล็กหรือ\nทีมรู้จักอยู่แล้ว| prov["Provider\n(InheritedWidget + ChangeNotifier)"]
+  q1 -->|ใช่ และ flow\nซับซ้อน/async หนัก| q3{"ต้องการ state transition\nที่เช็ค exhaustive, trace ได้,\nunit-test ได้ไหม?"}
+  q3 -->|ใช่| bloc["BLoC / Cubit\n(sealed event, unidirectional)"]
+  q3 -->|ไม่| prov`;
 
-- **widget เดียวสน?** `setState` อย่าเพิ่ม package เพื่อ checkbox
-- **หลาย widget share?** Provider หรือ Riverpod Riverpod สำหรับ app ใหม่/ใหญ่
-- **ซับซ้อน, async หนัก, ต้อง test แยกได้?** BLoC/Cubit
+- **widget เดียวสน?** `setState` อย่าเพิ่ม package เพื่อ checkbox — พิสูจน์ใน[บท setState & the Lifecycle](/flutter/th/state-management/setstate-and-lifecycle/): lifecycle ทั้งหมด (`initState` → `didChangeDependencies` → `build` → `dispose`) มีให้ฟรีอยู่แล้ว
+- **หลาย widget share และคุณต้องการ cache ต่อ parameter, คุม rebuild ระดับ `.select()`, หรือ async state แบบ first-class?** Riverpod — พิสูจน์ใน[บท Provider & Riverpod](/flutter/th/state-management/provider-and-riverpod/)ด้วย test disposal `.autoDispose`/`.family` จริงและ `AsyncNotifier` loading/data/error
+- **หลาย widget share, app/ทีมเล็กกว่า และ state ทรง `InheritedWidget` พอแล้ว?** Provider — กลไกเดียวกับ `InheritedWidget` ดิบ ๆ พิสูจน์ใน[บท InheritedWidget](/flutter/th/state-management/inherited-widget/)แค่มี syntax สวยกว่า
+- **ซับซ้อน, async หนัก, ต้องการ state transition ที่เช็ค exhaustive และ trace ได้?** BLoC/Cubit — พิสูจน์ใน[บท BLoC & Patterns](/flutter/th/state-management/bloc-and-patterns/)ด้วย `non_exhaustive_switch_expression` จริงและ `blocTest` ที่ assert ลำดับ state เป๊ะ
 
-ไม่มีรางวัลสำหรับการใช้เครื่องมือที่หนักที่สุด app จริงผสมทั้งสามได้อย่างสบาย: `setState` สำหรับ UI ชิ้นเล็ก, Riverpod provider สองสามตัวสำหรับ shared state, และ BLoC เฉพาะที่ความซับซ้อนสมควรจริง ๆ
+ไม่มีรางวัลสำหรับการใช้เครื่องมือที่หนักที่สุด app จริงผสมทั้งสี่ได้อย่างสบาย: `setState` สำหรับ UI ชิ้นเล็ก, Riverpod provider สองสามตัวสำหรับ shared state, และ BLoC เฉพาะที่ความซับซ้อนสมควรจริง ๆ
+
+## สิ่งที่แต่ละบทพิสูจน์ไว้จริง ๆ
+
+| วิธี | rebuild scope | testability | boilerplate | codegen dependency | learning curve |
+| --- | --- | --- | --- | --- | --- |
+| `setState` | `build()` ทั้งก้อนของ `State` นั้น — ดันให้ต่ำใน tree เพื่อจำกัดรัศมี | widget test ของ `flutter_test` เท่านั้น; ไม่มี logic layer ที่ unit-test ได้ | น้อยที่สุด — ไม่มี class เพิ่ม | ไม่มี | ต่ำที่สุด — มันคือ widget lifecycle เอง |
+| `InheritedWidget` | เฉพาะ element ที่เรียก `dependOnInheritedWidgetOfExactType`/`InheritedModel.inheritFrom` — พิสูจน์ด้วย build counter ที่นิ่งสำหรับ non-dependent | widget test; logic กับ UI พันกันถ้าไม่แยกเอง | เขียน `of(context)` + `updateShouldNotify` (+ `updateShouldNotifyDependent` สำหรับ `InheritedModel`) เอง | ไม่มี | ปานกลาง — กลไกง่าย แต่ ceremony ต้องทำมือ |
+| Provider | เหมือน `InheritedWidget` (สร้างตรงบนมันเลย) — `context.watch` rebuild, `context.read` ไม่ | widget test; logic ของ `ChangeNotifier` unit-test แยกจาก widget ได้ | น้อย — `ChangeNotifierProvider` + subclass ของ `ChangeNotifier` | ไม่มี | ต่ำ — ทรง OOP ที่คุ้นเคย (class ที่เรียก `notifyListeners()`) |
+| Riverpod (เขียนมือ) | `ref.watch` rebuild; `.select()` แคบลงเหลือ field ที่ derive มาตัวเดียว — พิสูจน์ว่าข้าม rebuild สำหรับการเปลี่ยน field ที่ไม่เกี่ยวข้อง | test `ProviderContainer` โดยไม่มี widget เลย; `ProviderScope(overrides:)` พิสูจน์แล้วสำหรับ fake ระดับ widget | ปานกลาง — `NotifierProvider<X, Y>(X.new)` ต่อ provider | ไม่มี | ปานกลาง — ศัพท์ใหม่ (`ref`, `provider`, `container`) แต่ไม่ต้องคิดเรื่อง `BuildContext` lookup |
+| Riverpod (`@riverpod` codegen) | เหมือนเขียนมือ; `.autoDispose` เป็น default — พิสูจน์ตรง ๆ จาก generated output `isAutoDispose: true` | เหมือนเขียนมือ | น้อยที่สุดในสามสไตล์ของ Riverpod — type และ boilerplate ถูก generate | **`build_runner` เข้ามาอยู่ใน loop** — ไฟล์ `.g.dart` ที่ generate จริงที่ analyzer ของคุณตรวจ พิสูจน์ในโมดูลนี้ | ปานกลาง-สูง — ศัพท์ Riverpod เดิม บวกขั้นตอน codegen ที่ต้องเข้าใจ |
+| BLoC/Cubit | `buildWhen` ของ `BlocBuilder`/`listenWhen` ของ `BlocListener` — พิสูจน์ว่ากัน build counter ให้นิ่งตลอดสี่การเปลี่ยน state ที่ไม่เกี่ยวข้อง | สูงที่สุด — `blocTest` assert ลำดับ state ที่ emit เป๊ะโดยไม่มี widget เลย พิสูจน์ในโมดูลนี้ | สูงที่สุด — sealed event class, `switch`/`on<T>` handler, `Equatable` บนทุก state/event | ไม่จำเป็น (Equatable/bloc_test คือ ergonomics ไม่ใช่ codegen) | สูงที่สุด — ต้องมีวินัยการ model event/state เพิ่มเข้ามาบนทุกอย่าง |
 
 ## Lifting state up
 
-เมื่อ sibling widget สองตัวต้องการ state เดียวกัน ให้ย้าย state ขึ้นไปไว้ที่ common ancestor ที่ใกล้ที่สุดแล้วส่งลงมา — **lifting state up** นี่คือสิ่งแรกที่ควรลองก่อนหยิบ shared-state package ใด ๆ
+เมื่อ sibling widget สองตัวต้องการ state เดียวกัน ให้ย้าย state ขึ้นไปไว้ที่ common ancestor ที่ใกล้ที่สุดแล้วส่งลงมา — **lifting state up** นี่คือสิ่งแรกที่ควรลองก่อนหยิบ shared-state package ใด ๆ เพราะไม่ต้องใช้กลไกข้างบนเลยสักอัน
 
 | สถานการณ์ | state ควรอยู่ที่ไหน |
 |-----------|-----------------------------|
@@ -39,23 +55,142 @@ export const decideDiagram = `flowchart TB
 | หลาย widget ทั่ว tree | store ที่ share (Provider/Riverpod) |
 | ทั้ง app, ซับซ้อน, async | layer BLoC/Cubit |
 
-## Ephemeral vs app state และการ layer
+## Ephemeral vs app state พร้อมตัวอย่างจริง
 
-นิสัยที่สำคัญที่สุดคือการจัดหมวด state ให้ถูก:
+นิสัยที่สำคัญที่สุดคือการจัดหมวด state ให้ถูก — ทำผิดแล้วคุณจะ over-engineer checkbox หรือทำ data ที่ user คาดว่าจะอยู่ข้ามหน้าหายไป
 
-- **Ephemeral state** — index ของ `PageView`, form field, animation อยู่ใน `State` หายไปตอน rebuild ก็ไม่เป็นไร
-- **App state** — auth, cart, settings, cached server data share และมักถูก persist อยู่ใน store นอก widget ตัวใดตัวหนึ่ง
+**Ephemeral state** — อยู่ใน `State` เดียว หายไปตอน rebuild/hot restart ก็ไม่เป็นไร ไม่มี widget อื่นต้องการมัน:
+
+```dart
+// lib/ephemeral_example.dart
+import 'package:flutter/material.dart';
+
+/// Ephemeral: a PageView's current index only this widget (and its direct
+/// children) care about — fine to lose on hot restart, fine to hold with
+/// plain setState.
+class OnboardingPager extends StatefulWidget {
+  const OnboardingPager({super.key});
+  @override
+  State<OnboardingPager> createState() => _OnboardingPagerState();
+}
+
+class _OnboardingPagerState extends State<OnboardingPager> {
+  int _page = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('Page $_page of 3'),
+        TextButton(
+          onPressed: () => setState(() => _page = (_page + 1) % 3),
+          child: const Text('Next'),
+        ),
+      ],
+    );
+  }
+}
+```
+
+ตัวอย่าง ephemeral อื่น ๆ: ข้อความปัจจุบันของ `TextEditingController` ก่อน submit, `Card` กางอยู่หรือไม่, ค่าปัจจุบันของ `AnimationController`, error ของ validation ของ form field ก่อน submit รอบถัดไป
+
+**App state** — share ข้ามหน้า มักถูก persist มีอายุนานกว่า widget ตัวไหนตัวหนึ่ง:
+
+- Auth: user login อยู่ไหมและเป็นใคร (root router, หน้า profile และ API client ต้องใช้พร้อมกัน)
+- เนื้อหา cart ใน shopping app (badge บน app bar, หน้า cart, checkout ต้องใช้)
+- Cached server data (list ของสินค้าที่ fetch มาครั้งเดียว อ่านจากหลายหน้าโดยไม่ fetch ซ้ำ)
+- settings ทั้ง app (theme, locale) ที่ root `MaterialApp` อ่านและเปลี่ยนจากหน้า settings ที่ navigate ไปสามชั้น
+
+App state ควรอยู่ใน Riverpod/Provider (หรือ BLoC สำหรับเคสที่ซับซ้อน async หนัก) — พิสูจน์ตลอดโมดูลนี้ว่ารอด widget rebuild เข้าถึงได้โดยไม่ prop-drill และ test แยกจาก widget ตัวไหนตัวหนึ่งได้
+
+## Layer app จริง
 
 สำหรับอะไรที่เกิน app เล่น ๆ layer หน้าที่พวกนี้เพื่อไม่ให้พันกัน:
 
 - **UI layer** — widget render state, ส่ง input ไม่มี business logic
-- **State/logic layer** — provider, BLoC, notifier ถือและ transition state
+- **State/logic layer** — provider, BLoC, notifier ถือและ transition state นี่คือ layer ที่การพิสูจน์ทุกอันในสี่บทของโมดูลนี้เล็งไปตรง ๆ ด้วย test ที่ไม่มี widget
 - **Data layer** — repository และ service คุยกับ API, database, device
 
-การเก็บ business logic และ data access ออกจาก widget คือสิ่งที่ทำให้ app test ได้และรอดเมื่อ app โตขึ้น — ไม่ว่าจะเลือก state package ตัวไหน
+การเก็บ business logic และ data access ออกจาก widget คือสิ่งที่ทำให้ app test ได้และรอดเมื่อ app โตขึ้น — ไม่ว่าจะเลือก state package ตัวไหน [บท internals Three Trees](/flutter/th/flutter-internals/three-trees/) ครอบคลุมกลไกระดับ element/widget ที่ทุก layer ข้างบนขี่อยู่จริง ๆ
+
+## Mental Model
+
+ทุกวิธีในโมดูลนี้ตอบคำถามสองข้อเดียวกันต่างกัน: "state อยู่ที่ไหนจริง ๆ?" กับ "ใครถูกบอกเมื่อมันเปลี่ยน และแม่นยำแค่ไหน?" `setState` เก็บคำตอบทั้งสองไว้ใน `State` object เดียว `InheritedWidget`/Provider ย้าย*ที่เก็บ*ออกไปใน tree แต่กลไกการ*แจ้ง*ยังเหมือนเดิม (dependency list ที่เช็คทุก update) Riverpod ย้ายที่เก็บ**ออกจาก tree ไปเลย**และแทนที่ dependency list ด้วย provider object ที่ typed ที่ขึ้นกันเองได้ BLoC เก็บ storage ไว้ใน object เดียวกันเหมือนกัน แต่แทนที่ "ใครก็ตามที่ขอล่าสุด" ด้วยชุด input ที่ปิดแล้วมีชื่อชัดเจน (`sealed` event) — การแลกความยืดหยุ่นกับความพิสูจน์ได้โดยตั้งใจ ไม่มีอันไหน "ดีกว่า" ในเชิงนามธรรม แต่ละอันคือจุดต่างกันบน trade-off เดียวกันของ scope/traceability/ceremony ที่พิสูจน์เป็นรูปธรรมในโมดูลนี้ ไม่ใช่แค่กล่าวอ้าง
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `setState` ทุกที่ แม้แต่ shared state | ไม่มี package เลย ไม่มี ceremony | prop-drilling จริงทันทีที่มีมากกว่าหนึ่งหน้าต้องการค่าเดียวกัน |
+| Provider/Riverpod สำหรับทุกอย่าง แม้แต่ toggle local ของ widget เดียว | สม่ำเสมอ — mental model เดียวทั้ง app | overhead จริง — provider, notifier, การ lookup `ref`/`context` สำหรับสิ่งที่ `setState` ทำได้บรรทัดเดียว |
+| BLoC สำหรับทั้ง app รวมถึงหน้าเล็ก ๆ | pattern สม่ำเสมอ onboard ง่ายสำหรับทีมที่คล่อง BLoC | sealed event class และ switch handler สำหรับ state ที่ไม่เคยต้องการเช็ค exhaustive ตั้งแต่แรก |
+| ผสมทั้งสี่ตาม scope (คำแนะนำจริงของบทนี้) | แต่ละชิ้นของ state ใช้ ceremony น้อยที่สุดที่ยังถูกต้อง | ต้องการวิจารณญาณที่บทนี้มีไว้สร้าง — ไม่มีกฎเดียวแทนการจัดหมวด state ให้ถูกได้ |
+
+## Common Misconceptions
+
+- **"มี state management solution ที่ถูกต้องหนึ่งเดียวสำหรับทั้ง app"** ทุกการพิสูจน์ในโมดูลนี้เป็นเรื่อง*กลไก* ไม่ใช่คำสั่ง — app จริงผสม `setState`, Riverpod, BLoC ตาม scope เหมือน decision flow ข้างบนเป๊ะ
+- **"Riverpod ดีกว่า Provider เสมอ เลยควรใช้ Riverpod ตลอด"** [บท Provider & Riverpod](/flutter/th/state-management/provider-and-riverpod/)พิสูจน์ว่า Provider ไม่ได้ deprecated และยังเป็นตัวเลือกที่สมเหตุสมผลสำหรับ app เล็กหรือทีมที่คล่อง Provider อยู่แล้ว — ข้อดีของ Riverpod (`.autoDispose`, `.select()`, compile-safety) สำคัญที่สุดตรงจุดที่ decision flow ของบทนี้พาคุณไปพอดี: app ที่ใหญ่กว่า ซับซ้อนกว่า test ได้ดีกว่า by default
+- **"sealed event กับ switch statement ของ BLoC เกินความจำเป็นทุกที่"** มันเกินความจำเป็นสำหรับ checkbox และเป็นเครื่องมือที่ถูกต้องเป๊ะทันทีที่คุณต้องการให้ analyzer รับประกันว่าทุก event ถูกจัดการ — พิสูจน์ด้วย `non_exhaustive_switch_expression` จริงในบท BLoC
+- **"lifting state up เป็นวิธีเก่าแล้ว หยิบ provider เลยดีกว่า"** มันยังเป็นการเคลื่อนไหวแรกที่ถูกต้องสำหรับ sibling สองตัวที่ share ค่าเดียว การหยิบ shared store มาก่อนลองอันนี้คือการเพิ่ม dependency สำหรับปัญหาที่ constructor parameter ธรรมดาแก้ได้อยู่แล้ว
+- **"ephemeral vs app state เป็นแค่ naming convention ไม่ใช่ความต่างจริง"** มันกำหนดความถูกต้อง ไม่ใช่แค่สไตล์: ephemeral state ใน shared store จะอยู่นานเกินประโยชน์แล้ว leak; app state ที่ติดอยู่ใน `setState` ของ widget เดียวจะหายไปทันทีที่ widget นั้น rebuild จากศูนย์หรือ sibling ต้องการค่าเดียวกัน
+
+## Reading AI-generated code
+
+ข้อผิดพลาดเชิงสถาปัตยกรรมที่ AI generate มาบ่อยที่สุดในโดเมนของโมดูลนี้ไม่ใช่ syntax bug เลย — มันคือการเลือก scope ผิดสำหรับ state ชิ้นหนึ่ง ซึ่ง compile สะอาดและโผล่เป็น bug จริง (drift, ข้อมูลเก่า, หรือ ceremony ซ้ำซ้อน) ก็ต่อเมื่อ app โตเกิน context window หน้าเดียวของ AI
+
+```dart
+// screen_a.dart — AI-generated, screen 1 of 3
+class CartScreenA extends StatefulWidget {
+  const CartScreenA({super.key});
+  @override
+  State<CartScreenA> createState() => _CartScreenAState();
+}
+
+class _CartScreenAState extends State<CartScreenA> {
+  int _cartCount = 0; // ❌ app state, trapped in one screen's local setState
+
+  void _addItem() => setState(() => _cartCount++);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(appBar: AppBar(title: Text('Cart ($_cartCount)')), body: /* ... */ const SizedBox());
+  }
+}
+```
+
+badge cart บนหน้า*อื่น*ทุกหน้า (list สินค้า, ปุ่ม checkout) ต่างก็ generate field `_cartCount` แยกของตัวเองแบบเดียวกัน — สี่สำเนาอิสระของสิ่งที่ควรเป็นค่า share เดียว แต่ละอันถูก update แค่จาก action local ของหน้าตัวเอง drift ไม่ตรงกันเงียบ ๆ ทันทีที่มีการเพิ่มของจากหน้าอื่นที่ไม่ใช่หน้าที่กำลังโชว์ badge เก่า
+
+ก่อนเชื่อ state-management code ที่ generate มา เช็คสิ่งเหล่านี้:
+
+- มี screen/widget subtree มากกว่าหนึ่งที่ต้องการค่านี้ไหม? ถ้าใช่และมันถูก implement ด้วย local `setState` นั่นคือ bug เป๊ะแบบข้างบน — กลไก ephemeral ที่ถือ app state
+- field local ของ `StatefulWidget` ตัวหนึ่งเคยถูกอ่านหรือทำซ้ำใน `StatefulWidget` *ตัวอื่น* ไหม? การทำซ้ำนั้นคือสัญญาณ — ค่านั้นต้องการ lift หรือ shared store ไม่ใช่สำเนา local ตัวที่สอง
+- Riverpod/BLoC ถูกหยิบมาใช้กับค่าที่มีแค่ widget เดียวเคยอ่าน (index ของ `PageView`, flag กางของ `Card` ตัวเดียว) ไหม? นั่นคือข้อผิดพลาดตรงข้าม — overhead จริงที่พิสูจน์ได้ (provider/notifier/event class เพิ่ม) สำหรับค่าที่ `setState` จัดการได้บรรทัดเดียวอยู่แล้ว
+- สำหรับอะไรที่ share: มันถูกวางไว้ใน provider/notifier/BLoC ที่มีอายุนานกว่าหน้าที่สร้างมันครั้งแรกจริงไหม หรือถูกสร้างใหม่ (ค่าเดิมหายไป) ทุกครั้งที่หน้านั้นถูก push อีกครั้ง?
+
+<SpotTheBug code={`// AI-generated: "add a dark mode toggle"
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool _darkMode = false; // read by MaterialApp's theme, three screens up
+
+  @override
+  Widget build(BuildContext context) {
+    return SwitchListTile(
+      value: _darkMode,
+      onChanged: (v) => setState(() => _darkMode = v),
+      title: const Text('Dark mode'),
+    );
+  }
+}`}>
+โค้ดนี้ compile สะอาดและ switch ก็สลับได้เห็นชัด — แต่ `_darkMode` เป็น local ของ `State` ของ `SettingsScreen` เอง และ comment ก็บอกใบ้ bug จริง: `theme`/`darkTheme`/`themeMode` ของ root `MaterialApp` ต้องการค่านี้ แต่มันอยู่ไกลออกไปสามหน้าจากที่ toggle นี้อยู่จริง การ toggle ตรงนี้ไม่เปลี่ยนอะไรเลยที่อื่นใน app — อาการคลาสสิกของ app state (อ่านโดย widget ที่อยู่ไกลและไม่เกี่ยวข้องกัน) ที่ implement ด้วยกลไก ephemeral (local `setState` มองเห็นได้แค่หน้านี้หน้าเดียว) วิธีแก้คือการจัดหมวดที่บทนี้สอนเป๊ะ ๆ: `_darkMode` คือ app state ดังนั้นมันควรอยู่ใน Riverpod `Notifier`/Provider `ChangeNotifier` ที่สร้างเหนือ `MaterialApp` โดยหน้านี้เรียก `ref.read(themeModeProvider.notifier).toggle()` (หรือตัวเทียบเท่าของ Provider) แทนที่จะถือสำเนาของตัวเอง
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-จับคู่เครื่องมือกับ scope: `setState` สำหรับ **ephemeral** state ที่ widget เดียวเป็นเจ้าของ, Provider/Riverpod สำหรับ **shared** state, BLoC สำหรับ flow ที่ **ซับซ้อนและ test ได้** — และลอง **lift state up** ไปที่ parent ร่วมก่อนเพิ่ม package ใด ๆ จัดหมวดทุกชิ้นของ state เป็น ephemeral หรือ app state และ layer app จริงเป็น UI, state/logic และ data เพื่อให้ widget โง่และ logic test ได้
+จับคู่เครื่องมือกับ scope โดยใช้สิ่งที่โมดูลนี้พิสูจน์จริง ไม่ใช่แค่บรรยาย: `setState` สำหรับ **ephemeral** state ที่ widget เดียวเป็นเจ้าของ (พิสูจน์แล้วว่าถูกที่สุด ไม่มี ceremony), Provider/`InheritedWidget` สำหรับ **shared** state ใน app ที่เล็กกว่า (พิสูจน์แล้วว่า rebuild เฉพาะ dependent ที่ register), Riverpod เมื่อต้องการ cache ต่อ parameter/คุม rebuild ระดับ `.select()`/async แบบ first-class (พิสูจน์ด้วย `.autoDispose` disposal จริงและการจัดการ error ของ `AsyncNotifier`), และ BLoC สำหรับ flow ที่**ซับซ้อน เช็ค exhaustive และ test ได้สูง** (พิสูจน์ด้วย analyzer error จริงและ assertion ลำดับเป๊ะของ `blocTest`) ลอง **lift state up** ไปที่ parent ร่วมก่อนเพิ่ม package ใด ๆ จัดหมวดทุกชิ้นของ state เป็น ephemeral หรือ app state — bug จริงส่วนใหญ่ในโดเมนนี้คือการจัดหมวดผิด ไม่ใช่ syntax error — และ layer app จริงเป็น UI, state/logic และ data เพื่อให้ widget โง่และ logic test ได้
 </Callout>
 
 export const quizChoosing = [
@@ -68,6 +203,7 @@ export const quizChoosing = [
       'ใช้ static global variable',
     ],
     answer: 1,
+    explain: 'lifting state up ไม่ต้องใช้ package เลย — เป็นการเคลื่อนไหวแรกที่ถูกที่สุดก่อนหยิบ Provider, Riverpod หรือ BLoC',
   },
   {
     q: 'state ไหนควรอยู่ใน shared store มากกว่าใน widget เดียว?',
@@ -78,26 +214,51 @@ export const quizChoosing = [
       'ค่าของ text field ในเครื่อง',
     ],
     answer: 2,
+    explain: 'app state (auth, cart) ถูกอ่านโดย widget ที่ไม่เกี่ยวข้องกันหลายตัวทั่ว tree — ตรงกับเหตุผลที่ InheritedWidget/Provider/Riverpod มีอยู่ พิสูจน์ตลอดโมดูลนี้',
   },
   {
-    q: 'ประโยชน์ของการ layer app เป็น UI, state/logic และ data คืออะไร?',
+    q: 'ตามตาราง trade-off ที่รีเฟรชในบทนี้ ต้นทุนจริงที่พิสูจน์แล้วเฉพาะของสไตล์ codegen @riverpod ของ Riverpod (เทียบกับ provider เขียนมือ) คืออะไร?',
     options: [
-      'ทำให้ app เล็กลง',
-      'business logic และ data access อยู่นอก widget ทำให้ app test ได้เมื่อโตขึ้น',
-      'ลบความต้องการ state',
-      'เลี่ยงการใช้ Dart',
+      'มันไม่สามารถแสดง async state ได้เลย',
+      'build_runner เข้ามาอยู่ใน build loop และมีไฟล์ .g.dart ที่ generate จริงที่ analyzer ของคุณตรวจ พิสูจน์ตรง ๆ จาก output isAutoDispose: true ที่ generate ในบท Provider & Riverpod',
+      'ไม่มี learning curve เลย',
+      'test ไม่ได้',
     ],
     answer: 1,
+    explain: 'provider ของ Riverpod ที่เขียนมือไม่ต้องมีขั้นตอน codegen; @riverpod แลกสิ่งนั้นกับ boilerplate ที่น้อยลงและ type ที่ infer ให้ ด้วยต้นทุน build_runner dependency จริง',
   },
   {
-    q: 'app จริงผสม setState, Riverpod และ BLoC ได้ไหม?',
+    q: 'บท BLoC & Patterns พิสูจน์อะไรเกี่ยวกับ testability ที่ตารางของบทนี้สะท้อนเป็นคอลัมน์คะแนนสูงสุดของ BLoC?',
     options: [
-      'ไม่ได้ ต้องเลือกอย่างเดียว',
-      'ได้ — ใช้ setState สำหรับชิ้นเล็ก, provider สำหรับ shared state, และ BLoC เฉพาะที่ความซับซ้อนสมควร',
-      'เฉพาะใน test',
-      'เฉพาะถ้าเลี่ยง widget',
+      'BLoC unit test ไม่ได้เลย',
+      'blocTest assert ลำดับ state ที่ emit เป๊ะตามลำดับโดยไม่มี widget เกี่ยวข้องเลย',
+      'BLoC test ได้แค่ด้วย widget test เท่านั้น',
+      'testability เหมือนกันทั้งสี่วิธี',
     ],
     answer: 1,
+    explain: 'expect: () => [...] ของ blocTest เทียบลำดับ state ที่ emit เป๊ะตามค่า (ต้องขอบคุณ Equatable) คือการพิสูจน์ testability ที่แม่นยำที่สุดในบรรดาวิธีของโมดูลนี้',
+  },
+  {
+    q: 'ในตัวอย่าง SpotTheBug dark-mode bug จริงคืออะไร และทำไม compile สะอาด?',
+    options: [
+      'syntax error ใน widget SwitchListTile',
+      'app state (ค่า theme ที่ root MaterialApp อ่าน) ถูก implement เป็น ephemeral state (local setState ในหน้าที่ไกลออกไป) — compile ผ่านสะอาดเพราะไม่มีอะไรตรงนั้นเป็น type error มีแค่ความผิดพลาดเรื่อง scope',
+      'setState ถูกเรียกนอก build()',
+      'widget ขาด key',
+    ],
+    answer: 1,
+    explain: 'ความผิดพลาดในการจัดหมวด — กลไก ephemeral ที่ถือ app state — คือ bug จริงที่พบบ่อยที่สุดในโดเมนนี้ และมันไม่เคยโผล่เป็น compiler error',
+  },
+  {
+    q: 'ความต่างเชิงปฏิบัติของ "rebuild scope" ที่พิสูจน์ระหว่าง setState กับ buildWhen ของ BlocBuilder (หรือ .select() ของ Riverpod) คืออะไร?',
+    options: [
+      'เหมือนกันทุกกรณี',
+      'setState rebuild build() ทั้งก้อนของ State ตัวเอง (ดันให้ต่ำใน tree เพื่อจำกัด); buildWhen/.select() ให้คุณ rebuild เฉพาะสไลซ์ที่เลือกไว้ของการเปลี่ยน shared state — พิสูจน์ด้วย build counter ที่นิ่งตลอดสี่ event ที่ไม่เกี่ยวข้อง',
+      'setState ไม่เคย rebuild อะไรเลย',
+      'buildWhen rebuild ทุกครั้งที่ state เปลี่ยนเสมอ เหมือนไม่มี buildWhen เลย',
+    ],
+    answer: 1,
+    explain: 'บท BLoC พิสูจน์ว่า capBannerBuildCount ค้างที่ 1 ตลอดสี่การเปลี่ยน state ที่ไม่ผ่าน predicate ของ buildWhen — คุมได้ละเอียดกว่า rebuild แบบทั้งหมดหรือไม่มีเลยของ setState อย่างเห็นได้ชัด',
   },
 ];
 
