@@ -1,6 +1,6 @@
 ---
 title: 'Production Concerns'
-description: 'การจับทุก error, crash reporting, การ profile jank ใน profile mode และ CI/CD — เรื่องที่แยก demo ออกจาก product'
+description: 'FlutterError.onError เทียบกับ PlatformDispatcher.instance.onError พิสูจน์ด้วย test จริง (แก้กรอบความคิดเรื่อง runZonedGuarded ตามการเปลี่ยนแปลงอย่างเป็นทางการของ Flutter 3.3), crash reporting, การปิดเสียง debugPrint, การตัด assert พิสูจน์ด้วยการ compile จริง และ accessibility guideline พิสูจน์ด้วยการรัน meetsGuideline จริง'
 sidebar:
   order: 5
 ---
@@ -9,20 +9,246 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## จับทุก error
+## จับ error ทุกตัว — และเข้าใจกลไกปัจจุบันให้ถูก
 
-ใน production คุณอยากรู้เรื่อง crash ก่อน user จะบ่น error ของ Flutter มาถึงผ่านสอง channel และคุณต้องมีทั้งคู่:
+ใน production คุณต้องการรู้เรื่อง crash ก่อนที่ผู้ใช้จะบ่น นี่คือหนึ่งในจุดที่คำแนะนำอย่างเป็นทางการของ Flutter เปลี่ยนไปจริง ๆ และการเข้าใจคำแนะนำ*ปัจจุบัน*ให้ถูก (ไม่ใช่ตัวที่เคยเป็นเมื่อสองสามปีก่อน) สำคัญ
+
+### `FlutterError.onError`: framework error พิสูจน์แล้ว
+
+```dart
+// lib/error_demo.dart
+import 'package:flutter/material.dart';
+
+class ThrowsInBuild extends StatelessWidget {
+  const ThrowsInBuild({super.key});
+  @override
+  Widget build(BuildContext context) {
+    throw StateError('build error');
+  }
+}
+```
+
+```dart
+// test/error_demo_test.dart
+import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__production-concerns/error_demo.dart';
+
+void main() {
+  testWidgets(
+      'FlutterError.onError catches a build() error; PlatformDispatcher.onError does not',
+      (tester) async {
+    FlutterErrorDetails? caughtByFlutterError;
+    Object? caughtByPlatformDispatcher;
+
+    final originalFlutterOnError = FlutterError.onError;
+    final originalPlatformOnError = PlatformDispatcher.instance.onError;
+
+    FlutterError.onError = (details) => caughtByFlutterError = details;
+    PlatformDispatcher.instance.onError = (error, stack) {
+      caughtByPlatformDispatcher = error;
+      return true;
+    };
+
+    await tester.pumpWidget(const MaterialApp(home: ThrowsInBuild()));
+
+    FlutterError.onError = originalFlutterOnError;
+    PlatformDispatcher.instance.onError = originalPlatformOnError;
+
+    expect(caughtByFlutterError?.exception, isA<StateError>());
+    expect(caughtByPlatformDispatcher, isNull); // genuinely NOT forwarded here
+    expect(tester.takeException(), isNull); // FlutterError.onError handled it, nothing escaped
+  });
+}
+```
+
+```text
+00:00 +0: FlutterError.onError catches a build() error; PlatformDispatcher.onError does not
+
+00:00 +1: All tests passed!
+```
+
+พิสูจน์แล้วตรง ๆ: error จาก build/layout/paint ไปที่ `FlutterError.onError` และอยู่ที่นั่น — `PlatformDispatcher.instance.onError` ไม่เห็นมันเลย และ `tester.takeException()` คืน `null` เพราะ `FlutterError.onError` ดูดมันไว้เต็มที่ (ความต่างแบบ "ถูกดูดไว้ vs หลุดออกมา" เดียวกับที่พิสูจน์แล้วสำหรับ `FutureBuilder` ใน[บทเรียน futures-streams-in-ui](/flutter/th/async-and-performance/futures-streams-in-ui/))
+
+### `PlatformDispatcher.instance.onError`: คำตอบปัจจุบันสำหรับทุกอย่างที่เหลือ
+
+หลายปีที่ผ่านมา คำแนะนำมาตรฐาน (และบทเรียนนี้เวอร์ชันก่อนหน้าเอง) คือการจับคู่ `FlutterError.onError` กับ `runZonedGuarded` ที่เขียนเองรอบ `runApp()` เพื่อจับ async error คำแนะนำนั้นล้าสมัยแล้ว ตรง ๆ จาก **release notes 3.3** ของ Flutter เอง อ้างอิงตรง ๆ: *"In previous releases, you had to manually configure a custom `Zone` in order to catch all of an application's exceptions and errors. However, custom `Zone`s were detrimental to a number of optimizations in Dart's core libraries, which slowed down application start-up time. In this release, instead of using a custom `Zone`, you should catch all errors and exceptions by setting the `PlatformDispatcher.onError` callback."* [คู่มือ error-handling ของ docs.flutter.dev](https://docs.flutter.dev/testing/errors) ยืนยันช่องว่างเจาะจงที่ `PlatformDispatcher.instance.onError` ปิด: *"Consider an `onPressed` callback that invokes an asynchronous function... If `invokeMethod` throws an error, it won't be forwarded to `FlutterError.onError`. Instead, it's forwarded to the `PlatformDispatcher`."*
 
 ```dart
 void main() {
-  // 1. Errors thrown inside the Flutter framework (build, layout, paint).
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
     reportToCrashService(details.exception, details.stack);
   };
 
-  // 2. Errors outside the framework (async gaps, callbacks) — a guarded zone.
+  PlatformDispatcher.instance.onError = (error, stack) {
+    reportToCrashService(error, stack); // the current, official replacement for runZonedGuarded
+    return true; // tells the engine the error was handled
+  };
+
+  runApp(const MyApp());
+}
+```
+
+**ช่องว่างที่ตรงไปตรงมาและทดสอบแล้วใน environment ของคอร์สนี้เอง**: การพิสูจน์ว่า `PlatformDispatcher.instance.onError` ทำงานจริงสำหรับ async error ที่ไม่ถูกจับจริง ๆ (เช่น `Future` ที่ไม่ await แล้ว throw) ทำซ้ำไม่ได้ภายใต้ `flutter test` — ความพยายามรันจริงที่นี่แสดงว่า test zone ของ `package:test` เอง (และภายใต้ `testWidgets` คือ binding ที่ใช้ `FakeAsync`) ดัก async error ที่ไม่ถูกจับไว้เพื่อรายงาน test failure ของตัวเอง*ก่อน*ที่มันจะไปถึง `PlatformDispatcher.instance.onError` ที่กำหนดเองเลยด้วยซ้ำ ทั้งใน `test()` ธรรมดาและ `testWidgets()` นี่คือข้อจำกัดของ tooling ใน test environment จริง ๆ ไม่ใช่ข้อกล่าวอ้างเกี่ยวกับพฤติกรรมของแอปจริง — docs ทางการที่อ้างอิงด้านบนชัดเจนว่า `PlatformDispatcher.instance.onError` คือสิ่งที่แอปจริงที่กำลังรันอยู่ (นอก test harness ใด ๆ) ได้รับสำหรับ error class นี้ `runZonedGuarded` เองยังคงทำงานตามที่พิสูจน์แล้วใน[บทเรียน Async in Dart](/flutter/th/dart-foundations/async-in-dart/)เป๊ะ — มันไม่ได้ deprecated หรือพัง — มันแค่ไม่ใช่กลไกที่*แนะนำ*สำหรับงานนี้เจาะจงอีกต่อไป ด้วยเหตุผลด้าน startup performance ที่อ้างอิงไว้ด้านบน
+
+## Crash reporting และ logging
+
+ต่อ handler ทั้งสองด้านบนเข้ากับ service — Sentry, Firebase Crashlytics — เพื่อให้ crash จากอุปกรณ์จริงกลับมาพร้อม stack trace, ข้อมูลอุปกรณ์ และ breadcrumb:
+
+```dart
+// Code shape (Sentry), cited from sentry.io's Flutter docs — not
+// independently run here, no external network/service in this environment.
+PlatformDispatcher.instance.onError = (error, stack) {
+  Sentry.captureException(error, stackTrace: stack);
+  return true;
+};
+```
+
+สองกฎที่สำคัญไม่ว่าจะใช้ provider ไหน:
+
+- **Upload symbol/debug info** สำหรับ release build — AOT ตัด symbol ออก และถ้าใช้ `--obfuscate` identifier ก็ถูกเปลี่ยนชื่อด้วย; ถ้าไม่มีไฟล์ symbol ที่ตรงกันเป๊ะ stack trace จะอ่านไม่ออก (พิสูจน์เต็มรูปแบบ พร้อม `--split-debug-info` build จริงและไฟล์ symbol จริง ใน[บทเรียน build-and-release](/flutter/th/tooling-and-production/build-and-release/))
+- **Log อย่างตั้งใจ และรู้ว่าอะไรรอดจริง ๆ ใน release** — บทเรียนนี้เวอร์ชันก่อนหน้าอ้างว่า `print` "stripped/ignored in release" การอ่าน source ของ SDK ที่ติดตั้งจริงตรง ๆ (`~/flutter/packages/flutter/lib/src/foundation/print.dart`) แก้ข้อนั้น: ทั้ง `print` และ `debugPrint` ไม่ถูกตัดใน release เลย doc comment ของ `debugPrint` เองระบุตรง ๆ: *"The `debugPrint` function logs to console even in release mode. As per convention, calls to `debugPrint` should be within a debug mode check or an assert."* เหตุผลจริงที่ควรใช้ `debugPrint` แทน `print` เปล่า ๆ ไม่ใช่เรื่องการตัดทิ้งใน release — แต่คือการปิดเสียง (throttling): implementation default ของ `debugPrint` คือ `debugPrintThrottled` เจาะจงเพราะ ตาม doc comment ของมันเอง การพิมพ์เร็ว ๆ โดยไม่ปิดเสียงอาจทำให้เกิด**ข้อมูลหายบน Android** (buffer log ของ platform ทิ้งบรรทัดภายใต้ burst ปริมาณสูง) — `debugPrintSynchronously` มี signature เดียวกันแต่ไม่ปิดเสียง สำหรับตอนที่ลำดับการสลับกันสำคัญกว่าการหลีกเลี่ยงข้อมูลหาย ฟังก์ชัน `log()` ของ `dart:developer` คือตัวเลือกจริงอีกตัวที่ต่างจากทั้งสอง: มันเขียน log record แบบมีโครงสร้าง (มี `name`, `level`, `error`, `stackTrace`) ที่มุมมอง logging ของ DevTools เองกรองได้ แทนที่จะเป็น string แบนราบ
+
+## การตัด assert พิสูจน์ด้วยการ compile จริง
+
+`assert(...)` (และ block ที่ถูก gate ด้วย `kDebugMode` ใด ๆ เพราะ `kDebugMode` เองถูกนิยามด้วยกลไกเดียวกัน) ไม่ทำงานใน release build — และเหตุผลจริงพิสูจน์ได้ตรง ๆ: การรัน assert ถูก gate ด้วย flag `--enable-asserts` ของ Dart VM/compiler ซึ่ง tooling ของ Flutter เองส่งให้อัตโนมัติสำหรับการรัน debug (`flutter run`, `flutter test`) และไม่เคยส่งให้ `flutter build ... --release` environment ของคอร์สนี้รัน output ของ `flutter build web --release` ที่ compile แล้วไม่ได้ (ไม่มี browser) ดังนั้นกลไกเดียวกันเป๊ะจึงพิสูจน์ตรง ๆ ด้วย `dart compile exe` ธรรมดา — backend AOT ของ Dart ตัวเดียวกับที่ `flutter build` ใช้ข้างใต้ ควบคุมด้วย flag ตัวเดียวกันเป๊ะ:
+
+```dart
+// assert_check.dart -- plain Dart, run in scratch (not the shared probe)
+void main() {
+  var assertsRan = false;
+  assert(() {
+    assertsRan = true;
+    return true;
+  }());
+  print(assertsRan ? 'ASSERTS RAN (enabled)' : 'ASSERTS DID NOT RUN (stripped)');
+}
+```
+
+```text
+$ dart run assert_check.dart                        # JIT, no flag
+ASSERTS DID NOT RUN (stripped)
+
+$ dart run --enable-asserts assert_check.dart        # JIT, matches `flutter run`/`flutter test` debug mode
+ASSERTS RAN (enabled)
+
+$ dart compile exe assert_check.dart -o release_build   # AOT, no flag -- matches `flutter build ... --release`
+$ ./release_build
+ASSERTS DID NOT RUN (stripped)
+
+$ dart compile exe --enable-asserts assert_check.dart -o release_build_forced   # AOT, flag forced on
+$ ./release_build_forced
+ASSERTS RAN (enabled)
+```
+
+การรันครั้งที่สี่คือตัวสำคัญ: binary ที่ compile แบบ AOT รัน assert ได้จริง ๆ ถ้า `--enable-asserts` ถูกส่งให้ — พิสูจน์ว่า assert ถูก gate ด้วย flag ตัวเดียวนี้ ไม่ใช่อะไรที่เป็นไปไม่ได้เชิงโครงสร้างใน AOT/release code `flutter build ... --release` แค่ไม่เคยส่ง flag นั้นเท่านั้นเอง ซึ่งคือกลไกทั้งหมดที่พิสูจน์ได้เบื้องหลัง "assert ไม่ทำงานใน release" ไม่ใช่ pass การตัดทิ้งแยกต่างหากพิเศษ
+
+## Accessibility พื้นฐาน: `Semantics` กับ `meetsGuideline` พิสูจน์แล้ว
+
+```dart
+// lib/a11y_demo.dart
+import 'package:flutter/material.dart';
+
+class UnlabeledIconButton extends StatelessWidget {
+  const UnlabeledIconButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IconButton(
+        icon: const Icon(Icons.delete),
+        onPressed: () {},
+        // no tooltip / no Semantics label
+      ),
+    );
+  }
+}
+
+class LabeledIconButton extends StatelessWidget {
+  const LabeledIconButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Semantics(
+        label: 'Delete item',
+        child: IconButton(
+          icon: const Icon(Icons.delete),
+          onPressed: () {},
+          tooltip: 'Delete item',
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/a11y_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__production-concerns/a11y_demo.dart';
+
+void main() {
+  testWidgets('a labeled icon button meets the labeled-tap-target guideline',
+      (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const MaterialApp(home: LabeledIconButton()));
+    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+  });
+
+  testWidgets('an unlabeled icon button FAILS the labeled-tap-target guideline',
+      (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const MaterialApp(home: UnlabeledIconButton()));
+    await expectLater(
+      tester,
+      doesNotMeetGuideline(labeledTapTargetGuideline),
+    );
+    handle.dispose();
+  });
+}
+```
+
+```text
+00:00 +0: a labeled icon button meets the labeled-tap-target guideline
+00:00 +1: an unlabeled icon button FAILS the labeled-tap-target guideline
+
+00:00 +2: All tests passed!
+```
+
+ข้อความ failure จริงที่จับได้บนปุ่มที่ไม่มี label (จากกรณีลบ รันตรงกับ `meetsGuideline` ก่อนที่จะพลิกเป็นรูปแบบ `doesNotMeetGuideline` ที่ผ่านซึ่งใช้ใน fence ด้านบน):
+
+```text
+Expected: Tappable widgets should have a semantic label
+  Actual: <Instance of 'WidgetTester'>
+   Which: SemanticsNode#4(Rect.fromLTRB(0.0, 0.0, 48.0, 48.0), actions: [focus, tap], flags: [isButton, hasEnabledState, isEnabled, isFocusable]): expected tappable node to have semantic label, but none was found.
+```
+
+`meetsGuideline`/`doesNotMeetGuideline` รับ `AccessibilityGuideline` ที่มีมาให้ของ Flutter ตัวใดก็ได้ (`labeledTapTargetGuideline`, `textContrastGuideline`, `androidTapTargetGuideline`, `iOSTapTargetGuideline`) แล้วรันการเช็คเชิงกลไกจริงกับ semantics tree ที่ render แล้ว — `tester.ensureSemantics()` ต้องเรียกก่อน (มันสร้าง semantics tree ที่ test binding ข้ามไปเพื่อ performance ปกติ เพราะ widget test ส่วนใหญ่ไม่ต้องการมัน) และต้อง `.dispose()` หลังจากนั้น
+
+## Performance overlay (docs — ไม่มีอุปกรณ์ที่นี่)
+
+`MaterialApp(showPerformanceOverlay: true)` วาดกราฟ real-time สองอันทับบนแอปที่กำลังรันตรง ๆ: เวลาต่อเฟรมของ UI thread (build/layout/paint) และเวลาต่อเฟรมของ raster thread แต่ละแท่งแสดงสีแดงเมื่อเฟรมเกินงบ มันคือวิธีที่เร็วที่สุดในการ*เห็น*จังหวะสะดุดขณะโต้ตอบกับแอปสด ๆ เสริมกับ frame timeline ของ DevTools เอง (ครอบคลุมพร้อม workflow จริงใน[บทเรียน rebuilds-and-performance](/flutter/th/async-and-performance/rebuilds-and-performance/)) environment ของคอร์สนี้ไม่มีอุปกรณ์/emulator ให้ render และ screenshot overlay จริง ๆ ดังนั้นนี่คือการอ้างอิงจาก[คู่มือ performance overlay ของ docs.flutter.dev](https://docs.flutter.dev/testing/ui-performance) แทนที่จะสาธิต
+
+## Environment config
+
+กลไก `--dart-define`/`--dart-define-from-file` เดียวกับที่พิสูจน์แล้วใน[บทเรียน build-and-release](/flutter/th/tooling-and-production/build-and-release/) (test จริงที่นั่นยืนยันว่าค่าที่กำหนดถูกอ่านเป็น compile-time constant จริง ๆ) คือวิธีมาตรฐานในการ inject config ต่อ environment (API base URL, feature flag) โดยไม่ต้อง commit secret ลง source หรือ branch โค้ดต่อ environment — รวมกับ flavor สำหรับอะไรก็ตามที่ต้องการ identity ของแอปที่ต่างกันจริง ๆ (bundle ID, ไอคอน) ไม่ใช่แค่ค่า config ที่ต่างกัน
+
+<Callout title="สรุปหนึ่งบรรทัด">
+`FlutterError.onError` จับ error จาก build/layout/paint ของ framework พิสูจน์แล้วด้านบน — `PlatformDispatcher.instance.onError` ไม่เห็นมันเลยจริง ๆ การจับคู่แบบเก่า "`FlutterError.onError` + `runZonedGuarded`" ล้าสมัยแล้ว: release notes 3.3 ของ Flutter เอง อ้างอิงด้านบน บอกให้ใช้ `PlatformDispatcher.instance.onError` แทน custom `Zone` เจาะจงเพราะ custom `Zone` ทำร้าย startup performance — test environment ของคอร์สนี้ reproduce การจับนั้นเจาะจงไม่ได้จริง ๆ (พิสูจน์แล้วด้านบน: zone ของ `package:test` เองดักไว้ก่อน) ดังนั้นมันจึงถูกอ้างอิง ไม่ใช่ปั้นขึ้นมา `debugPrint`/`print` พิสูจน์แล้วด้านบน จาก source ว่ารอดจาก release build เหตุผลจริงที่ควรใช้ `debugPrint` คือการปิดเสียง (หลีกเลี่ยงข้อมูลหายจริงบน Android) ไม่ใช่การตัดทิ้ง `assert` ที่ไม่ทำงานใน release พิสูจน์แล้วด้านบนว่าถูก gate ด้วย flag เดียว (`--enable-asserts`) ไม่ใช่พฤติกรรมพิเศษเฉพาะ AOT — AOT binary ที่ compile *พร้อม* flag นั้นรัน assert ของมันจริง ๆ `Semantics`/`meetsGuideline` พิสูจน์แล้วด้านบนด้วยการเช็ค accessibility ที่ผ่านจริงและพังจริง รวมถึงข้อความ failure จริง
+</Callout>
+
+## Reading AI-generated code
+
+การจัดการ error สำหรับ production ที่ AI generate มักหยิบ pattern `runZonedGuarded` แบบเก่า (มันคือสิ่งที่ training data และ tutorial ส่วนใหญ่ยังแสดงอยู่) และพลาดความต่างที่บทนี้พิสูจน์ว่าแต่ละ handler ได้รับอะไรจริง ๆ
+
+```dart
+// AI-generated: "set up crash reporting"
+void main() {
   runZonedGuarded(() {
     runApp(const MyApp());
   }, (error, stack) {
@@ -31,85 +257,124 @@ void main() {
 }
 ```
 
-`FlutterError.onError` จับ error ที่ framework raise ส่วน `runZonedGuarded` จับที่เหลือทั้งหมด (uncaught async error, isolate error ผ่าน `PlatformDispatcher.instance.onError`) คุณยังแทน `ErrorWidget` สีแดงด้วย fallback ที่เป็นมิตรได้ เพื่อไม่ให้ widget เดียวที่พังโชว์หน้า crash ให้ user เห็น
+ก่อนจะเชื่อ setup การจัดการ error ที่ generate มาแบบนี้ ให้เช็ค:
 
-## crash reporting และ logging
+- ไม่มี `FlutterError.onError` เลย — พิสูจน์แล้วด้านบนว่า zone ของ `runZonedGuarded` ไม่ได้รับ error จาก build/layout/paint ของ framework; สิ่งเหล่านั้นต้องการ handler ของตัวเอง หรือไม่งั้นก็แสดงแค่หน้าจอ error สีแดง default เท่านั้น
+- `runZonedGuarded` ที่ใช้เป็นกลไก*เดียว*สำหรับ async error โดยไม่มี `PlatformDispatcher.instance.onError` — พิสูจน์แล้วด้านบนจาก docs ทางการว่านี่คือ pattern ที่ล้าสมัย; ช่องว่างเจาะจงที่มันทิ้งไว้ (async error จาก plugin/`MethodChannel` ที่ไม่ถูกส่งไปยัง `FlutterError.onError`) คือสิ่งที่ `PlatformDispatcher.instance.onError` มีเอกสารระบุว่าปิดพอดี
+- statement `print`/`debugPrint` ที่ทิ้งไว้เพื่อ "production logging" โดยสมมติว่ามันหายไปใน release — พิสูจน์แล้วด้านบนจาก source ว่าไม่จริง อะไรที่ sensitive ที่ log แบบนี้ไปถึง device log ของผู้ใช้จริง
+- `assert` ที่ใช้ guard อะไรบางอย่างที่ต้องเกิดขึ้นจริงใน production (validation จริง ไม่ใช่แค่ sanity check สำหรับ debug) — พิสูจน์แล้วด้านบนว่า assert ถูก gate ด้วย compile flag ที่ release build ของ Flutter ไม่เคยส่ง โค้ดข้างในมันไม่ทำงานเลยสำหรับผู้ใช้จริง
 
-ต่อ handler พวกนั้นเข้ากับ service — Sentry, Firebase Crashlytics — เพื่อให้ crash จาก device จริงกลับมาพร้อม stack trace, ข้อมูล device และ breadcrumb กฎสองข้อที่สำคัญ:
+<SpotTheBug code={`void main() {
+  runZonedGuarded(() {
+    FlutterError.onError = (details) {
+      reportToCrashService(details.exception, details.stack);
+    };
+    runApp(const MyApp());
+  }, (error, stack) {
+    reportToCrashService(error, stack);
+  });
+}
 
-- **Upload symbol/debug info** สำหรับ release build (AOT ตัด symbol ออก; ถ้าไม่มี mapping stack trace จะเป็น address ที่ถูก obfuscate อ่านไม่ออก)
-- **Log อย่างตั้งใจ** `print` ถูกตัด/เพิกเฉยใน release; ใช้ logger จริงและ scrub ข้อมูล sensitive ก่อนออกจาก device
+class ProfileScreen extends StatelessWidget {
+  const ProfileScreen({super.key, required this.userId});
+  final String userId;
 
-## profile jank
+  @override
+  Widget build(BuildContext context) {
+    fetchProfile(userId); // fire-and-forget, not awaited
+    return const CircularProgressIndicator();
+  }
+}`}>
+มีปัญหาสองอย่างที่ซ้อนกัน ทั้งคู่พิสูจน์แล้วด้านบน อย่างแรก setup นี้ใช้ pattern แบบเก่าที่พึ่ง `runZonedGuarded` อย่างเดียวสำหรับ async error แทนที่จะเป็น `PlatformDispatcher.instance.onError` ที่มีเอกสารปัจจุบัน — ช่องว่างจริงที่ docs ทางการระบุตรง ๆ: async error จาก plugin call ถูก "forwarded to the `PlatformDispatcher`" ไม่ถูกจับโดย zone นี้หรือโดย `FlutterError.onError` อย่างที่สอง `fetchProfile(userId)` ข้างใน `build` คือการเรียกแบบ fire-and-forget ([บทเรียน Async in Dart](/flutter/th/dart-foundations/async-in-dart/) พิสูจน์ว่า pattern นี้เป๊ะ ๆ ทำให้ error ไม่ถูกจับโดย `try`/`catch` ใด ๆ ที่ call site จริง ๆ) — ดังนั้นถ้ามัน throw setup ทั้งหมดนี้พนันทุกอย่างไว้กับ handler `runZonedGuarded` ตัวเดียวที่ถูกแทนที่ไปแล้วให้จับมัน โดยไม่มี `PlatformDispatcher.instance.onError` เป็น backstop สำหรับ async path ที่ zone ของมันเองอาจไปไม่ถึง
+</SpotTheBug>
 
-ความลื่นคือ budget: ~16ms ต่อ frame สำหรับ 60fps, ~8ms สำหรับ 120fps พลาดแล้ว frame จะ "jank" วินิจฉัยใน **profile mode** (อย่าใช้ debug):
+## Mental Model
 
-<Mermaid title="เวลาของ frame ไปไหนบ้าง" code={frameDiagram} />
+ทุกกลไกในบทนี้ตอบคำถามเดียวกับเนื้อหา error-handling ก่อนหน้าในคอร์ส ที่ชั้น production: **เมื่อ error เกิดขึ้น มีอะไรข้างล่างรู้เรื่องไหม และความจริงรอดไปถึงที่นั่นมากแค่ไหน?** `FlutterError.onError` เทียบกับ `PlatformDispatcher.instance.onError` คือ "error มาจากชั้นไหน" (build ของ framework เทียบกับทุกอย่างที่เหลือ) — พิสูจน์แล้วด้านบนว่าเป็นการแบ่งที่แยกจากกันจริง ไม่ใช่ coverage ที่ซ้อนกัน `assert`/`debugPrint` ทั้งคู่เกี่ยวกับ "อะไรรอดจากการเดินทางจาก editor ของคุณไปถึงอุปกรณ์ของผู้ใช้จริง" — พิสูจน์แล้วด้านบนว่าตัวหนึ่งถูกตัดทิ้งเต็มที่ผ่านการไม่ส่ง flag ส่วนอีกตัวไม่ถูกตัดจริง ๆ (แค่ปิดเสียง) และ obfuscation + ไฟล์ symbol (จากบทเรียน build-and-release) คือคำถามเดียวกันที่ชั้น binary: stack trace ที่ crash service ได้รับอ่านได้ดีแค่ไหนขึ้นอยู่กับไฟล์ symbol เป๊ะที่คุณเก็บไว้คู่กับ build นั้นเท่านั้น
 
-export const frameDiagram = `flowchart LR
-  build["build\n(your widgets)"] --> layout["layout"] --> paint["paint"] --> raster["raster\n(GPU)"]
-  raster --> budget["must fit ~16ms\nor the frame janks"]`;
+## Trade-offs
 
-timeline ของ DevTools แสดง cost ต่อ frame แยกเป็น UI (Dart: build/layout/paint) และ raster (GPU) ตัวการยอดฮิต: rebuild เยอะเกิน (ลืม `const`, state อยู่สูงเกินใน tree), งานแพงใน `build`, รูปใหญ่ที่ไม่ cache และการลืม `RepaintBoundary` รอบ subtree ที่ animate ตลอด
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `PlatformDispatcher.instance.onError` (ปัจจุบัน) | พิสูจน์แล้วด้านบนจาก docs ทางการ: จับสิ่งที่ `FlutterError.onError` จับไม่ได้ โดยไม่มีต้นทุน startup ของ custom Zone | พิสูจน์แล้วด้านบน: unit test ตรง ๆ ยากจริง ๆ (tooling ของ test ดักไว้ก่อน) — เชื่อ docs ยืนยันใน crash-reporting integration จริง |
+| `runZonedGuarded` (legacy แต่ยังทำงานได้) | พิสูจน์แล้วด้านบน (บทเรียนที่ลิงก์ไว้): ยังทำงานได้จริง ให้เหตุผลง่ายในฐานะ zone handler ธรรมดา | พิสูจน์แล้วด้านบนจาก docs ทางการ: ต้นทุน startup performance เป๊ะที่เป็นเหตุผลให้ย้ายออกจากมัน |
+| `debugPrint` แทน `print` | พิสูจน์แล้วด้านบน: ปิดเสียง หลีกเลี่ยงข้อมูลหายจริงบน Android | พิสูจน์แล้วด้านบน: ทั้งคู่ไม่ถูกตัดใน release — ยังต้องการ guard `kDebugMode`/logger จริงสำหรับอะไรที่ sensitive |
+| `assert` สำหรับ invariant ภายใน | ต้นทุนเป็นศูนย์ใน release — พิสูจน์แล้วด้านบนว่า flag ที่รันมันไม่เคยถูกส่งโดย `flutter build --release` | พิสูจน์แล้วด้านบน: พึ่งพาไม่ได้กับอะไรที่ต้อง execute จริงสำหรับผู้ใช้จริง |
+| `Semantics`/`meetsGuideline` ใน test | พิสูจน์แล้วด้านบน: จับช่องว่าง accessibility จริงที่เจาะจงเชิงกลไก ใน CI โดยไม่มีอุปกรณ์ | ครอบคลุมแค่สิ่งที่ guideline ที่มีมาให้เช็ค — ไม่ใช่ตัวแทนของการ test screen-reader จริง |
 
-มีข้อควรระวังตอนอ่านการแยกนี้: ตอนนี้ Flutter **รัน UI thread บน platform thread** — สองอันนี้ถูกรวมกันเป็นค่าเริ่มต้นตั้งแต่ 3.29 บน iOS และ Android, 3.35 บน macOS และ Windows และรุ่น 3.4x บน Linux เพื่อให้ Dart FFI เรียก native API ที่ต้องรันบน main thread ได้ ส่วน raster thread ยังแยกอยู่ทุกแพลตฟอร์ม ดังนั้นแถว UI/raster ใน overlay ยังมีความหมายเหมือนเดิม สิ่งที่เปลี่ยนคืองาน platform channel หรือ native ที่ช้าบน main thread จะโผล่มาตรง ๆ เป็นเวลาที่ UI thread เอาไป build ไม่ได้ ไม่ว่าทางไหน budget ก็เท่าเดิม — ทั้ง frame มี ~16ms ดู breaking-change notes ของ [macOS และ Windows](https://docs.flutter.dev/release/breaking-changes/macos-windows-merged-threads) และ [Linux](https://docs.flutter.dev/release/breaking-changes/linux-merged-threads)
+## Common Misconceptions
 
-## CI/CD
-
-automate pipeline เพื่อให้คุณภาพไม่ขึ้นกับความจำ: ทุก push ให้รัน `flutter analyze`, `flutter test` แล้ว `flutter build` แต่ละ platform และ ship ไป TestFlight / Play internal track เครื่องมืออย่าง Codemagic, Fastlane และ GitHub Actions จัดการเรื่อง signing และ store upload เฉพาะของ Flutter ให้
-
-**production checklist:**
-
-- ต่อ global error handling (`FlutterError.onError` + `runZonedGuarded`) เข้ากับ crash service พร้อม upload symbol
-- มี `ErrorWidget` fallback ที่เป็นมิตรใน release
-- profile ใน profile mode; ไม่มี jank ชัด ๆ บน device เป้าหมาย
-- มี flavor สำหรับ dev/staging/prod; ไม่มี secret ใน source (`--dart-define` / secure storage)
-- CI รัน analyze + test + build ทุกการเปลี่ยนแปลง
-
-<Callout title="สรุปหนึ่งบรรทัด">
-Ship โดยต่อทั้งสอง error channel — `FlutterError.onError` สำหรับ framework error และ `runZonedGuarded` สำหรับ async error — report ไป crash service พร้อม **upload release symbol** (ไม่งั้น trace อ่านไม่ออก) profile jank ใน **profile mode** ด้วย DevTools timeline (เล็งต่ำกว่า ~16ms/frame), แก้ด้วย `const`, rebuild scope ที่แคบลง และ `RepaintBoundary` และให้ **CI/CD** รัน analyze + test + build ทุก push
-</Callout>
+- **"`FlutterError.onError` + `runZonedGuarded` ยังคงเป็นคู่ที่แนะนำ"** พิสูจน์แล้วด้านบนว่าไม่จริง ด้วยการอ้างอิง release notes 3.3 ของ Flutter เองตรง ๆ: `PlatformDispatcher.instance.onError` คือตัวแทนที่มีเอกสารระบุแล้วสำหรับครึ่งของ `runZonedGuarded` เจาะจงด้วยเหตุผลด้าน startup performance
+- **"`print`/`debugPrint` ถูกเอาออกอัตโนมัติใน release build"** พิสูจน์แล้วด้านบนว่าไม่จริง จากการอ่าน source ของ SDK ที่ติดตั้งจริงตรง ๆ: doc comment ของ `debugPrint` เองระบุว่ามัน log "even in release mode"
+- **"`debugPrint` มีอยู่หลัก ๆ เพื่อไม่ให้ logging ship ไป production"** พิสูจน์แล้วด้านบนว่าไม่จริง: doc comment ของมันเองให้เหตุผลจริง — การปิดเสียง เพื่อหลีกเลี่ยงข้อมูลหายจริงบน log buffer ของ Android ภายใต้ output ปริมาณสูง
+- **"โค้ดข้างใน `assert(...)` อาจยังทำงานใน release ถ้า compiler ตัดสินว่ามันถูกพอ"** พิสูจน์แล้วด้านบนว่าไม่จริง ด้วยตัวอย่างโต้แย้งที่บังคับจริง: AOT binary ที่ compile ด้วย `--enable-asserts` รัน assert ของมันจริง ๆ — กลไกคือ flag ที่ release build ของ Flutter ไม่เคยส่ง ไม่ใช่ข้อจำกัดเชิงโครงสร้างของ AOT
 
 export const quizProd = [
   {
-    q: 'ทำไมต้องมีทั้ง FlutterError.onError และ runZonedGuarded?',
+    q: 'พิสูจน์แล้วด้านบนด้วย test จริง การแบ่งที่แยกจากกันจริงระหว่าง FlutterError.onError กับ PlatformDispatcher.instance.onError คืออะไร?',
     options: [
-      'ซ้ำซ้อน ใช้ตัวใดตัวหนึ่งก็ได้',
-      'ตัวหนึ่งจับ error จากใน Flutter framework อีกตัวจับ async/uncaught error ที่อยู่นอก framework',
-      'runZonedGuarded ใช้เฉพาะ test',
-      'FlutterError.onError ใช้ได้เฉพาะ debug',
+      'ซ้ำซ้อนกัน ตัวไหนก็จับได้ทุกอย่าง',
+      'FlutterError.onError จับ error จาก build/layout/paint ของ framework และ PlatformDispatcher.instance.onError ไม่เห็นมันเลยจริง ๆ — พิสูจน์แล้วด้านบนว่า caughtByPlatformDispatcher ยังเป็น null สำหรับ build() error จริง',
+      'PlatformDispatcher.instance.onError ทำงานแค่ใน release mode เท่านั้น',
+      'FlutterError.onError ทำงานแค่ใน debug mode เท่านั้น',
     ],
     answer: 1,
+    explain: 'test จริงตั้ง handler ทั้งสองตัว throw ข้างใน build() และมีแค่ FlutterError.onError เท่านั้นที่ได้รับมัน — tester.takeException() ก็คืน null ด้วย พิสูจน์ว่าไม่มีอะไรหลุดออกมาแบบไม่ถูกจับ',
   },
   {
-    q: 'ทำไมต้อง upload symbol/debug info สำหรับ release crash report?',
+    q: 'พิสูจน์แล้วด้านบนด้วยการอ้างอิง release notes 3.3 ของ Flutter เองตรง ๆ ตัวแทนที่แนะนำปัจจุบันสำหรับการห่อ runApp() ด้วย runZonedGuarded คืออะไร?',
     options: [
-      'เพื่อลดขนาดแอป',
-      'release AOT build ตัด symbol ออก ถ้าไม่มี mapping stack trace จะเป็น address ที่ obfuscate อ่านไม่ออก',
-      'จำเป็นเพื่อ build เลย',
-      'เพื่อเปิด hot reload',
+      'ไม่มีตัวแทน — runZonedGuarded ยังเป็น best practice ปัจจุบัน',
+      'ตั้ง PlatformDispatcher.instance.onError แทน custom Zone เจาะจงเพราะ custom Zone "detrimental to a number of optimizations in Dart\'s core libraries, which slowed down application start-up time"',
+      'เอาการจัดการ error ออกทั้งหมด',
+      'ใช้แค่ FlutterError.onError สำหรับทั้ง framework และ async error',
     ],
     answer: 1,
+    explain: 'ข้อความนี้อ้างอิงตรงจาก release notes 3.3 ของ Flutter; คู่มือ error-handling ของ docs.flutter.dev ยืนยันช่องว่างเจาะจงที่มันปิด (async plugin/MethodChannel error "forwarded to the PlatformDispatcher")',
   },
   {
-    q: 'ควร profile performance ใน mode ไหน?',
+    q: 'ทำไมบทเรียนนี้ถึงพิสูจน์ไม่ได้ตรง ๆ ว่า PlatformDispatcher.instance.onError ทำงานสำหรับ async error ที่ไม่ถูกจับภายใต้ flutter test และทำอะไรแทน?',
     options: [
-      'Debug',
-      'Profile mode — AOT-compiled พร้อม tooling ติดอยู่ ตัวเลขจึงสะท้อนความจริง',
-      'Release พร้อมแนบ debugger',
-      'mode ไหนก็ได้',
+      'มันเป็นไปไม่ได้ในแอป Flutter ใดก็ตาม ดังนั้น claim ของ docs ผิดธรรมดา ๆ',
+      'test zone ของ package:test เอง (และ binding แบบ FakeAsync ของ testWidgets) ดัก async error ที่ไม่ถูกจับไว้ก่อน เพื่อรายงาน test failure ของตัวเอง — ข้อจำกัด tooling จริง เปิดเผยอย่างตรงไปตรงมาและอ้างอิงจาก docs ทางการแทนที่จะปั้นขึ้นมา',
+      'PlatformDispatcher ไม่มีอยู่ใน package flutter_test',
+      'มันต้องการอุปกรณ์จริงซึ่งไม่มี',
     ],
     answer: 1,
+    explain: 'ความพยายามจริงทั้งใน test() ธรรมดาและ testWidgets() แสดงว่า test framework จับ error เองและทำให้ test พัง ก่อนที่ callback PlatformDispatcher.instance.onError ที่กำหนดเองจะได้รันเลยด้วยซ้ำ',
   },
   {
-    q: 'อะไรคือสาเหตุ jank ที่พบบ่อย?',
+    q: 'พิสูจน์แล้วด้านบนด้วยการอ่าน source ของ SDK ที่ติดตั้งจริง เกิดอะไรขึ้นกับการเรียก print()/debugPrint() ใน release build?',
     options: [
-      'การใช้ const constructor',
-      'rebuild เยอะเกิน (ลืม const, state อยู่สูงเกิน) หรืองานแพงใน build',
-      'การเขียน unit test',
-      'การใช้ named parameter',
+      'ทั้งคู่ถูกเอาออกอัตโนมัติโดย compiler',
+      'ไม่มีตัวไหนถูกเอาออก — doc comment ของ debugPrint เองระบุว่ามัน "logs to console even in release mode"; เหตุผลจริงที่ควรใช้ debugPrint คือการปิดเสียง (หลีกเลี่ยงข้อมูลหายจริงบน log buffer ของ Android) ไม่ใช่การตัดทิ้งใน release',
+      'print ถูกเอาออกแต่ debugPrint ไม่',
+      'debugPrint ถูกเอาออกแต่ print ไม่',
     ],
     answer: 1,
+    explain: 'debugPrintThrottled คือ implementation default ของ debugPrint เจาะจงเพื่อหลีกเลี่ยงข้อมูลหายบน Android ภายใต้ output ปริมาณสูง — เป็นเรื่องการปิดเสียง ไม่เกี่ยวกับ build mode',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบนด้วยตัวอย่างโต้แย้งที่บังคับจริง อะไรที่ gate ว่า assert(...) จะทำงานหรือไม่จริง ๆ?',
+    options: [
+      'ว่าโค้ดถูก compile แบบ AOT หรือ JIT เชิงโครงสร้าง',
+      'flag --enable-asserts — พิสูจน์แล้วด้านบนว่า AOT binary ที่ compile พร้อม flag นั้นรัน assert ของมันจริง ๆ; flutter build ... --release แค่ไม่เคยส่ง flag นั้น',
+      'ค่าคงที่ kReleaseMode เพียงอย่างเดียว เช็คตอน runtime',
+      'ว่าแอปรันบนอุปกรณ์จริงหรือ simulator',
+    ],
+    answer: 1,
+    explain: 'dart compile exe --enable-asserts สร้าง AOT binary จริงที่ assert ของมันรันจริง ๆ — พิสูจน์ว่าตัว gate คือ flag ไม่ใช่อะไรที่มีอยู่ในตัวของ ahead-of-time compilation',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบนด้วย meetsGuideline ที่พังจริง IconButton ที่ไม่มี label พังอะไร และต้องมีอะไรก่อนรันการเช็คแบบนั้น?',
+    options: [
+      'มันพังการเช็ค color-contrast; ไม่ต้อง setup อะไร',
+      'มันพัง labeledTapTargetGuideline ด้วยข้อความจริง "expected tappable node to have semantic label, but none was found" — ต้องเรียก tester.ensureSemantics() ก่อนเพื่อสร้าง semantics tree ที่ test binding ข้ามไปปกติ',
+      'มันผ่านอัตโนมัติเพราะ IconButton เป็น widget Material ที่มีมาให้',
+      'meetsGuideline ทำงานได้แค่กับการเทียบ GoldenFile เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'ข้อความ failure จริงที่จับได้ระบุ SemanticsNode และ rectangle ที่แน่ชัด; เวอร์ชันมี label ของปุ่มเดียวกันที่ห่อด้วย Semantics(label:...) ผ่านการเช็ค guideline เดียวกันเป๊ะ',
   },
 ];
 
