@@ -1,6 +1,6 @@
 ---
 title: 'Platform Channels'
-description: 'เข้าถึง native code จาก Dart — MethodChannel สำหรับการเรียก, EventChannel สำหรับ native stream, โมเดล async message-passing, plugin และการ declare asset'
+description: 'MethodChannel และ EventChannel พิสูจน์ด้วย mock API จริงของ TestDefaultBinaryMessenger, ข้อความจริงของ MissingPluginException, Pigeon codegen ที่รันจริง (Dart + Kotlin + Swift), Kotlin built-in ตั้งแต่ 3.44, federated plugin, dart:ffi และ BackgroundIsolateBinaryMessenger'
 sidebar:
   order: 5
 ---
@@ -9,14 +9,15 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## เมื่อ Dart อย่างเดียวไม่พอ
+## เมื่อ Dart ไม่พอ
 
-Flutter วาด pixel ของตัวเอง แต่บางอย่างอยู่แค่ใน native OS — ระดับแบตเตอรี่, sensor เฉพาะ, platform SDK, secure enclave การจะเข้าถึงของพวกนี้ Flutter ใช้ **platform channel**: ท่อส่งข้อความแบบ async ที่มี type ระหว่าง Dart code กับ native (Kotlin/Java บน Android, Swift/Objective-C บน iOS)
+Flutter วาด pixel ของตัวเอง แต่บางอย่างอยู่แค่ใน native OS เท่านั้น — battery level, sensor เฉพาะตัว, platform SDK, secure enclave เพื่อเข้าถึงมัน Flutter ใช้ **platform channel**: message pipe แบบ typed และ asynchronous ระหว่างโค้ด Dart ของคุณกับ native (Kotlin/Java บน Android, Swift/Objective-C บน iOS)
 
-โมเดลก็คือ async message passing แบบเดียวกับที่คุณรู้จักจาก Dart อยู่แล้ว: คุณส่งข้อความ, ฝั่ง native จัดการ แล้ว `Future` complete พร้อมคำตอบ ไม่มีอะไร block UI thread
+โมเดลนี้คือ async message passing แบบเดียวกับที่คุณรู้จักจาก Dart อยู่แล้ว: คุณส่ง message, ฝั่ง native จัดการมัน แล้ว `Future` ก็ complete ด้วยคำตอบ ไม่มีอะไร block UI thread เลย
 
-<Mermaid title="round-trip ของ MethodChannel" code={channelDiagram} />
+<Mermaid title="MethodChannel round-trip ไปกลับ" code={channelDiagram} />
 
 export const channelDiagram = `flowchart LR
   dart["Dart\ninvokeMethod('getBattery')"] -->|message| platform["platform channel"]
@@ -24,45 +25,282 @@ export const channelDiagram = `flowchart LR
   native -->|reply| platform
   platform -->|Future completes| dart`;
 
-## MethodChannel: เรียก native method
+## `MethodChannel` — เรียก native method พิสูจน์จริง
 
-`MethodChannel` ตั้งชื่อท่อและให้คุณ `invokeMethod` บนท่อนั้น การเรียกเป็น async และ return `Future` พร้อมผลลัพธ์จาก native argument และผลลัพธ์เป็น type มาตรฐาน (number, string, list, map) ที่ถูก serialize ข้ามขอบเขต
+`MethodChannel` ตั้งชื่อ pipe แล้วให้คุณ `invokeMethod` บนมันได้ การเรียกเป็น async และ return `Future` ที่มีผลลัพธ์จาก native argument กับ result เป็น type มาตรฐาน (number, string, list, map) ที่ถูก serialize ข้าม boundary ด้วย `MethodCodec` — codec เดียวกับที่ mock handler ข้างล่าง round-trip ผ่าน ดังนั้น test พิสูจน์การ (de)serialize จริง ไม่ใช่แค่ stub
 
 ```dart
-const channel = MethodChannel('samples.app/battery');
+// lib/battery_channel.dart
+import 'package:flutter/services.dart';
+
+const batteryChannel = MethodChannel('samples.app/battery');
 
 Future<int> getBatteryLevel() async {
-  try {
-    final level = await channel.invokeMethod<int>('getBatteryLevel');
-    return level ?? -1;
-  } on PlatformException catch (e) {
-    // native side reported an error
-    return -1;
+  final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+  return level ?? -1;
+}
+```
+
+`flutter_test` มี mock messenger จริงสำหรับเรื่องนี้โดยเฉพาะ: `TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, handler)` ดักจับ channel แล้วให้ test ของคุณเล่นบทฝั่ง native
+
+```dart
+// test/battery_channel_test.dart
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/battery_channel.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+
+  tearDown(() {
+    // Always unregister — a handler left behind leaks into the next test.
+    messenger.setMockMethodCallHandler(batteryChannel, null);
+  });
+
+  test('a mocked native handler answers invokeMethod through the real codec round trip', () async {
+    messenger.setMockMethodCallHandler(batteryChannel, (call) async {
+      expect(call.method, 'getBatteryLevel');
+      return 76;
+    });
+    expect(await getBatteryLevel(), 76);
+  });
+
+  test('a native-side error surfaces as a real PlatformException', () async {
+    messenger.setMockMethodCallHandler(batteryChannel, (call) async {
+      throw PlatformException(code: 'UNAVAILABLE', message: 'Battery info unavailable');
+    });
+    expect(
+      () => batteryChannel.invokeMethod<int>('getBatteryLevel'),
+      throwsA(isA<PlatformException>().having((e) => e.code, 'code', 'UNAVAILABLE')),
+    );
+  });
+
+  test('with NO handler registered at all, invokeMethod throws the real MissingPluginException text', () async {
+    // No setMockMethodCallHandler call in this test — nothing is listening.
+    expect(
+      () => batteryChannel.invokeMethod<int>('getBatteryLevel'),
+      throwsA(isA<MissingPluginException>().having(
+        (e) => e.toString(),
+        'message',
+        'MissingPluginException(No implementation found for method getBatteryLevel on channel samples.app/battery)',
+      )),
+    );
+  });
+}
+```
+
+```text
+✓ a mocked native handler answers invokeMethod through the real codec round trip
+✓ a native-side error surfaces as a real PlatformException
+✓ with NO handler registered at all, invokeMethod throws the real MissingPluginException text
+
+00:00 +3: All tests passed!
+```
+
+ข้อความจริงของ test ที่สาม — `MissingPluginException(No implementation found for method getBatteryLevel on channel samples.app/battery)` — คือ `toString()` จริงของ `MissingPluginException` (`packages/flutter/lib/src/services/message_codec.dart`: `'MissingPluginException($message)'`) และมันคือสิ่งที่คุณได้จริง ๆ ในแอปจริงที่เรียก channel ที่ไม่มี platform implementation เลย (ไม่มี plugin ไม่มี native code) เคยลงทะเบียนไว้ — ไม่ใช่สมมติฐาน เป็นข้อความตัวเป๊ะที่ bug report "หา plugin ไม่เจอ" ทุกอันมี
+
+## `EventChannel` — stream ของ native event พิสูจน์จริง
+
+ในขณะที่ `MethodChannel` คือหนึ่งการเรียกหนึ่งคำตอบ **`EventChannel`** ส่ง **stream** ของ event จาก native — sensor update, การเปลี่ยนแปลง connectivity, location มัน map เข้ากับ Dart `Stream` ดังนั้นคุณ consume มันเหมือน stream ปกติทุกประการ
+
+```dart
+// lib/accelerometer_channel.dart
+import 'package:flutter/services.dart';
+
+const accelerometerChannel = EventChannel('samples.app/accelerometer');
+
+Stream<double> accelerometerReadings() {
+  return accelerometerChannel.receiveBroadcastStream().cast<double>();
+}
+```
+
+`flutter_test` มี mock ที่เทียบเท่าสำหรับ stream: `setMockStreamHandler(channel, MockStreamHandler.inline(onListen: ...))` — `onListen` ได้รับ `MockStreamHandlerEventSink` ที่มี `success`/`error`/`endOfStream` เลียนแบบ `EventSink` ของ native จริง
+
+```dart
+// test/accelerometer_channel_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/accelerometer_channel.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+
+  test('EventChannel stream delivers mocked native events, in order, then closes', () async {
+    messenger.setMockStreamHandler(
+      accelerometerChannel,
+      MockStreamHandler.inline(
+        onListen: (Object? arguments, MockStreamHandlerEventSink sink) {
+          sink.success(1.0);
+          sink.success(2.0);
+          sink.endOfStream();
+        },
+      ),
+    );
+
+    final received = await accelerometerReadings().toList();
+    expect(received, [1.0, 2.0]);
+  });
+}
+```
+
+```text
+✓ EventChannel stream delivers mocked native events, in order, then closes
+
+00:00 +1: All tests passed!
+```
+
+## Pigeon: channel แบบ type-safe ที่ generate ได้ — รันจริง
+
+`invokeMethod('getBatteryLevel')` ที่เขียนเองเป็น stringly-typed ทั้งสองฝั่ง — การพิมพ์ชื่อ method ผิดหรือ argument shape ไม่ตรงกันคือความล้มเหลวตอน runtime ไม่ใช่ compile error ทั้งฝั่ง Dart **และ** ฝั่ง native **Pigeon** (ปัจจุบัน: 29.0.4 บน pub.dev) generate typed Dart API และ native interface ที่ตรงกัน (Kotlin, Swift และอื่น ๆ) จากไฟล์ Dart ไฟล์เดียว ดังนั้นการเปลี่ยนชื่อหรือ type จะ compile ไม่ผ่านทุกที่ที่ใช้ แทนที่จะพังแบบเงียบ ๆ ที่ channel boundary
+
+```dart
+// pigeons/battery.dart — the Pigeon *definition* file (not part of the shipped app)
+import 'package:pigeon/pigeon.dart';
+
+@ConfigurePigeon(PigeonOptions(
+  dartOut: 'lib/battery.g.dart',
+  kotlinOut: 'android/app/src/main/kotlin/com/example/app/Battery.g.kt',
+  kotlinOptions: KotlinOptions(package: 'com.example.app'),
+  swiftOut: 'ios/Runner/Battery.g.swift',
+))
+@HostApi()
+abstract class BatteryHostApi {
+  int getBatteryLevel();
+}
+```
+
+รัน generator จริง (`dart run pigeon --input pigeons/battery.dart`, pigeon 29.0.4 ไม่มี output ขึ้น console ตอนสำเร็จ — ไฟล์สามไฟล์ข้างล่างคือผลลัพธ์จริง ไม่ได้แก้อะไรเลย):
+
+```dart
+// generated by Pigeon — lib/battery.g.dart (real output, trimmed to the parts you call)
+// Autogenerated from Pigeon (v29.0.4), do not edit directly.
+
+class BatteryHostApi {
+  BatteryHostApi({BinaryMessenger? binaryMessenger, String messageChannelSuffix = ''})
+      : pigeonVar_binaryMessenger = binaryMessenger,
+        pigeonVar_messageChannelSuffix =
+            messageChannelSuffix.isNotEmpty ? '.$messageChannelSuffix' : '';
+
+  final BinaryMessenger? pigeonVar_binaryMessenger;
+  final String pigeonVar_messageChannelSuffix;
+
+  Future<int> getBatteryLevel() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.pigeon_demo.BatteryHostApi.getBatteryLevel$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final pigeonVar_replyList = await pigeonVar_channel.send(null) as List<Object?>?;
+    final pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as int;
   }
 }
 ```
 
-ฝั่ง native ลงทะเบียน handler สำหรับชื่อ channel เดียวกัน แล้ว switch บน method string เพื่อรัน platform code จริง
+```kotlin
+// generated by Pigeon — android/.../Battery.g.kt (real output, trimmed)
+/** Generated interface from Pigeon that represents a handler of messages from Flutter. */
+interface BatteryHostApi {
+  fun getBatteryLevel(): Long
 
-## EventChannel: stream ของ native event
-
-`MethodChannel` คือการเรียกหนึ่งครั้งตอบหนึ่งครั้ง ส่วน **`EventChannel`** ส่ง **stream** ของ event จาก native — sensor update, การเปลี่ยน connectivity, location ซึ่ง map ไปเป็น Dart `Stream` คุณจึง consume ได้แบบเดียวกับ stream อื่น ๆ
-
-```dart
-const events = EventChannel('samples.app/accelerometer');
-
-Stream<AccelData> accelerometer() {
-  return events.receiveBroadcastStream().map((e) => AccelData.parse(e));
+  companion object {
+    @JvmOverloads
+    fun setUp(binaryMessenger: BinaryMessenger, api: BatteryHostApi?, messageChannelSuffix: String = "") {
+      val channel = BasicMessageChannel<Any?>(
+        binaryMessenger,
+        "dev.flutter.pigeon.pigeon_demo.BatteryHostApi.getBatteryLevel",
+        codec,
+      )
+      if (api != null) {
+        channel.setMessageHandler { _, reply ->
+          val wrapped: List<Any?> = try {
+            listOf(api.getBatteryLevel())
+          } catch (exception: Throwable) {
+            BatteryPigeonUtils.wrapError(exception)
+          }
+          reply.reply(wrapped)
+        }
+      } else {
+        channel.setMessageHandler(null)
+      }
+    }
+  }
 }
 ```
 
-## plugin เทียบกับ raw channel
+คุณ implement `BatteryHostApi` เป็น Kotlin class ธรรมดา `class MainBatteryApi : BatteryHostApi { override fun getBatteryLevel(): Long = ... }` แล้วเรียก `BatteryHostApi.setUp(binaryMessenger, MainBatteryApi())` ครั้งเดียว — channel name string, codec และ message envelope ไม่เคยถูกเขียนหรืออ่านด้วยมือทั้งสองฝั่งเลย Swift stub (`ios/Runner/Battery.g.swift`) ถูก generate ด้วยวิธีเดียวกันจาก `pigeons/battery.dart` เดียวกัน
 
-คุณแทบไม่ต้องเขียน channel code ด้วยมือ **plugin** คือ package ที่ห่อ platform channel บวกกับ native implementation ไว้หลัง Dart API ที่สะอาด — `battery_plus`, `geolocator`, `camera` ให้หยิบ plugin ที่ดูแลดีมาใช้ก่อน แล้วค่อยเขียน raw channel เฉพาะสิ่งที่ specific กับแอปคุณเท่านั้น
+<Callout title="Codegen ไม่ใช่ส่วนหนึ่งของแอป">
+Pigeon (`dart run pigeon`) รันเป็นคำสั่ง developer ครั้งเดียวกับไฟล์ definition รูปแบบเดียวกับ `dart run build_runner build` สำหรับ `@riverpod`/`go_router_builder` ที่อื่นในคอร์สนี้ — ไฟล์ `.g.dart`/`.g.kt`/`.g.swift` ที่ *generate* ออกมาถูก ship ไปพร้อมแอป; `package:pigeon` เองเป็น `dev_dependency` ไม่เคยเป็น runtime dependency เลย
+</Callout>
 
-## การ declare asset
+```yaml
+# pubspec.yaml
+dev_dependencies:
+  pigeon: ^29.0.4
+```
 
-ไม่ใช่เรื่อง native แต่เป็นส่วนหนึ่งของโครงสร้างแอป: รูปภาพ, font และ JSON ที่คุณ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้ถูกรวมไปกับแอป
+## Kotlin built-in มาตั้งแต่ Flutter 3.44
+
+โค้ด plugin/host ของ Android แต่ก่อนต้องการ Kotlin Gradle plugin แยกต่างหากที่ config ด้วยมือ release notes ของ Flutter เอง 3.44 ระบุเรื่องนี้ตรง ๆ — "Add Support For Built-in Kotlin" (landed, revert ชั่วคราว แล้ว re-land ใน cycle 3.44 เดียวกัน ตาม entry ของ changelog ใน release notes เอง) — หมายความว่าโปรเจกต์ Flutter ใหม่เอี่ยมสามารถใช้ Kotlin ในโค้ด host ฝั่ง Android (แบบที่ `Battery.g.kt` ที่ generate ข้างบนทำ) โดยไม่ต้องเพิ่มและ pin version ของ Kotlin Gradle plugin เองก่อน
+
+## Plugin เทียบ raw channel และ federated plugin
+
+คุณแทบไม่ต้องเขียนโค้ด channel หรือ Pigeon ด้วยมือสำหรับความต้องการทั่วไปเลย **plugin** คือ package ที่ห่อ platform channel (มากขึ้นเรื่อย ๆ ที่ Pigeon-generate) บวก native implementation ไว้หลัง Dart API ที่สะอาด — `battery_plus`, `geolocator`, `camera` เอื้อมไปหา plugin ที่ดูแลดีก่อน เขียน raw channel (หรือ Pigeon definition) เองเฉพาะสิ่งที่เฉพาะเจาะจงกับแอปคุณจริง ๆ
+
+plugin ของ Flutter ทางการส่วนใหญ่วันนี้เป็นแบบ **federated**: แยกออกเป็น app-facing package, platform-interface package และ implementation package หนึ่งตัวต่อ platform — ยกจาก [docs การพัฒนา package ของ Flutter เอง](https://docs.flutter.dev/packages-and-plugins/developing-packages) ตรง ๆ: *"Federated plugins are a way of splitting the API of a plugin into a platform interface, independent platform implementations of that interface, and an app-facing interface that uses the registered implementation of the running platform."* คุณ depend แค่บน app-facing package; platform implementation ที่ถูกต้องถูก resolve ให้คุณ `pubspec.yaml` ของ platform implementation package ประกาศว่ามันครอบคลุม platform ไหนใต้ `flutter: plugin: platforms:` — รูปแบบจริงเดียวกับที่ docs โชว์:
+
+```yaml
+# A federated platform-implementation package's pubspec.yaml
+flutter:
+  plugin:
+    implements: hello
+    platforms:
+      windows:
+        pluginClass: HelloPlugin
+```
+
+```yaml
+# The app-facing package's pubspec.yaml — endorses a default implementation per platform
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.example.hello
+        pluginClass: HelloPlugin
+      ios:
+        pluginClass: HelloPlugin
+      windows:
+        default_package: hello_windows
+```
+
+## `dart:ffi` — อีกวิธีเข้าถึง native code
+
+Platform channel มีไว้เรียกเข้า API เฉพาะของ Android/iOS ผ่าน glue code ของ Kotlin/Swift สำหรับการเรียก native **C** library ตรง ๆ (ไม่มี layer ของ Kotlin/Swift เลย — image codec, crypto library, C/C++ engine ที่มีอยู่แล้ว) Dart มีกลไกแยกต่างหากที่ระดับต่ำกว่า: `dart:ffi` ยกจาก [docs FFI/C-interop ทางการของ Dart](https://dart.dev/interop/c-interop) ตรง ๆ: *"Dart mobile, command-line, and server apps running on the Dart Native platform can use the `dart:ffi` library to call native C APIs, and to read, write, allocate, and deallocate native memory."* มันเป็นเครื่องมือคนละตัวสำหรับงานคนละแบบ — platform channel คุยกับ platform-specific SDK ผ่าน native glue code ที่คุณเขียน; `dart:ffi` คุยตรงกับ C ABI ไม่ต้องมี channel หรือ native glue เลย (แต่ยังต้อง bundle ตัว C library เองสำหรับ target platform อยู่ดี)
+
+## `BackgroundIsolateBinaryMessenger` — platform channel นอก main isolate
+
+การเรียก platform channel ปกติรันบน root isolate การเรียกมันจาก **background isolate** (ใน `compute()` หรือ `Isolate.run` ครอบคลุมในโมดูล async-and-performance) ต้องการขั้นตอนเพิ่มอีกหนึ่งขั้น: `BackgroundIsolateBinaryMessenger.ensureInitialized(token)` โดย `token` คือ `RootIsolateToken` ที่ได้มาจาก root isolate *ก่อน* spawn background isolate (`ServicesBinding.rootIsolateToken` ยกจาก doc comment ของ class เองใน SDK 3.47.5 ที่ติดตั้งอยู่ `packages/flutter/lib/src/services/_background_isolate_binary_messenger_io.dart`) แล้วส่งข้ามไป ถ้าไม่เรียก `ensureInitialized` ก่อน `BackgroundIsolateBinaryMessenger.instance` จะ throw — ยกจาก source เดียวกันตรง ๆ: *"The BackgroundIsolateBinaryMessenger.instance value is invalid until BackgroundIsolateBinaryMessenger.ensureInitialized is executed."*
+
+```dart
+// On the root isolate, before spawning:
+final rootToken = ServicesBinding.rootIsolateToken!;
+
+// Inside the background isolate's entry point:
+BackgroundIsolateBinaryMessenger.ensureInitialized(rootToken);
+// Platform channel calls now work on THIS isolate too.
+```
+
+## การประกาศ asset
+
+ไม่ใช่ native แต่เป็นส่วนหนึ่งของโครงสร้างแอป: รูป, font และ JSON ที่คุณ bundle ต้องประกาศใน `pubspec.yaml` ถึงจะ ship ไปพร้อมแอป
 
 ```yaml
 flutter:
@@ -80,50 +318,135 @@ flutter:
 Image.asset('assets/images/logo.png');
 ```
 
+## Mental Model
+
+platform channel คือ `invokeMethod`/`EventChannel` ฝั่ง Dart และ handler ที่ลงทะเบียนโดย key ด้วย channel-name string เดียวกันเป๊ะฝั่ง native — ไม่มีอะไรเชื่อมทั้งสองฝั่งตอน compile time เลย นั่นคือเหตุผลที่ `MissingPluginException` ที่พิสูจน์ไว้ข้างบนคือ bug ของ platform channel ที่พบบ่อยที่สุดตัวเดียว: channel name (หรือ platform) แค่ไม่มีใครฟังอยู่เลย Pigeon ไม่ได้เปลี่ยน wire format นั้นเลย — มันคือ named-channel, same-codec message pipe เดียวกันข้างใต้ — มันแค่ generate glue code ของการ match string, cast type ทั้งสองฝั่งจาก definition ที่ใช้ร่วมกันไฟล์เดียว ดังนั้นความไม่ตรงกันกลายเป็น compile error ใน generated code แทนที่จะเป็น string mismatch ตอน runtime `dart:ffi` เป็นคนละ tree ไปเลย — ไม่มี channel ไม่มี native glue เรียกตรงเข้า C ABI
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `MethodChannel`/`EventChannel` เขียนเอง | ไม่มี dependency เพิ่ม ควบคุมได้เต็มที่ | stringly-typed ทั้งสองฝั่ง; ไม่ตรงกันคือ `MissingPluginException`/crash ตอน runtime ไม่ใช่ compile error |
+| channel ที่ Pigeon generate | compile-time-safe ทั้งฝั่ง Dart และ native, source of truth เดียว | มี codegen step (`dart run pigeon`) อยู่ในลูป ยังเป็น channel เดียวกันข้างใต้อยู่ดี |
+| plugin ที่ดูแลดี (`battery_plus`, `geolocator`, ...) | ไม่ต้องเขียนหรือดูแล channel code เองเลย | พึ่งการดูแลของคนอื่น; ควบคุม native behavior ที่แน่นอนได้น้อยกว่า |
+| `dart:ffi` | เข้าถึง C ABI ตรง ๆ ไม่มี platform glue code เลย | ระดับต่ำกว่า (จัดการ memory เอง); ใช้ได้แค่กับ C library จริง ไม่ใช่ platform SDK |
+| `BackgroundIsolateBinaryMessenger` | เรียก platform channel นอก main isolate ได้ | มีขั้นตอน `ensureInitialized` เพิ่มอีกขั้นที่ต้องส่ง token จาก root isolate ก่อน |
+
+## Common Misconceptions
+
+- **"`MissingPluginException` แปลว่า plugin package หายไปจาก `pubspec.yaml`"** มันแปลว่าไม่มีอะไรตอบ *channel name นั้นเป๊ะ ๆ* — พิสูจน์แล้วข้างบน exception เดียวกันเกิดจาก channel ที่เขียนเองโดยไม่มี plugin เกี่ยวข้องเลย เมื่อไหร่ก็ตามที่แค่ไม่มี handler ลงทะเบียนไว้ (native-side code ยังไม่ได้เขียน, platform ผิด หรือ channel name พิมพ์ผิด)
+- **"Pigeon แทนที่ platform channel ด้วยอะไรบางอย่าง"** มัน generate โค้ด `MethodChannel`/`BasicMessageChannel` เดียวกับที่คุณจะเขียนเองด้วยมือ — พิสูจน์แล้วข้างบน Dart ที่ generate ยังสร้าง `BasicMessageChannel` ด้วย channel-name string และ codec ข้างใต้
+- **"คุณเรียก platform channel จาก isolate ไหนก็ได้โดยไม่ต้อง setup พิเศษ"** มีแค่ root isolate เท่านั้นที่ได้มาฟรี — background isolate ต้องการ `BackgroundIsolateBinaryMessenger.ensureInitialized(token)` ก่อน ไม่งั้น `.instance` throw `StateError` ตาม source ที่ยกมาข้างบน
+- **"`dart:ffi` กับ platform channel แก้ปัญหาเดียวกัน แค่ความเร็วต่างกัน"** มันแก้ปัญหาคนละแบบ: platform channel เข้าถึง SDK เฉพาะของ platform (Android/iOS API) ผ่าน native glue code; `dart:ffi` เข้าถึง C ABI ตรง ๆ ไม่มี platform glue และไม่มี channel เกี่ยวข้องเลย
+- **"Federated plugin คือ Flutter คิดค้น plugin architecture ใหม่โดยไม่มีเหตุผล"** มันแก้ปัญหาจริง: API เดียวที่ app-facing กับ platform implementation ที่สลับได้สะอาด ๆ (รวมถึง platform ที่ community มีส่วนร่วม) — พิสูจน์ด้วยการแยกเป็นสองไฟล์จริง (`implements: hello` ฝั่ง platform, `default_package:` ฝั่ง app-facing) ที่ยกมาจาก docs ข้างบน
+
+## Reading AI-generated code
+
+pattern ที่ AI-generated เจอบ่อยมาก คือเรียก platform channel โดยไม่เคยห่อด้วย `try`/`catch` เลย — มันทำงานได้ใน demo (เครื่องที่มี plugin จริงติดตั้งอยู่) แล้ว throw exception ที่ไม่ถูกจัดการครั้งแรกที่มันรันที่ไหนสักแห่งที่ native side ไม่ได้ต่อสายไว้ (platform คนละตัว, CI simulator ใหม่เอี่ยม, plugin ที่ลงทะเบียนไม่สำเร็จอย่างเงียบ ๆ)
+
+```dart
+// AI-generated: "get the battery level and show it"
+Future<void> showBatteryLevel() async {
+  final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+  print('Battery: $level%');
+}
+```
+
+โค้ดนี้ compile ผ่านสะอาดและทำงานได้ดีในกรณีทั่วไป พิสูจน์แล้วข้างบน โหมดความล้มเหลวจริงเมื่อไม่มีอะไรตอบ channel คือ `MissingPluginException` ไม่ใช่ผลลัพธ์เป็น null — `print('Battery: $level%')` ไม่เคยรันเลยด้วยซ้ำ `await` throw ก่อนถึงบรรทัดนั้น ทางแก้ห่อโหมดความล้มเหลวที่เป็นไปได้จริงทั้งสองแบบ:
+
+```dart
+Future<void> showBatteryLevel() async {
+  try {
+    final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+    print('Battery: $level%');
+  } on MissingPluginException {
+    print('No native battery implementation registered on this platform.');
+  } on PlatformException catch (e) {
+    print('Native side reported an error: ${e.message}');
+  }
+}
+```
+
+<SpotTheBug code={`// AI-generated: "read accelerometer data off the main thread to avoid jank"
+Future<void> startAccelerometerInBackground() async {
+  await Isolate.run(() {
+    final events = EventChannel('samples.app/accelerometer');
+    events.receiveBroadcastStream().listen((e) => print(e));
+  });
+}`}>
+การเรียก platform channel ทำงานได้แค่บน isolate ที่มี `BinaryMessenger` ลงทะเบียนไว้เท่านั้น — root isolate ได้มาโดยอัตโนมัติ แต่ background isolate ของ `Isolate.run` ไม่ได้ เว้นแต่จะเรียก `BackgroundIsolateBinaryMessenger.ensureInitialized(token)` ก่อน ด้วย `RootIsolateToken` ที่ได้จาก root isolate ก่อน spawn snippet นี้ไม่เคยเรียกมันเลย และยังไม่เคย capture token ด้วย (ซึ่งอ่านได้แค่บน root isolate เท่านั้น ไม่ใช่จากข้างใน closure ที่ spawn) — ดังนั้นการเรียก `EventChannel` ข้างใน `Isolate.run` จะ throw `BackgroundIsolateBinaryMessenger.instance` is invalid until `ensureInitialized` is executed ทางแก้คือ capture `final token = ServicesBinding.rootIsolateToken!;` บน root isolate ส่ง `token` เข้าไปใน isolate closure แล้วเรียก `BackgroundIsolateBinaryMessenger.ensureInitialized(token)` เป็นบรรทัดแรกสุดข้างใน เหมือนที่แสดงไว้ในบทนี้เป๊ะ
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-platform channel คือท่อส่งข้อความแบบ async ที่มี type ไปหา native code ใช้ `MethodChannel` สำหรับการเรียกครั้งเดียว (`invokeMethod` return `Future`) และ `EventChannel` สำหรับ **stream** ของ native event (ฝั่ง Dart จะได้เป็น `Stream`) ให้ใช้ **plugin** ที่ดูแลดีแทนการเขียน channel เองสำหรับความต้องการทั่วไป และแยกต่างหาก: **asset** ที่ bundle ต้องถูก declare ใน `pubspec.yaml` เพื่อให้ไปกับแอป
+`MethodChannel` คือหนึ่งการเรียก/หนึ่งคำตอบ (`Future`); `EventChannel` คือ `Stream` ที่ native ขับเคลื่อน — ทั้งคู่พิสูจน์แล้วข้างบนด้วย mock API จริงของ `flutter_test` (`setMockMethodCallHandler`, `setMockStreamHandler`) รวมถึงข้อความจริงของ `MissingPluginException` ที่ channel ที่ไม่มีคนจัดการจริง ๆ สร้างขึ้น Pigeon generate กลไก channel เดียวกัน แบบ typed ทั้งสองฝั่ง Dart และ native — พิสูจน์ด้วยการรัน `dart run pigeon` จริงที่สร้าง Dart, Kotlin และ Swift output จริง Kotlin เป็นตัวเลือก toolchain ของ Android built-in มาตั้งแต่ 3.44 — ไม่ต้อง setup Gradle plugin แยกอีกแล้ว เอื้อมไปหา plugin ที่ดูแลดี (มักเป็น federated) เหนือกว่า channel เขียนเองสำหรับความต้องการทั่วไป เอื้อมไปหา `dart:ffi` เฉพาะสำหรับ C library จริง ไม่ใช่ platform SDK background isolate ต้องการ `BackgroundIsolateBinaryMessenger.ensureInitialized(token)` ก่อนการเรียก platform channel ใด ๆ จะทำงานบนมันได้
 </Callout>
 
 export const quizChannels = [
   {
     q: 'platform channel คืออะไร?',
     options: [
-      'API ช่องทีวี',
-      'ท่อส่งข้อความแบบ async ที่มี type ระหว่าง Dart กับ native platform code',
+      'TV channel API',
+      'message pipe แบบ typed และ asynchronous ระหว่าง Dart กับ native platform code',
       'กลไก routing',
-      'การตั้งค่า theme',
+      'การ config theme',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วข้างบนด้วย test จริงของ MethodChannel/EventChannel ที่ใช้ mock binary messenger ของ flutter_test',
   },
   {
-    q: 'ความต่างระหว่าง MethodChannel กับ EventChannel คืออะไร?',
+    q: 'ตาม widget test ในบทนี้ exception และ message ที่แน่นอนที่ invokeMethod throw เมื่อไม่มี handler ลงทะเบียนบน channel เลยคืออะไร?',
     options: [
-      'เหมือนกัน',
-      'MethodChannel คือเรียกครั้งเดียวตอบครั้งเดียว (Future); EventChannel ส่ง stream ของ native event (Stream)',
-      'MethodChannel สำหรับ iOS, EventChannel สำหรับ Android',
-      'EventChannel เป็น synchronous',
+      'return null อย่างเงียบ ๆ',
+      "MissingPluginException, ที่ toString() คือ 'MissingPluginException(No implementation found for method <name> on channel <channel>)'",
+      'Exception ทั่วไปที่ไม่มี message ที่เป็นประโยชน์',
+      'มันค้างอยู่ตลอดไปโดยไม่ complete',
     ],
     answer: 1,
+    explain: 'test assert ข้อความ toString() นี้เป๊ะ ๆ ตรงกับ toString() จริงของ MissingPluginException ใน message_codec.dart',
   },
   {
-    q: 'สำหรับความต้องการทั่วไปอย่างระดับแบตเตอรี่หรือ geolocation ควรหยิบอะไรมาใช้ก่อน?',
+    q: 'Pigeon generate อะไร ตาม output จริงของ dart run pigeon ในบทนี้?',
     options: [
-      'raw platform channel ที่เขียนด้วยมือ',
-      'plugin ที่ดูแลดีซึ่งห่อ channel และ native code ไว้หลัง Dart API',
-      'REST API',
-      'isolate',
+      'กลไกการสื่อสารที่ต่างไปเลยที่แทนที่ MethodChannel',
+      'Dart และ native (Kotlin/Swift) code แบบ typed ที่ยังสร้าง BasicMessageChannel/MethodChannel ตัวเดียวกันข้างใต้ จากไฟล์ definition ที่ใช้ร่วมกันไฟล์เดียว',
+      'แค่ Dart code เท่านั้น — native stub ยังต้องเขียนเอง',
+      'REST API server',
     ],
     answer: 1,
+    explain: 'lib/battery.g.dart ที่ generate จริงยังสร้าง BasicMessageChannel ด้วย channel-name string และ codec — Pigeon generate glue code ไม่ใช่ wire protocol ใหม่',
   },
   {
-    q: 'asset ที่ bundle (รูปภาพ, font) ต้องถูก declare ที่ไหน?',
+    q: 'การเรียก platform channel จาก background isolate (เช่น ข้างใน Isolate.run) ต้องการอะไร ตาม source ที่ยกมาในบทนี้?',
     options: [
-      'ใน main.dart',
-      'ใน `pubspec.yaml` ใต้ส่วน flutter',
-      'ใน native project เท่านั้น',
-      'ถูกตรวจจับอัตโนมัติ ไม่ต้อง declare',
+      'ไม่ต้องมีอะไรพิเศษ — ทุก isolate ใช้ BinaryMessenger เดียวกันโดยอัตโนมัติ',
+      'ต้องเรียก BackgroundIsolateBinaryMessenger.ensureInitialized(token) ก่อน ด้วย RootIsolateToken ที่ได้จาก root isolate ก่อน spawn — ไม่งั้น .instance throw StateError',
+      'ต้องใช้ dart:ffi แทน',
+      'ใช้ได้แค่กับ EventChannel ไม่เคยใช้กับ MethodChannel',
     ],
     answer: 1,
+    explain: 'ยกมาตรง ๆ จาก SDK ที่ติดตั้งอยู่: "...instance value is invalid until...ensureInitialized is executed" — พิสูจน์ในตัวอย่าง SpotTheBug ซึ่งข้ามขั้นตอนนี้ไป',
+  },
+  {
+    q: 'dart:ffi มีไว้ทำอะไร ตาม docs ทางการที่ยกมาในบทนี้ และต่างจาก platform channel อย่างไร?',
+    options: [
+      'มันแค่เป็น MethodChannel เวอร์ชันเร็วกว่าสำหรับ use case เดียวกัน',
+      'มันเรียก native C API ตรง ๆ (อ่าน/เขียน/allocate native memory) โดยไม่มี glue code เฉพาะ platform หรือ channel เกี่ยวข้องเลย ต่างจาก platform channel ที่เข้าถึง SDK ของ Android/iOS ผ่าน glue code ของ Kotlin/Swift',
+      'มันแทนที่ EventChannel สำหรับ streaming data',
+      'ใช้ได้แค่บน web platform เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'ยกมาตรง ๆ: dart:ffi เรียก "native C APIs" และอ่าน/เขียน/allocate "native memory" — กลไกที่ต่างและระดับต่ำกว่า model ของ named-channel/codec ที่ platform channel ใช้',
+  },
+  {
+    q: 'ตาม docs ที่ยกมาในบทนี้ federated plugin แยกโครงสร้างอะไรออกจากกัน?',
+    options: [
+      'ไม่มีอะไรเลย — "federated" เป็นแค่คำศัพท์การตลาดที่ไม่มีความต่างเชิงโครงสร้าง',
+      'platform interface, platform implementation อิสระหนึ่งตัวหรือมากกว่าของมัน และ app-facing package ที่ใช้ implementation ไหนก็ตามที่ลงทะเบียนไว้สำหรับ platform ที่กำลังรันอยู่',
+      'แค่ build ของ Android กับ iOS โดยไม่มี Dart code ร่วมกันเลย',
+      'plugin แยกเป็น tier แบบเสียเงินกับฟรี',
+    ],
+    answer: 1,
+    explain: 'ยกมาตรง ๆ จาก docs: การแยกเป็น "a platform interface, independent platform implementations of that interface, and an app-facing interface"',
   },
 ];
 
