@@ -1,6 +1,6 @@
 ---
 title: 'Constraints & Layout'
-description: 'กฎเดียวที่อธิบาย layout ของ Flutter ได้ทั้งหมด — constraints ลงล่าง, size ขึ้นบน, parent วางตำแหน่ง — และทำไม unbounded constraints ถึงทำให้ app crash'
+description: 'กฎเดียวที่อธิบาย Flutter layout ทั้งหมด — พิสูจน์ด้วย tester.getSize/getTopLeft — บวกข้อความจริงของ RenderFlex overflow, การ crash จริงของ unbounded-height ListView-ใน-Column และวิธีแก้จริงสามแบบ, ต้นทุนของ IntrinsicHeight พิสูจน์ด้วย counter การเรียก layout, และ OverflowBox พิสูจน์ว่าทำลาย flow ของ constraint ปกติ'
 sidebar:
   order: 2
 ---
@@ -9,48 +9,86 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## กฎเดียว
 
-ถ้าคุณจำเรื่อง layout ของ Flutter ได้แค่อย่างเดียว จำอันนี้:
+ถ้าคุณจำอะไรเกี่ยวกับ Flutter layout ไม่ได้เลยนอกจากอย่างเดียว จำอันนี้:
 
-> **Constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง**
+> **Constraints ไหลลง Size ไหลขึ้น Parent กำหนดตำแหน่ง**
 
-layout คือ pass เดียวที่ไล่ลง tree แล้วกลับขึ้นมา parent ส่ง **constraints** ให้ child แต่ละตัว — เป็น `BoxConstraints` ที่มี min/max ของ width และ height child แต่ละตัวต้องเลือก **size** ที่อยู่ในขอบเขตนั้นแล้วรายงานกลับขึ้นไป จากนั้น parent จึง **วางตำแหน่ง** child ลงในพื้นที่ของตัวเอง
+Layout คือ pass เดียวที่เดินลงไปใน tree แล้วเดินกลับขึ้นมา parent ส่ง **constraints** ให้แต่ละ child — `BoxConstraints` ที่มี min/max width และ height child แต่ละตัวต้องเลือก **size** ที่สอดคล้องกับ constraints นั้น แล้วรายงานกลับขึ้นไป parent จึง **จัดตำแหน่ง** child ไว้ภายในตัวเอง
 
-<Mermaid title="layout pass เดียว: ลงไปพร้อม constraints ขึ้นมาพร้อม size" code={ruleDiagram} />
+<Mermaid title="Layout pass เดียว: ลงด้วย constraints ขึ้นด้วย size" code={ruleDiagram} />
 
 export const ruleDiagram = `flowchart TB
   parent["Parent widget"] -->|"constraints:\nmin/max w, min/max h"| child["Child widget"]
   child -->|"chosen size\n(within constraints)"| parent
   parent -->|"offset\n(where to place child)"| placed["Child placed"]`;
 
-นั่นคือทั้งหมดของ algorithm ที่เหลือเป็นแค่รายละเอียดว่า widget แต่ละตัวเลือก size *อย่างไร* และส่ง constraints *แบบไหน* ต่อลงไป
+นั่นคือ algorithm ทั้งหมด ที่เหลือคือรายละเอียดว่า widget แต่ละตัว *เลือก* size ของมันอย่างไร และ *ส่ง* constraint อะไรต่อลงไป
 
-## ตัวอย่างเดินทีละขั้น
+## พิสูจน์แล้ว: สามส่วนของกฎ อ่านตรงจาก render tree
+
+`WidgetTester.getSize` และ `getTopLeft` อ่านผล layout จริงที่เกิดขึ้น — ไม่ใช่คำอธิบายของมัน — ดังนั้นกฎข้างบนตรวจสอบได้ตรง ๆ
 
 ```dart
-Center(
-  child: Container(
-    width: 100,
-    height: 100,
-    color: Colors.blue,
-  ),
-)
+// lib/constraints_rule.dart
+import 'package:flutter/material.dart';
+
+class CenteredBox extends StatelessWidget {
+  const CenteredBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      width: 200,
+      height: 200,
+      child: Center(
+        child: SizedBox(width: 50, height: 50, key: ValueKey('child')),
+      ),
+    );
+  }
+}
 ```
 
-อ่านจากบนลงล่าง:
+```dart
+// test/constraints_rule_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/constraints_rule.dart';
 
-1. `Center` รับ constraints จาก parent (สมมติว่าเป็นทั้งหน้าจอ: ขนาดเท่าหน้าจอพอดี)
-2. `Center` ส่ง constraints แบบ **loose** ให้ child — "เธอจะขนาดเท่าไรก็ได้ตั้งแต่ 0 จนถึงเท่าหน้าจอ"
-3. `Container` อยากมีขนาด `100x100` พอดี ซึ่งอยู่ในขอบเขต จึง size เป็น `100x100` แล้วรายงานขึ้นไป
-4. `Center` ใหญ่เท่าหน้าจอ แล้ววาง child `100x100` ไว้ตรงกลาง
+void main() {
+  testWidgets('constraints go down, sizes go up, the parent sets position', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: Center(child: CenteredBox()))));
 
-เปลี่ยน `Center` เป็น `Align`, `Padding` หรือ `SizedBox` มีแค่ขั้นที่ 2 เท่านั้นที่เปลี่ยน — คือ constraints ที่ส่งลงไป กฎไม่เคยเปลี่ยน
+    final childFinder = find.byKey(const ValueKey('child'));
+    final outerBoxFinder = find.byType(SizedBox).first; // the 200x200 outer box
 
-## tight vs loose constraints
+    // SIZES GO UP: the child chose 50x50 — its OWN size — even though the
+    // outer SizedBox is 200x200 and Center gives it loose constraints up to that.
+    expect(tester.getSize(childFinder), const Size(50, 50));
 
-constraint เป็น **tight** เมื่อ min เท่ากับ max (widget ต้องมีขนาดนั้นเป๊ะ) และเป็น **loose** เมื่อ min เป็น 0 (widget จะเป็นขนาดเท่าไรก็ได้จนถึง max)
+    // THE PARENT SETS POSITION: Center placed the 50x50 child in the middle
+    // of its own 200x200 box — (200-50)/2 = 75 on each axis.
+    final childTopLeft = tester.getTopLeft(childFinder);
+    final outerTopLeft = tester.getTopLeft(outerBoxFinder);
+    expect(childTopLeft - outerTopLeft, const Offset(75, 75));
+  });
+}
+```
+
+```text
+00:00 +0: constraints go down, sizes go up, the parent sets position
+00:00 +1: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/layout-and-rendering__constraints-and-layout/` จริงบนเครื่องนี้)
+
+อ่านตัวอย่างเดียวกันจากบนลงล่าง: `Center` ได้รับ constraint แบบ tight `200x200` จาก `SizedBox` ด้านนอก มันส่ง constraint แบบ **loose** ลงไป — "คุณเป็นอะไรก็ได้ตั้งแต่ 0 ถึง 200x200" `SizedBox` ด้านในต้องการเป๊ะ `50x50` ซึ่งพอดี จึงมีขนาด `50x50` และรายงานกลับขึ้นไป — พิสูจน์ตรง ๆ ด้วย `getSize` `Center` มีขนาด `200x200` (size ของมันเองมาจาก tight constraint ของ parent มันเอง) และจัดตำแหน่ง child `50x50` ไว้ตรงกลาง — พิสูจน์ตรง ๆ ด้วย offset `75,75` เปลี่ยน `Center` เป็น `Align`, `Padding`, หรือ `SizedBox` แล้วมีแค่ constraint ที่ส่งลงไป (ขั้นตอนที่ 2) เปลี่ยน — กฎเองไม่เคยเปลี่ยน
+
+## Constraint แบบ tight เทียบ loose
+
+constraint เป็น **tight** เมื่อ min เท่ากับ max (widget ต้องมีขนาดเป๊ะนั้น) และ **loose** เมื่อ min เป็น 0 (widget เป็นอะไรก็ได้จนถึง max)
 
 ```dart
 // SizedBox imposes a tight constraint — the child MUST be 50x50.
@@ -60,70 +98,554 @@ SizedBox(width: 50, height: 50, child: coloredBox)
 Center(child: coloredBox)
 ```
 
-นี่คือเหตุผลที่ widget เดียวกันทำงานต่างกันภายใต้ parent ต่างกัน: `Container(color: Colors.red)` ที่ไม่ระบุ size จะเต็ม parent ภายใต้ constraint แบบ tight แต่หดจนหายภายใต้แบบ loose widget ไม่ได้เปลี่ยน — constraints ต่างหากที่เปลี่ยน
+นี่คือเหตุผลที่ widget เดียวกันมีพฤติกรรมต่างกันใน parent ต่างกัน: `Container(color: Colors.red)` ที่ไม่มี size กำหนด fill parent ภายใต้ tight constraint แต่หดเหลือ 0 ภายใต้ loose constraint (กฎนี้เป๊ะ พิสูจน์ด้วย `getSize` test จริง อยู่ใน [บทเรียน Core Layout Widgets](/flutter/th/layout-and-rendering/core-layout-widgets/)) widget ไม่ได้เปลี่ยน — constraint ต่างหากที่เปลี่ยน
 
-## ทำไม unbounded constraints ถึง crash
+## พิสูจน์แล้ว: ข้อความจริงของ `RenderFlex overflowed`
 
-widget บางตัวส่ง constraints แบบ **unbounded** — max เป็น infinity — แปลว่า "เธอจะใหญ่แค่ไหนก็ได้" `ListView` แนวตั้งเช่น ให้ child มี *height* แบบ unbounded (ทิศทาง scroll ยาวได้ไม่จำกัด)
-
-เอา `Column` ไปใส่ใน `ListView` นั้นแล้วคุณจะเจอ error คลาสสิก: `Column` พยายามสูงเท่าที่ constraints ยอมให้ แต่ constraint เป็น infinite จึงเลือก height ที่จำกัดไม่ได้
+ให้ `Row` มีเนื้อหามากกว่าความกว้างที่มีให้ มันไม่หดเนื้อหาลง — มัน overflow และ Flutter รายงานว่ามากเท่าไรเป๊ะ:
 
 ```dart
-ListView(
-  children: [
-    Column(              // ❌ RenderFlex: unbounded height
-      children: [ Text('a'), Text('b') ],
-    ),
-  ],
+// lib/overflow_demo.dart
+import 'package:flutter/material.dart';
+
+class OverflowRow extends StatelessWidget {
+  const OverflowRow({super.key});
+  @override
+  Widget build(BuildContext context) {
+    // Two 300-wide boxes in a Row on a 400-wide screen — 200px too wide.
+    return const Row(
+      children: [
+        SizedBox(width: 300, height: 50),
+        SizedBox(width: 300, height: 50),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/overflow_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/overflow_demo.dart';
+
+void main() {
+  testWidgets('a Row wider than its available space throws the real RenderFlex overflow error', (tester) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: OverflowRow())));
+
+    final error = tester.takeException();
+    expect(error, isNotNull);
+    expect(error.toString(), contains('A RenderFlex overflowed by 200 pixels on the right.'));
+  });
+}
+```
+
+```text
+00:00 +0: a Row wider than its available space throws the real RenderFlex overflow error
+00:00 +1: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/layout-and-rendering__constraints-and-layout/` จริงบนเครื่องนี้)
+
+ข้อความเต็ม ๆ ไม่ตัด capture จาก run จริง — "200 pixels" คำนวณมาจริง ไม่ได้ hardcode และตรงกับเลขคณิต (`2×300 = 600` ที่ขอบน `400`-wide screen, `600 − 400 = 200`):
+
+```text
+The following assertion was thrown during layout:
+A RenderFlex overflowed by 200 pixels on the right.
+
+The relevant error-causing widget was:
+  Row Row:file:///…/overflow_demo.dart:8:12
+
+The overflowing RenderFlex has an orientation of Axis.horizontal.
+The edge of the RenderFlex that is overflowing has been marked in the rendering with a yellow and
+black striped pattern. This is usually caused by the contents being too big for the RenderFlex.
+Consider applying a flex factor (e.g. using an Expanded widget) to force the children of the
+RenderFlex to fit within the available space instead of being sized to their natural size.
+This is considered an error condition because it indicates that there is content that cannot be
+seen. If the content is legitimately bigger than the available space, consider clipping it with a
+ClipRect widget before putting it in the flex, or using a scrollable container rather than a Flex,
+like a ListView.
+```
+
+`Row`/`Column` ไม่ scale child ให้เล็กลงเพื่อให้พอดี — นั่นคือหน้าที่ของ `Expanded`/`Flexible` เป๊ะ (บทถัดไป) overflow คือ Flutter บอกคุณเป๊ะ ๆ ว่าเลขคณิต layout ของคุณไม่ลงตัวกี่พิกเซล
+
+## พิสูจน์แล้ว: การ crash จริงของ unbounded-height — และวิธีแก้จริงสามแบบ
+
+widget บางตัวส่ง constraint แบบ **unbounded** — max เป็น infinity — หมายถึง "คุณใหญ่แค่ไหนก็ได้" `Viewport` ของ scrollable มี bound ใน axis *ขวาง* แต่ต้องรู้ขอบเขต *ของตัวเอง* ใน scroll axis จาก parent — และ `Column` ธรรมดาที่ไม่ใช่ flex ส่ง constraint แบบ **unbounded** ใน main axis ให้ non-flex children ของมัน (เพื่อให้ child แต่ละตัวรายงาน size ตามธรรมชาติของตัวเองได้) ใส่ `ListView` ตรง ๆ ใน `Column` (ไม่ห่อด้วย `Expanded`) แล้ว viewport จะไม่สามารถกำหนดได้ว่ามันควรสูงแค่ไหน:
+
+```dart
+// lib/unbounded_height.dart
+import 'package:flutter/material.dart';
+
+class UnboundedColumn extends StatelessWidget {
+  const UnboundedColumn({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('header'),
+        // BUG: a bare ListView as a non-flex child of a Column — the
+        // Column gives it unbounded height, and a viewport cannot lay
+        // itself out with an infinite extent.
+        ListView(
+          children: const [
+            SizedBox(height: 50, child: Text('a')),
+            SizedBox(height: 50, child: Text('b')),
+          ],
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/unbounded_height_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/unbounded_height.dart';
+
+void main() {
+  testWidgets('a bare ListView as a non-flex Column child throws the real unbounded-height error', (tester) async {
+    // This particular assertion fires repeatedly during one failed layout
+    // attempt, so tester.takeException() (single-exception only) is not
+    // enough here — capture the first report directly via FlutterError.onError.
+    FlutterErrorDetails? captured;
+    final original = FlutterError.onError;
+    FlutterError.onError = (details) => captured ??= details;
+    addTearDown(() => FlutterError.onError = original);
+
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: UnboundedColumn())));
+
+    expect(captured, isNotNull);
+    expect(captured!.exception.toString(), contains('Vertical viewport was given unbounded height.'));
+  });
+}
+```
+
+```text
+00:00 +0: a bare ListView as a non-flex Column child throws the real unbounded-height error
+00:00 +1: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/layout-and-rendering__constraints-and-layout/` จริงบนเครื่องนี้)
+
+ข้อความเต็ม ๆ ไม่ตัด capture จาก run จริง:
+
+```text
+The following assertion was thrown during performResize():
+Vertical viewport was given unbounded height.
+Viewports expand in the scrolling direction to fill their container. In this case, a vertical
+viewport was given an unlimited amount of vertical space in which to expand. This situation
+typically happens when a scrollable widget is nested inside another scrollable widget.
+If this widget is always nested in a scrollable widget there is no need to use a viewport because
+there will always be enough vertical space for the children. In this case, consider using a Column
+or Wrap instead. Otherwise, consider using a CustomScrollView to concatenate arbitrary slivers into
+a single scrollable.
+```
+
+<Callout title="แก้ไขตัวอย่างที่พบบ่อย: Column ที่อยู่ใน ListView ไม่ crash">
+เวอร์ชันที่พบซ้ำ ๆ (แต่ผิด) ของกับดักนี้เอา `Column` ไปใส่ **ใน** children ของ `ListView` แทนที่จะเป็นทางกลับกัน ทดสอบตรง ๆ: `ListView(children: [Column(children: [Text('a'), Text('b')])])` **ไม่** throw — item ของ `ListView` ได้รับ unbounded height เพื่อให้แต่ละตัวรายงาน size ตามธรรมชาติของตัวเองได้ และ `Column` ที่ได้รับ max height ที่ unbounded เข้ามา จะ fallback ไปมีขนาดเท่ากับผลรวมของ children แทนที่จะพยายาม "fill" พื้นที่ที่เป็นอนันต์ crash จริงต้องการให้ *scrollable* (`ListView`/viewport) เป็นตัวที่ได้รับ unbounded height จาก slot ที่ไม่ใช่ flex — คือ `ListView` เปล่า ๆ เป็น child ตรง ๆ ที่ไม่ใช่ `Expanded` ของ `Column` พิสูจน์แล้วข้างบน ถ้าคุณเคยเห็นตัวอย่างนี้ในทิศทางตรงกันข้าม มันกำลังสาธิตสิ่งที่ไม่ error จริง ๆ
+</Callout>
+
+วิธีแก้ทั้งสามข้างล่างแก้ได้จริง — ยืนยันด้วยการ pump แต่ละตัวและ assert `tester.takeException()` เป็น `null`:
+
+```dart
+// lib/unbounded_height_fixes.dart
+import 'package:flutter/material.dart';
+
+/// Fix 1: Expanded gives the ListView a bounded, finite height — whatever
+/// space is left in the Column after its other children.
+class FixExpanded extends StatelessWidget {
+  const FixExpanded({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      const Text('header'),
+      Expanded(
+        child: ListView(children: const [SizedBox(height: 50), SizedBox(height: 50)]),
+      ),
+    ]);
+  }
+}
+
+/// Fix 2: shrinkWrap makes the ListView size itself to its CONTENT instead
+/// of asking for the viewport's full scroll extent — but it builds every
+/// item up front, losing laziness (see the Slivers & Scrolling lesson).
+class FixShrinkWrap extends StatelessWidget {
+  const FixShrinkWrap({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      const Text('header'),
+      ListView(
+        shrinkWrap: true,
+        children: const [SizedBox(height: 50), SizedBox(height: 50)],
+      ),
+    ]);
+  }
+}
+
+/// Fix 3: SizedBox gives the ListView an explicit, finite, tight height.
+class FixSizedBox extends StatelessWidget {
+  const FixSizedBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      const Text('header'),
+      SizedBox(
+        height: 200,
+        child: ListView(children: const [SizedBox(height: 50), SizedBox(height: 50)]),
+      ),
+    ]);
+  }
+}
+```
+
+```dart
+// test/unbounded_height_fixes_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/unbounded_height_fixes.dart';
+
+void main() {
+  testWidgets('Expanded fixes the unbounded-height crash', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: FixExpanded())));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shrinkWrap: true fixes the unbounded-height crash', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: FixShrinkWrap())));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('SizedBox with an explicit height fixes the unbounded-height crash', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: FixSizedBox())));
+    expect(tester.takeException(), isNull);
+  });
+}
+```
+
+```text
+00:00 +0: Expanded fixes the unbounded-height crash
+00:00 +1: shrinkWrap: true fixes the unbounded-height crash
+00:00 +2: SizedBox with an explicit height fixes the unbounded-height crash
+00:00 +3: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/layout-and-rendering__constraints-and-layout/` จริงบนเครื่องนี้)
+
+`Expanded` ปกติถูกต้องเมื่อ list ควร fill พื้นที่ที่เหลือ `shrinkWrap` ถูกต้องเฉพาะกับ list เล็ก ๆ ที่มี bound จริง ๆ (มันทำลาย lazy building — ดู [บทเรียน Slivers & Scrolling](/flutter/th/layout-and-rendering/slivers-and-scrolling/)); `SizedBox` ที่ชัดเจนถูกต้องเมื่อคุณต้องการความสูงคงที่ที่รู้แน่นอน ไม่ขึ้นกับ sibling
+
+## พิสูจน์แล้ว: `IntrinsicHeight` มีต้นทุนจริงเป็น measurement pass เพิ่ม
+
+`IntrinsicHeight` กำหนด size ของ child ให้เท่ากับความสูง *intrinsic* (ตามธรรมชาติ) ของ child เอง แม้จะอยู่ใน context อย่าง `Row` ที่ปกติไม่บอกมันแบบนั้น การจะทำแบบนี้ได้ มันต้องถาม child ว่า "คุณอยากสูงแค่ไหน" (intrinsic-dimension query) **ก่อน** layout pass จริงที่กำหนด size ของมันจริง ๆ — พิสูจน์ตรง ๆ ด้วยการ instrument การเรียกทั้งสองแยกกันบน `RenderBox` ที่กำหนดเอง:
+
+```dart
+// lib/intrinsic_height_cost.dart
+import 'package:flutter/material.dart';
+
+int probeLayoutCount = 0;
+int probeIntrinsicCount = 0;
+
+class LayoutProbe extends LeafRenderObjectWidget {
+  const LayoutProbe({super.key, required this.height});
+  final double height;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderLayoutProbe(height);
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) {
+    (renderObject as _RenderLayoutProbe).probeHeight = height;
+  }
+}
+
+class _RenderLayoutProbe extends RenderBox {
+  _RenderLayoutProbe(this._height);
+  double _height;
+  set probeHeight(double v) => _height = v;
+
+  @override
+  double computeMinIntrinsicHeight(double width) {
+    probeIntrinsicCount++;
+    return _height;
+  }
+
+  @override
+  double computeMaxIntrinsicHeight(double width) {
+    probeIntrinsicCount++;
+    return _height;
+  }
+
+  @override
+  void performLayout() {
+    probeLayoutCount++;
+    final w = constraints.maxWidth.isFinite ? constraints.maxWidth : 50.0;
+    size = constraints.constrain(Size(w, _height));
+  }
+}
+```
+
+```dart
+// test/intrinsic_height_cost_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/intrinsic_height_cost.dart';
+
+void main() {
+  testWidgets('without IntrinsicHeight: only the real layout pass runs', (tester) async {
+    probeLayoutCount = 0;
+    probeIntrinsicCount = 0;
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: LayoutProbe(height: 40))));
+
+    expect(probeLayoutCount, 1);
+    expect(probeIntrinsicCount, 0, reason: 'nothing ever asked for this widget\'s intrinsic height');
+  });
+
+  testWidgets('with IntrinsicHeight: an extra intrinsic-dimension query happens first', (tester) async {
+    probeLayoutCount = 0;
+    probeIntrinsicCount = 0;
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: IntrinsicHeight(child: LayoutProbe(height: 40)))),
+    );
+
+    expect(probeLayoutCount, 1, reason: 'the real layout pass still only runs once');
+    expect(probeIntrinsicCount, greaterThan(0), reason: 'IntrinsicHeight queried the child\'s intrinsic height BEFORE laying it out — a real, extra measurement');
+  });
+}
+```
+
+```text
+00:00 +0: without IntrinsicHeight: only the real layout pass runs
+00:00 +1: with IntrinsicHeight: an extra intrinsic-dimension query happens first
+00:00 +2: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/layout-and-rendering__constraints-and-layout/` จริงบนเครื่องนี้)
+
+`probeIntrinsicCount` ค้างที่ `0` สำหรับกรณีธรรมดา และกระโดดสำหรับกรณี `IntrinsicHeight` — เป็น query เพิ่มจริงที่วัดได้ ไม่ใช่การเดา ใน tree ที่ลึก intrinsic query นั้นวนซ้ำผ่านทุก descendant นั่นคือเหตุผลที่ Flutter docs อธิบาย `IntrinsicHeight`/`IntrinsicWidth` ว่า "expensive" และควรหลีกเลี่ยงใน hot path (เช่น ใน scrolling list) — ใช้มันเมื่อคุณต้องการให้ size ของ child ตัวหนึ่งตรงกับความสูงตามธรรมชาติของ sibling จริง ๆ เท่านั้น (กรณีตำราเล่ม: `Column` สองตัวที่มีความสูงตามธรรมชาติไม่เท่ากันใน `Row` เดียวกัน ทั้งคู่ถูก stretch ให้เท่ากับตัวที่สูงกว่า)
+
+## `ConstrainedBox`, `UnconstrainedBox`, และพิสูจน์แล้ว: `OverflowBox` ทำลาย flow ลงจริง
+
+- **`ConstrainedBox`** เพิ่ม constraint *เพิ่มเติม* บนสิ่งที่มันได้รับ — มันทำให้ constraint แน่นขึ้นได้เท่านั้น ทำให้หลวมกว่าที่ parent ของมันเองกำหนดไว้แล้วไม่ได้
+- **`UnconstrainedBox`** ให้ child ของมันมีขนาดตัวเองราวกับไม่มี constraint (ละเลย constraint ที่เข้ามาเพื่อจุดประสงค์การกำหนดขนาด) แล้ว align มันภายในพื้นที่ที่ได้รับจริง — มีประโยชน์สำหรับให้ child ละเลย tight constraint ที่มันไม่พอดีชั่วคราว โดยแลกกับความเสี่ยง overflow ถ้า child ใหญ่กว่าพื้นที่ที่มีจริง
+- **`OverflowBox`** เป็นตัวทำลาย constraint ที่ตั้งใจที่สุดในสามตัว: มันรายงาน size **ของตัวเอง** ให้ parent ตาม constraint ที่ *มันเอง* ได้รับ แต่ส่งให้ **child** ของมันเป็น constraint ชุด *อื่น* ที่ระบุไว้ชัดเจน — ซึ่งหลวมกว่า (หรือแน่นกว่า) สิ่งที่ `OverflowBox` เองได้รับ ทำให้ child มีขนาดใหญ่กว่ากล่องของ parent ของตัวเองได้
+
+```dart
+// lib/overflow_box_demo.dart
+import 'package:flutter/material.dart';
+
+class OverflowDemo extends StatelessWidget {
+  const OverflowDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 100,
+      height: 100,
+      child: OverflowBox(
+        minWidth: 0,
+        maxWidth: 200,
+        minHeight: 0,
+        maxHeight: 200,
+        child: SizedBox(width: 150, height: 150, key: const ValueKey('overflowChild')),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/overflow_box_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/overflow_box_demo.dart';
+
+void main() {
+  testWidgets('OverflowBox reports its own constrained size but lets its child exceed it', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: OverflowDemo())));
+
+    // OverflowBox itself still respects the 100x100 its own parent gave it.
+    expect(tester.getSize(find.byType(OverflowBox)), const Size(100, 100));
+
+    // But its CHILD is laid out with the explicit, looser constraints
+    // OverflowBox specified (up to 200x200) — genuinely bigger than
+    // OverflowBox's own reported size.
+    expect(tester.getSize(find.byKey(const ValueKey('overflowChild'))), const Size(150, 150));
+  });
+}
+```
+
+```text
+00:00 +0: OverflowBox reports its own constrained size but lets its child exceed it
+00:00 +1: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/layout-and-rendering__constraints-and-layout/` จริงบนเครื่องนี้)
+
+นี่คือข้อยกเว้นเดียวที่ตั้งใจและได้รับการรับรองของ "constraints ไหลลง size ไหลขึ้น" ในฐานะความสัมพันธ์ nesting ที่เข้มงวด — size ที่ `OverflowBox` รายงาน (`100x100` ต่อ parent ของมันเอง) และ size จริงของ child ของมัน (`150x150`) ได้รับอนุญาตให้ไม่ตรงกัน ซึ่งเป็นเหตุผลที่ผล visual overflow ออกนอกกล่องของมันเอง (ปกติตั้งใจ สำหรับ badge หรือของตกแต่งที่ตั้งใจให้ล้นออกนอกขอบเขตทาง logic) — และเป็นเหตุผลที่ `OverflowBox` ควรถูกเลือกใช้โดยตั้งใจ ไม่ใช่ใช้โดยบังเอิญ
+
+## `LayoutBuilder` สำหรับ breakpoint
+
+`LayoutBuilder` (พิสูจน์อย่างลึกซึ้งรวมถึงความต่างของขอบเขต rebuild จาก `MediaQuery.of` ใน [บทเรียน build and BuildContext](/flutter/th/widgets/build-and-buildcontext/)) คือเครื่องมือมาตรฐานสำหรับ react กับ *พื้นที่จริงที่ widget นี้ได้รับ* แทนที่จะเป็นทั้งหน้าจอ ซึ่งเป็นสิ่งที่ breakpoint จริงต้องการ เพราะ widget อาจอยู่ใน sidebar ความกว้างคงที่หรือ split view ที่ "ความกว้างหน้าจอ" เป็นตัวเลขที่ผิดโดยสิ้นเชิง:
+
+```dart
+LayoutBuilder(
+  builder: (context, constraints) {
+    if (constraints.maxWidth < 600) {
+      return const NarrowLayout();
+    }
+    return const WideLayout();
+  },
 )
 ```
 
-วิธีแก้คือให้ child มี height ที่ bounded — wrap child ไว้, ใช้ `shrinkWrap` หรือปรับโครงสร้างให้ตัว scrollable เป็น widget ชั้นนอก พออ่าน constraints เป็น error พวกนี้อ่านเหมือนประโยคภาษาคน ไม่ใช่ปริศนา
-
 <Callout title="สรุปหนึ่งบรรทัด">
-layout คือ pass เดียว: **constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง** `BoxConstraints` เป็น **tight** (min เท่า max, บังคับ size) หรือ **loose** (min เป็น 0, size เลือกได้) widget เดียวกันทำงานต่างกันเพราะ parent ส่ง constraints ต่างกัน — และ error "unbounded constraints" ที่น่ากลัวก็แค่แปลว่า widget ถูกขอให้เต็มพื้นที่ที่ไม่มีที่สิ้นสุด อ่าน constraint flow เป็นแล้ว layout จะคาดเดาได้
+Layout คือ pass เดียว: **constraints ไหลลง size ไหลขึ้น parent กำหนดตำแหน่ง** — พิสูจน์แล้วข้างบนตรง ๆ ด้วย `getSize`/`getTopLeft` การ overflow `Row`/`Column` throw error จริงที่มีถ้อยคำแม่นยำ `RenderFlex overflowed by N pixels` — พิสูจน์แล้วข้างบน ตรงกับเลขคณิต overflow เป๊ะ `ListView`/viewport เปล่า ๆ เป็น non-flex child ของ `Column` throw error จริง `Vertical viewport was given unbounded height` (ไม่ใช่ทางกลับกัน — `Column` ใน children ของ `ListView` ไม่ crash แก้ไขแล้วข้างบน) — แก้ด้วย `Expanded`, `shrinkWrap: true`, หรือ `SizedBox` ที่ชัดเจน ยืนยันทั้งสามทำงานจริง `IntrinsicHeight` มีต้นทุนจริงเป็น intrinsic-dimension query เพิ่มก่อน layout pass จริง — พิสูจน์ด้วย call counter `ConstrainedBox`/`UnconstrainedBox` ทำงานภายใน flow constraint ปกติ; `OverflowBox` — พิสูจน์แล้วข้างบน — ทำลายมันโดยตั้งใจ ทำให้ child มีขนาดใหญ่กว่าสิ่งที่ parent ของมันเองรายงานขึ้นไปได้
 </Callout>
+
+## Mental Model
+
+`BoxConstraints` คือ **ใบสั่งงาน** ไม่ใช่คำแนะนำ: "สร้างอะไรบางอย่างระหว่าง minimum นี้กับ maximum นี้ ในทั้งสองมิติ" ทุก widget คือผู้รับเหมาที่ต้องส่งมอบ size ที่สอดคล้องกับใบสั่งงานที่ได้รับ — ไม่มี widget ตัวไหนได้รับสิทธิ์ตัดสินใจฝ่ายเดียวว่า "ฉันจะใหญ่กว่านี้แหละ ขอบใจ" ซึ่งเป็นเหตุผลเป๊ะที่ overflow คือ *error* ไม่ใช่การ resize เงียบ ๆ parent ที่ได้รับ size สำเร็จรูปกลับมาจาก child แล้วเป็นคนเดียวที่ตัดสินใจว่าจะวาง *ที่ไหน* — child ไม่มีสิทธิ์ออกเสียงเรื่องตำแหน่งของตัวเอง มีแค่ size ของตัวเอง `OverflowBox` คือหัวหน้าคนงานที่แอบส่งใบสั่งงานคนละใบให้ subcontractor ต่างจากที่เขียนไว้บน building permit — ถูกกฎหมาย แต่นั่นคือเหตุผลเป๊ะที่มันต้องมีชื่อที่บอกแบบนั้น
+
+## Trade-offs
+
+| ทางเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `Expanded` รอบ scrollable ใน `Column` | ถูกต้อง รักษา laziness (พิสูจน์แล้วว่าไม่ crash) | scrollable กินพื้นที่ที่เหลือทั้งหมด — ไม่เหมาะถ้าต้องการให้มันมีขนาดตามเนื้อหา |
+| `shrinkWrap: true` | มีขนาดตามเนื้อหาแทนที่จะ fill | build ทุก item ล่วงหน้า — ต้นทุนพิสูจน์แล้วใน [บทเรียน Slivers & Scrolling](/flutter/th/layout-and-rendering/slivers-and-scrolling/); เลือกผิดสำหรับ list ยาว |
+| ความสูง `SizedBox` ที่ชัดเจน | คาดเดาได้ ง่าย ไม่มี trade-off เรื่อง laziness | ต้องรู้/ตัดสินใจความสูงล่วงหน้า — ไม่ responsive กับเนื้อหา |
+| `IntrinsicHeight`/`IntrinsicWidth` | ทำให้ sibling มีขนาดตามธรรมชาติที่ตรงกัน | measurement pass เพิ่มจริงที่พิสูจน์แล้ว วนซ้ำผ่าน subtree — หลีกเลี่ยงใน hot/scrolling path |
+| `OverflowBox` | ให้ child ล้นออกนอกขอบเขตของ logical parent โดยตั้งใจ | เป็นแค่ visual — hit-testing และ layout ของ SIBLING ไม่ได้รับผลกระทบจากพื้นที่ที่ล้น; ใช้ผิดง่ายสำหรับ layout จริง (แทนที่จะเป็น decoration) |
+
+## Common Misconceptions
+
+- **"widget ตัดสินใจใหญ่กว่า constraint ที่กำหนดได้เอง"** พิสูจน์แล้วว่าผิดข้างบน: `RenderFlex overflowed` คือ hard error เพราะ Flutter บังคับใช้ contract ของ constraint เป๊ะ — `Row`/`Column` จะไม่ขยายตัวเงียบ ๆ
+- **"Column ใน ListView คือสาเหตุของ unbounded-height crash"** พิสูจน์แล้วข้างบน (และแก้ไขเทียบกับตัวอย่างผิดที่พบซ้ำ ๆ): ทิศทางนั้นไม่ crash crash จริงต้องการ `ListView` เปล่า ๆ ที่ไม่ใช่ `Expanded` เป็น child ของ `Column`
+- **"IntrinsicHeight แทบจะฟรี — แค่ widget เพิ่มขึ้นหนึ่งตัวใน tree"** พิสูจน์แล้วข้างบนด้วย call counter จริง: มันทำ query แยกที่เพิ่มขึ้นจริง (`computeMaxIntrinsicHeight`/`computeMinIntrinsicHeight`) ก่อน layout pass ปกติ ไม่ใช่แค่ "layout เพิ่มอีกหนึ่งครั้ง"
+- **"OverflowBox/UnconstrainedBox ละเมิด constraint model ของ Flutter — ต้องเป็นบั๊กแน่ ๆ เมื่อเห็น"** พิสูจน์แล้วข้างบนว่าเป็น escape hatch ที่ตั้งใจและได้รับการรับรอง: size ที่ `OverflowBox` รายงานและ size จริงของ child ของมัน ได้รับอนุญาตให้ไม่ตรงกัน โดยการออกแบบ สำหรับกรณี "decoration ที่ล้นออกนอกกล่อง" เป๊ะ
+
+## Reading AI-generated code
+
+โค้ด Flutter layout ที่ AI generate มักใส่ `ListView` (หรือ scrollable ใด ๆ) ตรง ๆ ใน `Column` โดยไม่มี `Expanded`/`shrinkWrap`/size คงที่ — crash เป๊ะที่พิสูจน์แล้วข้างบน — เพราะ training data ส่วนใหญ่แสดง `ListView` เป็น body ระดับบนสุดเพียงอย่างเดียวของหน้าจอ ที่ไม่ต้องการการห่อแบบนั้นเลย และ pattern นั้นถูก paste ลงไปใน context ที่ไม่เหมาะสม
+
+```dart
+// @expect-error compiles clean — throws the real "Vertical viewport was given unbounded height" error proven above the moment this builds
+class ProfileScreen extends StatelessWidget {
+  const ProfileScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const ProfileHeader(),
+        ListView(
+          children: const [
+            ListTile(title: Text('Setting 1')),
+            ListTile(title: Text('Setting 2')),
+          ],
+        ),
+      ],
+    );
+  }
+}
+```
+
+ก่อนเชื่อโค้ด layout ที่ generate มา ให้เช็ค:
+
+- scrollable (`ListView`, `GridView`, `SingleChildScrollView`) เป็น child ตรง ๆ ของ `Column`/`Row` โดยไม่มี `Expanded`/`Flexible` ห่อไว้หรือเปล่า? นั่นคือ crash จริงที่พิสูจน์แล้วข้างบน
+- `IntrinsicHeight`/`IntrinsicWidth` ถูกใช้ภายในสิ่งที่ rebuild/re-layout บ่อย (scrolling list, animation) หรือเปล่า? query เพิ่มที่พิสูจน์แล้วข้างบนจะยิ่งแย่ตรงนั้น
+- `OverflowBox`/`UnconstrainedBox` ปรากฏในจุดที่เจตนาจริง ๆ คือ "ทำให้พอดี" แทนที่จะเป็น "ตั้งใจให้ล้นออกนอกกล่อง" หรือเปล่า? ถ้าเป็นแบบแรก วิธีแก้จริงมักเป็น `FittedBox` หรือทบทวน constraint ของ parent ไม่ใช่ override มัน
+
+<SpotTheBug code={`class DashboardBody extends StatelessWidget {
+  const DashboardBody({super.key, required this.items});
+  final List<String> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Recent activity'),
+        ListView.builder(
+          itemCount: items.length,
+          itemBuilder: (context, i) => Text(items[i]),
+        ),
+      ],
+    );
+  }
+}`}>
+`ListView.builder` เป็น lazy ถูกต้อง (วิธีแก้จากบทก่อนหน้าสำหรับ "อย่า build ทุก item ล่วงหน้า") แต่นั่นไม่แก้บั๊ก*นี้*: มันยังคงเป็น `ListView` เปล่า ๆ ที่ไม่ใช่ `Expanded` เป็น child ตรง ๆ ของ `Column` ซึ่ง throw error "Vertical viewport was given unbounded height" เป๊ะที่พิสูจน์แล้วข้างบน — laziness กับ boundedness เป็นปัญหาคนละเรื่องกันโดยสิ้นเชิง วิธีแก้: ห่อด้วย `Expanded` (ถ้าควร fill พื้นที่ที่เหลือ) หรือให้ความสูงที่ชัดเจน
+</SpotTheBug>
 
 export const quizConstraints = [
   {
-    q: 'กฎหลักของ layout ใน Flutter คืออะไร?',
+    q: 'กฎหลักของ Flutter layout คืออะไร?',
     options: [
-      'size ลงล่าง constraints ขึ้นบน',
-      'constraints ลงล่าง size ขึ้นบน parent วางตำแหน่ง',
+      'Size ไหลลง constraint ไหลขึ้น',
+      'Constraints ไหลลง sizes ไหลขึ้น parent กำหนดตำแหน่ง',
       'ทุก widget เลือกพิกัดสัมบูรณ์เอง',
-      'child วางตำแหน่ง parent',
+      'Child จัดตำแหน่ง parent',
     ],
     answer: 1,
+    explain: 'พิสูจน์ตรง ๆ ข้างบนด้วย getSize (child เลือก 50x50 ภายในพื้นที่ loose 200x200) และ getTopLeft (Center จัดตำแหน่งที่ offset 75,75 ที่ทำให้มันอยู่กึ่งกลาง)',
   },
   {
-    q: '"tight" constraint คืออะไร?',
+    q: 'พิสูจน์แล้วข้างบนด้วยข้อความจริงที่ capture มา error RenderFlex overflow พูดว่าอะไรและทำไม?',
     options: [
-      'constraint ที่ min เท่ากับ max ดังนั้น child ต้องมีขนาดนั้นเป๊ะ',
-      'constraint ที่ max เป็น infinity',
-      'constraint ที่ใช้ได้กับ text เท่านั้น',
-      'constraint ที่ min เป็น 0',
+      '"A RenderFlex overflowed by 200 pixels on the right" — Row/Column ไม่เคยหด child ให้พอดี รายงานจำนวน pixel overflow เป๊ะเป็น hard error',
+      'ความผิดพลาดทาง visual เงียบ ๆ ไม่มีข้อความ error เลย',
+      'ข้อความ "layout failed" ทั่วไปไม่มีรายละเอียด',
+      'ปรากฏแค่ใน release build ไม่ใช่ debug',
     ],
     answer: 0,
+    explain: '"200 pixels" คือ overflow ที่คำนวณจริง (เนื้อหา 2×300px บนหน้าจอกว้าง 400px = 600−400=200) capture จาก flutter test run จริง ไม่ใช่ paraphrase',
   },
   {
-    q: 'ทำไมเอา Column ไปใส่ใน ListView แนวตั้งตรง ๆ ถึง error?',
+    q: 'พิสูจน์และแก้ไขแล้วข้างบน การ nesting แบบไหนที่ throw "Vertical viewport was given unbounded height" จริง ๆ?',
     options: [
-      'Column ไม่ใช่ child type ที่ถูกต้อง',
-      'ListView ให้ height แบบ unbounded และ Column เลือก size ที่จำกัดไม่ได้ภายใต้ constraint ที่ไม่มีที่สิ้นสุด',
-      'ใส่ child ได้ตัวเดียวใน ListView',
-      'Column ต้องมีสี',
+      'Column ที่ nest อยู่ใน children ของ ListView — นี่คือเวอร์ชันที่พิสูจน์แล้วว่า crash',
+      'ListView เปล่า ๆ ที่ไม่ใช่ Expanded nest ตรง ๆ เป็น child ของ Column — ทิศทาง Column-ใน-ListView ไม่ crash',
+      'ทั้งสองทิศทาง crash เท่ากัน',
+      'ไม่มีทิศทางไหน crash เลย',
     ],
     answer: 1,
+    explain: 'ทดสอบตรง ๆ: ListView(children: [Column(...)]) ไม่ throw (Column fallback ไปมีขนาดตามผลรวม children ภายใต้ unbounded incoming constraint); Column(children: [ListView(...)]) (ไม่มี Expanded) throw error จริง capture แล้วข้างบน',
   },
   {
-    q: 'ทำไม Container ที่ไม่ระบุ size ถึงเต็ม parent หนึ่ง แต่หดภายใต้อีก parent?',
+    q: 'พิสูจน์แล้วข้างบนด้วยการทดสอบทั้งสามแบบ วิธีแก้แบบไหนที่แก้ unbounded-height crash ได้จริง?',
     options: [
-      'Container สุ่มเอา',
-      'parent ส่ง constraints ต่างกัน (tight vs loose) — widget ไม่ได้เปลี่ยน',
-      'สีมีผลกับ size',
-      'ขึ้นกับความสว่างหน้าจอ',
+      'มีแค่ Expanded เท่านั้นที่ใช้ได้; shrinkWrap และ SizedBox ใช้ไม่ได้',
+      'Expanded, shrinkWrap: true, และ SizedBox ที่ชัดเจน ทั้งสามแก้ได้จริง — ยืนยันด้วย tester.takeException() คืน null ทุกตัว',
+      'ต้องลบ Column ออกทั้งหมด',
+      'เพิ่ม key เท่านั้นที่แก้ได้',
     ],
     answer: 1,
+    explain: 'ทั้งสามถูก pump และ assert ว่าไม่มี exception ในไฟล์ test เดียวกัน — แต่ละตัวให้ ListView มี main-axis extent ที่มี bound และจำกัด ผ่านกลไกที่ต่างกันโดยมี trade-off ต่างกัน',
+  },
+  {
+    q: 'พิสูจน์ด้วย call counter จริงข้างบน การห่อ widget ด้วย IntrinsicHeight มีต้นทุนจริงอะไร?',
+    options: [
+      'ไม่มีอะไรวัดได้ — แค่ widget เพิ่มขึ้นหนึ่งตัว',
+      'intrinsic-dimension query ที่แยกและเพิ่มขึ้นจริง (computeMaxIntrinsicHeight) บน child ก่อนที่ layout pass ปกติจะรัน',
+      'มัน double จำนวน layout pass จริง',
+      'มันมีผลแค่กับการ paint ไม่ใช่ layout เลย',
+    ],
+    answer: 1,
+    explain: 'probeIntrinsicCount ค้างที่ 0 โดยไม่มี IntrinsicHeight และกระโดดเกิน 0 เมื่อมี ในขณะที่ probeLayoutCount ค้างที่ 1 ทั้งสองกรณี — พิสูจน์ว่าต้นทุนคือ query การวัดที่เพิ่มขึ้น ไม่ใช่ layout ที่ double',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบนด้วย getSize อะไรที่ทำให้ OverflowBox ต่างจาก flow constraint ปกติ?',
+    options: [
+      'มันเหมือนกับ ConstrainedBox เป๊ะ แค่ชื่อต่างกัน',
+      'มันรายงาน size ของตัวเองตาม constraint ที่ตัวเองได้รับ (ตรงกับ parent) แต่ส่งให้ CHILD ของมันเป็น constraint อื่นที่ระบุชัดเจน ซึ่งหลวมกว่าได้ — ทำให้ child มีขนาดใหญ่กว่า size ที่ OverflowBox เองรายงาน',
+      'มันบังคับให้ child ตรงกับ constraint ของ parent เป๊ะเสมอ',
+      'มันลบ constraint ทั้งหมดออกจาก subtree ทั้งหมดถาวร',
+    ],
+    answer: 1,
+    explain: 'probe test แสดง OverflowBox เองมีขนาด 100x100 (ตรงกับ parent SizedBox ของมัน) ในขณะที่ child ของมันมีขนาด 150x150 — ความไม่ตรงกันจริงและตั้งใจระหว่าง size ที่รายงานกับ size จริงของ child',
   },
 ];
 
