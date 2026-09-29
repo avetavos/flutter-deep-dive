@@ -1,6 +1,6 @@
 ---
 title: 'Dart Language Tour'
-description: 'The Dart essentials fast — variables and type inference, functions and named parameters, collections, and the cascade operator you will see everywhere in Flutter.'
+description: 'The Dart essentials fast — variables and type inference, functions and named parameters, collections, records, pattern matching, extension types, and the cascade operator you will see everywhere in Flutter.'
 sidebar:
   order: 2
 ---
@@ -8,6 +8,7 @@ sidebar:
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Variables and inference
 
@@ -77,9 +78,405 @@ final paint = Paint()
 // Each `..` returns the same Paint, so this configures one object.
 ```
 
+## Records: multiple return values without a wrapper class
+
+**Records** (Dart 3.0 — ["Records require a language version of at least 3.0"](https://dart.dev/language/records)) are anonymous, immutable, structurally-typed aggregates. They fix a real gap: returning two or three related values used to mean either an ad hoc `List`/`Map` (untyped) or a one-off wrapper class (boilerplate). A record is neither — it's a genuine compile-time-checked type with no declaration required.
+
+{/* DartPad slot: records — positional/named construction, destructuring, equality */}
+
+```dart
+// lib/records_basics.dart
+// Positional + named records, destructuring, equality, multiple-return use.
+
+typedef Point = (double x, double y); // positional record type alias
+
+(double, double) minMax(List<double> values) {
+  var lo = values.first, hi = values.first;
+  for (final v in values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return (lo, hi); // multiple return — no wrapper class needed
+}
+
+({String name, int age}) parsePerson(Map<String, Object?> json) {
+  return (name: json['name']! as String, age: json['age']! as int); // named record
+}
+```
+
+```dart
+// test/records_basics_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__dart-language-tour/records_basics.dart';
+
+void main() {
+  test('positional record: destructuring a multiple return', () {
+    final (low, high) = minMax([3, 1, 4, 1, 5, 9]);
+    expect(low, 1);
+    expect(high, 9);
+  });
+
+  test('named record: field-shorthand destructuring', () {
+    final person = parsePerson({'name': 'Ada', 'age': 36});
+    final (:name, :age) = person;
+    expect(name, 'Ada');
+    expect(age, 36);
+  });
+
+  test('records always compare structurally with ==, and const records are canonicalized', () {
+    const a = (1, 2);
+    const b = (1, 2);
+    expect(a == b, isTrue); // == compares field-by-field, like a data class
+    expect(identical(a, b), isTrue); // const records ARE canonicalized, like const objects
+
+    // A non-const record built at runtime is a fresh instance...
+    int notConst() => 1;
+    final c = (notConst(), 2);
+    final d = (notConst(), 2);
+    expect(identical(c, d), isFalse); // ...so identity differs...
+    expect(c == d, isTrue); // ...but == still compares structurally, not by identity.
+  });
+
+  test('a typedef names a record shape, unwrapped with positional getters', () {
+    const Point p = (1.0, 2.0);
+    expect(p.$1, 1.0);
+    expect(p.$2, 2.0);
+  });
+}
+```
+
+```text
+✓ positional record: destructuring a multiple return
+✓ named record: field-shorthand destructuring
+✓ records always compare structurally with ==, and const records are canonicalized
+✓ a typedef names a record shape, unwrapped with positional getters
+
+00:00 +4: All tests passed!
+```
+
+The canonicalization result is the one worth remembering: `const (1, 2)` and another `const (1, 2)` are `identical` — the *same object* — exactly like `const` widgets. A record built at runtime (`(notConst(), 2)`) is a fresh instance every time, but `==` still compares field-by-field either way, so a record makes a genuinely useful, allocation-cheap key or return value.
+
+## Pattern matching: destructure, match, and let the analyzer prove you covered every case
+
+**Patterns** (Dart 3.0 — same [language-version requirement](https://dart.dev/language/patterns) as records) generalize destructuring far beyond `final (a, b) = pair`. A pattern can match on a value's *shape* — its runtime type, its fields, its length — not just bind a name to it.
+
+{/* DartPad slot: patterns — switch expression, object/list/map patterns, guards, if-case */}
+
+```dart
+// lib/patterns_basics.dart
+// Switch expression/statement, object/list/map patterns, guards, if-case.
+
+sealed class Shape {}
+final class Circle extends Shape {
+  Circle(this.radius);
+  final double radius;
+}
+final class Square extends Shape {
+  Square(this.side);
+  final double side;
+}
+
+double area(Shape shape) => switch (shape) {
+  Circle(:final radius) => 3.141592653589793 * radius * radius, // object pattern
+  Square(:final side) => side * side,
+};
+
+String describe(Shape shape) => switch (shape) {
+  Circle(radius: > 10) => 'big circle', // object pattern + relational guard
+  Circle() => 'small circle',
+  Square(side: var s) when s > 10 => 'big square ($s)', // `when` guard
+  Square() => 'small square',
+};
+
+String firstTwo(List<int> xs) => switch (xs) {
+  [] => 'empty',
+  [final a] => 'one: $a',
+  [final a, final b, ...] => 'starts $a, $b', // list pattern + rest
+  // No trailing wildcard needed: these three list patterns already cover
+  // every possible List<int> length (0, 1, 2+) — the analyzer proves it by
+  // flagging a `_` case added here as unreachable_switch_case.
+};
+
+String describeUser(Map<String, Object?> json) {
+  if (json case {'name': String name, 'age': int age}) {
+    // map pattern via if-case
+    return '$name ($age)';
+  }
+  return 'unknown';
+}
+
+enum Status { active, archived, deleted }
+
+String statusLabel(Status s) {
+  switch (s) {
+    case Status.active:
+      return 'Active';
+    case Status.archived:
+      return 'Archived';
+    case Status.deleted:
+      return 'Deleted';
+  }
+}
+```
+
+```dart
+// test/patterns_basics_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__dart-language-tour/patterns_basics.dart';
+
+void main() {
+  test('switch expression with object patterns computes area per subtype', () {
+    expect(area(Circle(2)), closeTo(12.566, 0.001));
+    expect(area(Square(3)), 9);
+  });
+
+  test('object pattern with a relational guard vs a `when` guard', () {
+    expect(describe(Circle(20)), 'big circle'); // radius: > 10
+    expect(describe(Circle(1)), 'small circle');
+    expect(describe(Square(20)), 'big square (20.0)'); // when s > 10
+    expect(describe(Square(1)), 'small square');
+  });
+
+  test('list patterns destructure by shape, with a rest element', () {
+    expect(firstTwo([]), 'empty');
+    expect(firstTwo([7]), 'one: 7');
+    expect(firstTwo([1, 2, 3, 4]), 'starts 1, 2');
+  });
+
+  test('if-case with a map pattern extracts fields only on a structural match', () {
+    expect(describeUser({'name': 'Ada', 'age': 36}), 'Ada (36)');
+    expect(describeUser({'name': 'Ada'}), 'unknown'); // missing `age` — no match
+  });
+
+  test('switch statement over every enum value, no default needed', () {
+    expect(statusLabel(Status.active), 'Active');
+    expect(statusLabel(Status.archived), 'Archived');
+    expect(statusLabel(Status.deleted), 'Deleted');
+  });
+}
+```
+
+```text
+✓ switch expression with object patterns computes area per subtype
+✓ object pattern with a relational guard vs a `when` guard
+✓ list patterns destructure by shape, with a rest element
+✓ if-case with a map pattern extracts fields only on a structural match
+✓ switch statement over every enum value, no default needed
+
+00:00 +5: All tests passed!
+```
+
+### Exhaustiveness: the analyzer proves you handled every case
+
+The payoff for pattern matching over `sealed class`/`enum` is **exhaustiveness checking** — a real compile-time guarantee, not a convention. `bloc-and-patterns` already [proved this for a `switch` **expression** over a sealed hierarchy](/flutter/en/state-management/bloc-and-patterns/) with a real `non_exhaustive_switch_expression` diagnostic; here are the two cases it didn't cover — the **statement** form over a `sealed` class, and an **enum**.
+
+Delete the `Square2` case from a `switch` **statement** over a sealed hierarchy:
+
+```dart
+// @expect-error real non_exhaustive_switch_statement diagnostic, captured below
+sealed class Shape2 {}
+final class Circle2 extends Shape2 { Circle2(this.radius); final double radius; }
+final class Square2 extends Shape2 { Square2(this.side); final double side; }
+
+String label(Shape2 shape) {
+  switch (shape) {
+    case Circle2():
+      return 'circle';
+    // missing Square2 case
+  }
+}
+```
+
+The real, unedited `flutter analyze` output:
+
+```text
+error • The type 'Shape2' isn't exhaustively matched by the switch cases since it doesn't match the
+pattern 'Square2()'. Try adding a default case or cases that match 'Square2()' •
+non_exhaustive_switch_statement
+```
+
+Delete the last case from a `switch` **expression** over an `enum` — enums get exactly the same treatment, because every enum in Dart 3 is implicitly a closed, exhaustively-checkable type:
+
+```dart
+// @expect-error real non_exhaustive_switch_expression diagnostic, captured below
+enum Status2 { active, archived, deleted }
+
+String label(Status2 s) => switch (s) {
+  Status2.active => 'Active',
+  Status2.archived => 'Archived',
+  // missing Status2.deleted
+};
+```
+
+```text
+error • The type 'Status2' isn't exhaustively matched by the switch cases since it doesn't match the
+pattern 'Status2.deleted'. Try adding a wildcard pattern or cases that match 'Status2.deleted' •
+non_exhaustive_switch_expression
+```
+
+The fix for both is exactly what the message says: add the missing case (or a `default:`/`_ =>` wildcard, which forfeits the exhaustiveness check going forward). This is why AI-generated state unions increasingly favor `sealed class` + `switch` over the old `abstract class` + a chain of `is` checks: only the `sealed`+`switch` combination gets this analyzer-enforced completeness, over **both** class hierarchies and enums.
+
+## Class modifiers: who is allowed to extend or implement your class
+
+Dart 3.0 added five modifiers — `sealed`, `final`, `base`, `interface`, and `mixin class` — that restrict how a class can be used outside its own library (each with a real, distinct `flutter analyze` error when violated). This lesson only needs the overview to read the exhaustiveness examples above (`sealed` is what makes `Shape`/`Shape2` exhaustively checkable); the next lesson, [Classes & Mixins](/flutter/en/dart-foundations/classes-and-mixins/), proves each modifier's exact cross-library violation and fix.
+
+## Extension types: a zero-cost wrapper, checked at compile time
+
+**Extension types** (Dart 3.3, February 2024 — confirmed by [dart.dev's language evolution page](https://dart.dev/guides/language/evolution): *"Extension types are a new feature in Dart that allow zero-cost wrapping of an existing type"*) wrap an existing type with a **different, restricted, static-only interface** — unlike a real wrapper class, there is no runtime object at all: `dart.dev` states it directly: *"Because extension types are static-only and compiled away at run time, they are essentially zero cost."*
+
+{/* DartPad slot: extension types — zero-cost wrapper and the undefined-member error */}
+
+```dart
+// lib/extension_types.dart
+// Extension types (Dart 3.3) — a compile-time-only wrapper, zero runtime cost.
+
+extension type UserId(String value) {
+  bool get isValid => value.length == 8;
+}
+
+// `implements` a supertype of the representation type (double implements
+// Comparable<num>) to inherit its members transparently, at zero cost.
+extension type Meters(double value) implements Comparable<num> {
+  Meters operator +(Meters other) => Meters(value + other.value);
+}
+```
+
+```dart
+// test/extension_types_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__dart-language-tour/extension_types.dart';
+
+void main() {
+  test('an extension type has zero runtime footprint: it IS the representation type', () {
+    final id = UserId('a1b2c3d4');
+    // Erased at compile time — at runtime this is a plain String, not a
+    // wrapper object. `is`/runtimeType see straight through it.
+    expect(id is String, isTrue);
+    expect((id as Object).runtimeType, String);
+    expect(id.isValid, isTrue);
+  });
+
+  test('members not declared on the extension type are a real compile-time error, not a runtime one', () {
+    // See the lesson prose for the captured analyzer error for
+    // `UserId(...).toUpperCase()` — undefined_method, because UserId does
+    // not implement String, so its full member set isn't visible.
+    final id = UserId('short');
+    expect(id.isValid, isFalse);
+  });
+
+  test('implements a supertype of the representation type to inherit members for free', () {
+    final total = Meters(1.5) + Meters(2.5);
+    expect(total.value, 4.0);
+    expect(total.compareTo(4), 0); // inherited from Comparable<num> via `implements`
+  });
+}
+```
+
+```text
+✓ an extension type has zero runtime footprint: it IS the representation type
+✓ members not declared on the extension type are a real compile-time error, not a runtime one
+✓ implements a supertype of the representation type to inherit members for free
+
+00:00 +3: All tests passed!
+```
+
+`UserId` wraps a `String` but does **not** implement `String` — so it only exposes what it explicitly declares (`isValid`), nothing more. Calling a real `String` member on it is a genuine, real compile-time error:
+
+```dart
+// @expect-error real undefined_method diagnostic, captured below
+extension type UserId(String value) {
+  bool get isValid => value.length == 8;
+}
+
+void demo() {
+  final id = UserId('a1b2c3d4');
+  print(id.toUpperCase()); // String's toUpperCase — NOT a member of UserId
+}
+```
+
+```text
+error • The method 'toUpperCase' isn't defined for the type 'UserId'. Try correcting the name to
+the name of an existing method, or defining a method named 'toUpperCase' • undefined_method
+```
+
+This is the entire point of an extension type versus a plain `typedef` or `extension on String`: it **restricts** the interface instead of widening it, while costing nothing at runtime — `id is String` is still `true`, because there is no wrapper object to be anything other than a `String`.
+
+## `late`: deferred initialization
+
+`late` promises "this will be assigned before anyone reads it" — the next lesson, [Null Safety](/flutter/en/dart-foundations/null-safety/), covers `late final` and definite-assignment analysis in depth, and [setState & the Lifecycle](/flutter/en/state-management/setstate-and-lifecycle/) already proved the real runtime cost of breaking that promise (a `LateInitializationError`) for a controller initialized in `initState`.
+
 <Callout title="The one-line takeaway">
-Dart is statically typed with strong inference (`var`), assign-once `final`, and compile-time `const` — and `const` is special because it canonicalizes values, which powers Flutter's rebuild-skipping. Its **named parameters** are why every widget reads as `Widget(child: ..., color: ...)`, and **collection-if/for** is the idiomatic way to build widget lists.
+Dart is statically typed with strong inference (`var`), assign-once `final`, and compile-time `const` — and `const` is special because it canonicalizes values (proven above for records too), which powers Flutter's rebuild-skipping. **Records** (Dart 3.0) give you multiple-return and structural equality with zero boilerplate. **Patterns** (Dart 3.0) destructure by shape and, over a `sealed` class or an `enum`, get real analyzer-enforced **exhaustiveness** — proven above with both a `non_exhaustive_switch_statement` and a `non_exhaustive_switch_expression`. **Extension types** (Dart 3.3) wrap a type at zero runtime cost while genuinely restricting its interface — proven with a real `undefined_method` error. **Named parameters** are why every widget reads as `Widget(child: ..., color: ...)`, and **collection-if/for** is the idiomatic way to build widget lists.
 </Callout>
+
+## Reading AI-generated code
+
+AI-generated Dart tends to default to the *oldest* idiom it knows for a job — a `class` with fields instead of a record for a multiple-return, a chain of `is`/`as` checks instead of a `switch` pattern, `Map<String, dynamic>` instead of a typed record or a real model. None of this is wrong, exactly — it's usually just years out of date relative to what the type system can now check for you.
+
+```dart
+// AI-generated: "return the min and max of a list"
+class MinMaxResult {
+  MinMaxResult(this.min, this.max);
+  final double min;
+  final double max;
+}
+
+MinMaxResult minMax(List<double> values) {
+  var lo = values.first, hi = values.first;
+  for (final v in values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return MinMaxResult(lo, hi);
+}
+```
+
+Before trusting generated code like this, check for:
+
+- A throwaway multiple-return wrapper class (no other purpose than bundling 2–3 values) that a **record** — `(double, double)` or `({double min, double max})` — would replace with zero declarations, proven above with `minMax`.
+- A `switch` (or `if`/`else if` chain) over a type hierarchy that isn't `sealed` — meaning the analyzer can never tell you a case was missed. If the hierarchy is meant to be closed (a fixed, known set of variants), it should be `sealed`, and the `switch` should be a real `switch` expression/statement (not `is` checks) to get the exhaustiveness proof shown above.
+- A wrapper *class* (extra runtime allocation) used purely for type-safety on a primitive (an ID, a currency amount) where an **extension type** would give the same safety at zero cost — proven above that `UserId('...')` really is a plain `String` at runtime.
+
+<SpotTheBug code={`sealed class PaymentResult {}
+final class Success extends PaymentResult {
+  Success(this.transactionId);
+  final String transactionId;
+}
+final class Declined extends PaymentResult {
+  Declined(this.reason);
+  final String reason;
+}
+final class NetworkError extends PaymentResult {
+  NetworkError(this.message);
+  final String message;
+}
+
+String summarize(PaymentResult result) => switch (result) {
+  Success(:final transactionId) => 'Paid: \$transactionId',
+  Declined(:final reason) => 'Declined: \$reason',
+};`}>
+This does not compile: `PaymentResult` is `sealed` with **three** subtypes (`Success`, `Declined`, `NetworkError`), but the `switch` expression in `summarize()` only covers two — the real analyzer error is `non_exhaustive_switch_expression`, naming exactly what's missing: `"doesn't match the pattern 'NetworkError()'"`, the same diagnostic proven earlier in this lesson for `Shape2`/`Status2`. The fix is adding the missing case (`NetworkError(:final message) => 'Error: \$message'`) — and because the hierarchy is `sealed`, the compiler will force this same fix everywhere else `PaymentResult` is switched over, not just here.
+</SpotTheBug>
+
+## Mental Model
+
+Dart 3's headline features (records, patterns, class modifiers, extension types) share one goal: move a check that used to live in a convention or a code review into the **type checker**, at zero or near-zero runtime cost. A record is "a tuple, but the compiler checks the shape." A `sealed`+`switch` is "an enum-like union, but the compiler checks every branch." An extension type is "a wrapper class, but the compiler erases it." None of these are new *capabilities* Dart lacked before 3.0 — you could always write a wrapper class or an `is`-check chain — they're the same capability with the manual, easy-to-forget verification step now done for you, automatically, on every build.
+
+## Trade-offs
+
+| Feature | Benefit | Cost |
+| --- | --- | --- |
+| Record over a wrapper class | Zero declaration, structural equality, canonicalized when `const` | No named type to attach further behavior to — reach for a class once a record needs methods |
+| `sealed` + `switch` over `is`-chain | Real exhaustiveness checking, proven above | Every new subtype forces you to touch every `switch` over it — a feature when you want that, friction when you don't |
+| Extension type over wrapper class | Zero runtime allocation, proven above (`id is String` is `true`) | Not a real subtype relationship unless `implements` names a real supertype of the representation type — easy to assume more polymorphism than you actually get |
+| `when` guard / relational pattern | Expresses "this case, but only if..." inline, no nested `if` | Overusing guards can hide cases the exhaustiveness checker would otherwise have forced you to name explicitly |
+
+## Common Misconceptions
+
+- **"A switch without a `default` always needs one, or the compiler will complain."** Proven wrong above: a `switch` over an exhaustively-covered `sealed` class or `enum` needs **no** `default`/wildcard at all — adding one to `firstTwo`'s already-exhaustive list patterns is flagged `unreachable_switch_case`, a real diagnostic in the opposite direction.
+- **"Records are just tuples; a class can always do the same thing."** True in principle, but a record needs zero declaration and gets structural equality and `const` canonicalization for free — proven above with `identical()` — where a hand-written class needs an explicit `==`/`hashCode` override (covered next lesson) to get the same equality behavior.
+- **"An extension type is basically a `typedef`."** Disproven above: a `typedef` exposes every member of the underlying type; `UserId(...).toUpperCase()` is a real `undefined_method` error on an extension type that doesn't `implements String`, precisely because it restricts the interface rather than aliasing it.
+- **"Exhaustiveness checking works on any `abstract class` hierarchy."** It requires `sealed` specifically — proven in [`bloc-and-patterns`](/flutter/en/state-management/bloc-and-patterns/) and here: only a closed (`sealed`) hierarchy or an `enum` lets the analyzer enumerate every possible subtype/value to check against.
 
 export const quizTour = [
   {
@@ -91,6 +488,7 @@ export const quizTour = [
       'final is only for numbers',
     ],
     answer: 1,
+    explain: 'const values are canonicalized — proven above for records: two `const (1, 2)` records are identical(), the same object, unlike a final-built record from runtime values.',
   },
   {
     q: 'Why are named parameters so central to Flutter?',
@@ -121,6 +519,39 @@ export const quizTour = [
       'Marks a nullable type',
     ],
     answer: 1,
+  },
+  {
+    q: 'A `switch` expression over a sealed `Shape2` (Circle2/Square2) is missing the Square2 case. What is the real, proven outcome?',
+    options: [
+      'It compiles, Square2 silently falls through to null',
+      'flutter analyze reports a real error naming the exact missing pattern — non_exhaustive_switch_statement or _expression depending on the switch form',
+      'It only warns in debug builds',
+      'Dart picks whichever case looks closest',
+    ],
+    answer: 1,
+    explain: 'Proven above with the exact captured diagnostics for both the statement form (Shape2) and the expression form (Status2, an enum) — the analyzer names the precise missing pattern in each case.',
+  },
+  {
+    q: 'Why does `UserId(...).toUpperCase()` fail to compile, proven above, when `UserId` wraps a `String`?',
+    options: [
+      'Extension types cannot wrap String',
+      'UserId does not implement String, so only its own declared members are visible — a real undefined_method error, even though at runtime the value genuinely IS a String',
+      'toUpperCase is deprecated in Dart 3',
+      'It is a runtime error, not a compile-time one',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real `is String` check returning true (zero runtime cost, no wrapper object) alongside the real compile-time undefined_method error for calling a non-declared member — extension types restrict the interface, they do not alias it.',
+  },
+  {
+    q: 'Why is a record often preferable to a one-off wrapper class for returning two or three values, per this lesson\'s "Reading AI-generated code" section?',
+    options: [
+      'Records are always faster at runtime',
+      'A record needs zero declaration and gets structural equality/const canonicalization for free, replacing a throwaway class whose only job was bundling values',
+      'Classes cannot return multiple values',
+      'Records replace all classes',
+    ],
+    answer: 1,
+    explain: 'Proven with minMax(): a (double, double) record destructures directly with `final (low, high) = ...` and compares with == out of the box, with no MinMaxResult class ever declared.',
   },
 ];
 
