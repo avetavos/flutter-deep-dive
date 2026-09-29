@@ -1,0 +1,1826 @@
+---
+title: The AI bug catalog
+description: '28 บั๊กที่โค้ด Flutter ที่ AI สร้างเป็นซ้ำ ๆ — โค้ดที่ AI มักเขียน, ทำไมมันผิด, ผลลัพธ์จริงที่จับสดสำหรับโมดูลนี้ (analyzer diagnostic, flutter test ที่ fail, หรือ runtime error), และทางแก้'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+ทุก snippet ด้านล่างถูกเขียนให้เหมือนโค้ดที่ AI assistant สร้างจริง ๆ เป๊ะ — ลื่นไหล, สมเหตุสมผล, และมัก analyze ผ่านสะอาด — แล้วรันจริงกับโปรเจกต์ scratch ที่สร้างจาก `flutter create` แบบทิ้งขว้างบน Mac เครื่องนี้ (Flutter 3.47.5, Dart 3.13.4) ไม่ใช่ probe ที่ใช้ร่วมกันของคอร์ส ผลลัพธ์ที่ยกมาก็อปมาคำต่อคำจากการรันจริงเหล่านั้น ตัดให้สั้นลง ไม่ได้แต่งขึ้นจากความจำ จัดกลุ่มแบบเดียวกับ **[How to read Flutter code you did not write](/flutter/th/reading-flutter/)** และ **[Review Checklist](/flutter/th/reading-flutter/review-checklist/)** ที่ตามหลังบทนี้
+
+## State & lifecycle
+
+### 1. ลืม `ProviderScope`
+
+`ref.watch`/`ref.read` ของ Riverpod ต้องการ `ProviderContainer` ให้อ่าน `ProviderScope` คือ widget ที่สร้างมันขึ้นมาและทำให้เข้าถึงได้ ข้าม widget นี้ไป แล้วทุก `ConsumerWidget` จะ throw ทันทีที่มันพยายามอ่าน provider
+
+```dart
+// lib/ai-bug-catalog/01-provider-scope.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+final nameProvider = Provider<String>((ref) => 'Milo');
+
+class NameOnly extends ConsumerWidget {
+  const NameOnly({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final name = ref.watch(nameProvider);
+    return Text(name);
+  }
+}
+
+// AI-generated: forgot to wrap the app in ProviderScope.
+Widget buggyApp() => const MaterialApp(home: Scaffold(body: NameOnly()));
+```
+
+**อาการ — `flutter test` ที่ fail จริง จับสดสำหรับโมดูลนี้:**
+
+```dart
+// test/ai-bug-catalog/01-provider-scope_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/01-provider-scope.dart';
+
+void main() {
+  testWidgets('no ProviderScope -> throws', (tester) async {
+    await tester.pumpWidget(buggyApp());
+    final exception = tester.takeException();
+    expect(exception, isA<StateError>());
+    expect(exception.toString(), contains('No ProviderScope found'));
+  });
+}
+```
+
+```text
+✓ no ProviderScope -> throws
+00:00 +1: All tests passed!
+```
+
+exception ที่แท้จริงคือ `StateError` ที่มีข้อความ **"Bad state: No ProviderScope found"**
+
+**ทางแก้:**
+
+```dart
+Widget fixedApp() => const ProviderScope(
+      child: MaterialApp(home: Scaffold(body: NameOnly())),
+    );
+```
+
+**จับได้โดย:** ผลลัพธ์จริงของ `riverpod_lint` rule `missing_provider_scope` (พิสูจน์สด ๆ ใน **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)**) หรือการ crash บนหน้าจอแรกสุดที่อ่าน provider
+
+### 2. `setState` หลัง `await` โดยไม่เช็ค `mounted`
+
+`State` สามารถถูก dispose ได้ (user นำทางออกไป, list item ถูกเลื่อนออกจาก list ที่สร้างแบบ lazy) ในขณะที่ `Future` ที่มันเริ่มไว้ยังค้างอยู่ พอมัน resolve แล้วเรียก `setState` ก็ไม่มี widget เหลือให้ rebuild
+
+```dart
+// lib/ai-bug-catalog/02-mounted-guard.dart
+import 'package:flutter/material.dart';
+
+class BuggyLoader extends StatefulWidget {
+  const BuggyLoader({super.key, required this.future});
+  final Future<String> future;
+  @override
+  State<BuggyLoader> createState() => _BuggyLoaderState();
+}
+
+class _BuggyLoaderState extends State<BuggyLoader> {
+  String _text = 'loading';
+  @override
+  void initState() {
+    super.initState();
+    // AI-generated: no `mounted` guard after the await.
+    widget.future.then((value) => setState(() => _text = value));
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_text);
+}
+```
+
+**อาการ — `flutter test` ที่ fail จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+setState() called after dispose(): _BuggyLoaderState#5aa37(lifecycle state: defunct, not mounted)
+This error happens if you call setState() on a State object for a widget that no longer appears in
+the widget tree (e.g., whose parent widget no longer includes the widget in its build). This error
+can occur when code calls setState() from a timer, from an animation callback, or after an
+asynchronous operation (such as an awaited network request or other Future) completes after the
+widget has been removed from the tree.
+The preferred solution is to cancel the timer or stop listening to the animation in the dispose()
+callback. Another solution is to check the "mounted" property of this object before calling
+setState() to ensure the object is still in the tree.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:**
+
+```dart
+// lib/ai-bug-catalog/02-mounted-guard-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedLoader extends StatefulWidget {
+  const FixedLoader({super.key, required this.future});
+  final Future<String> future;
+  @override
+  State<FixedLoader> createState() => _FixedLoaderState();
+}
+
+class _FixedLoaderState extends State<FixedLoader> {
+  String _text = 'loading';
+  @override
+  void initState() {
+    super.initState();
+    widget.future.then((value) {
+      if (!mounted) return;
+      setState(() => _text = value);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_text);
+}
+```
+
+```dart
+// test/ai-bug-catalog/02-mounted-guard-fixed_test.dart
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/02-mounted-guard-fixed.dart';
+
+void main() {
+  testWidgets('mounted-guarded setState after dispose is a silent no-op', (tester) async {
+    final completer = Completer<String>();
+    await tester.pumpWidget(MaterialApp(home: FixedLoader(future: completer.future)));
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    completer.complete('Milo');
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+}
+```
+
+```text
+✓ mounted-guarded setState after dispose is a silent no-op
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — `flutter analyze` เห็นการเรียก method ที่ถูกต้องสมบูรณ์ไม่ว่ากรณีไหน มีแค่ widget ที่ถูก dispose กลาง `await` เท่านั้นที่เผยมันออกมา ไม่ว่าในชุด test **[Testing](/flutter/th/tooling-and-production/testing/)** หรือใน production
+
+### 3. `setState` ถูกเรียกจาก `build()` ของ sibling (cross-sibling)
+
+widget ที่เรียก callback แบบ synchronous จากภายใน `build()` ของตัวมันเอง และ callback นั้นเรียก `setState` บน widget *อื่น* ที่ยังอยู่กลาง build จะชน guard "อย่าแก้ไขสิ่งที่กำลัง build อยู่" ของ Flutter
+
+```dart
+// lib/ai-bug-catalog/03-setstate-during-build.dart
+import 'package:flutter/material.dart';
+
+class Reporter extends StatelessWidget {
+  const Reporter({super.key, required this.onBuild});
+  final VoidCallback onBuild;
+  @override
+  Widget build(BuildContext context) {
+    // AI-generated: reports "I built" straight from build(), synchronously.
+    onBuild();
+    return const SizedBox.shrink();
+  }
+}
+
+class BuggyParent extends StatefulWidget {
+  const BuggyParent({super.key});
+  @override
+  State<BuggyParent> createState() => _BuggyParentState();
+}
+
+class _BuggyParentState extends State<BuggyParent> {
+  int _count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('$_count'),
+        if (_count == 0) Reporter(onBuild: () => setState(() => _count++)),
+      ],
+    );
+  }
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+setState() or markNeedsBuild() called during build.
+This BuggyParent widget cannot be marked as needing to build because the framework is already in the
+process of building widgets. A widget can be marked as needing to be built during the build phase
+only if one of its ancestors is currently building. This exception is allowed because the framework
+builds parent widgets before children, which means a dirty descendant will always be built.
+The widget on which setState() or markNeedsBuild() was called was:
+  BuggyParent
+The widget which was currently being built when the offending call was made was:
+  Reporter
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** เลื่อน `setState` ให้พ้น build phase ปัจจุบันด้วย `addPostFrameCallback`
+
+```dart
+// lib/ai-bug-catalog/03-setstate-during-build-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedParent extends StatefulWidget {
+  const FixedParent({super.key});
+  @override
+  State<FixedParent> createState() => _FixedParentState();
+}
+
+class _FixedParentState extends State<FixedParent> {
+  int _count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('$_count'),
+        if (_count == 0)
+          _Reporter(
+            onBuild: () => WidgetsBinding.instance
+                .addPostFrameCallback((_) => setState(() => _count++)),
+          ),
+      ],
+    );
+  }
+}
+
+class _Reporter extends StatelessWidget {
+  const _Reporter({required this.onBuild});
+  final VoidCallback onBuild;
+  @override
+  Widget build(BuildContext context) {
+    onBuild();
+    return const SizedBox.shrink();
+  }
+}
+```
+
+```text
+✓ deferring to addPostFrameCallback does not throw
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** framework เอง ทันทีและเสียงดัง — แต่เฉพาะตอนที่ widget ตัวนี้ build จริงในขณะที่เป้าหมายของมันยังกลาง build เท่านั้น test ที่ pump แค่ครั้งเดียวและไม่เคย trigger เส้นทางการ report จะพลาดมันไปเลย
+
+### 4. field `late` ถูกอ่านก่อนที่จะถูกกำหนดค่า
+
+`late` เลื่อนการ initialize ของ field ออกไปแต่ไม่ได้เปลี่ยน *เวลา* ที่ผู้เรียกคาดหวังจะอ่านมัน — AI assistant ที่ก็อป field `late` มาโดยไม่ตรวจสอบทุก branch ที่อาจอ่านมันก่อนที่ method ซึ่งกำหนดค่าจะรัน ship crash จริงตอนอ่านครั้งแรก ไม่ใช่ตอนเขียนครั้งแรก
+
+```dart
+// lib/ai-bug-catalog/04-late-field.dart
+class Session {
+  // AI-generated: assumed `configure()` always runs before `token` is read,
+  // but nothing enforces that ordering.
+  late String token;
+
+  void configure(String value) => token = value;
+}
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/04-late-field_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/04-late-field.dart';
+
+void main() {
+  test('reading a late field before it is set throws LateInitializationError', () {
+    final session = Session();
+    expect(() => session.token, throwsA(isA<Error>()));
+  });
+
+  test('configuring first makes the read safe', () {
+    final session = Session()..configure('abc123');
+    expect(session.token, 'abc123');
+  });
+}
+```
+
+```text
+✓ reading a late field before it is set throws LateInitializationError
+✓ configuring first makes the read safe
+00:00 +2: All tests passed!
+```
+
+**ทางแก้:** ทำให้ field เป็น nullable แล้วเช็ค `null`, ให้ค่า default จริง หรือให้ constructor บังคับรับค่าแทนขั้นตอน `configure()` แยกต่างหาก
+
+**จับได้โดย:** ไม่มีอะไร static เลย — `late` เป็นสัญญาให้ compiler ไม่ใช่การรับประกันที่ analyzer เช็ค มีแค่การอ่านจริงบน instance ที่ยังไม่ configure เท่านั้นที่ throw และมัน throw ตอน READ ไม่ใช่ตอนที่ assignment ถูกข้ามไป ซึ่งทำให้ stack trace ชี้ไปที่บรรทัดที่ดูไร้พิษภัยห่างไกลจากบั๊กจริง
+
+### 5. `StateProvider`/`StateNotifierProvider` ถูก import ราวกับยังเป็น Riverpod 3 API ระดับบนสุด
+
+ข้อมูลฝึกสอน AI ครอบคลุม Riverpod 2 ที่ `StateProvider` และ `StateNotifierProvider` อยู่แถวหน้าใน export หลัก `flutter_riverpod.dart` Riverpod 3 ย้ายทั้งคู่ (บวก `ChangeNotifierProvider`) ไปไว้หลัง import `legacy.dart` ที่ชัดเจน — พวกมันยังมีอยู่จริง แค่ไม่ได้อยู่ตรงที่ AI assistant ที่ฝึกจาก docs เก่าคาดหวัง
+
+```dart
+// lib/ai-bug-catalog/05-state-provider.dart — @expect-error StateProvider moved behind package:flutter_riverpod/legacy.dart in Riverpod 3; the main export no longer has it
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+// AI-generated (trained on Riverpod 2 docs).
+final counterProvider = StateProvider<int>((ref) => 0);
+```
+
+**อาการ — `flutter analyze` diagnostic จริง จับสดกับ `flutter_riverpod` 3.4.3:**
+
+```text
+error • The function 'StateProvider' isn't defined. Try importing the library that defines
+'StateProvider', correcting the name to the name of an existing function, or defining a function
+named 'StateProvider' • lib/ai-bug-catalog/05-state-provider.dart:5:25 • undefined_function
+```
+
+**ทางแก้ analyze สะอาด:**
+
+```dart
+// lib/ai-bug-catalog/05-state-provider-fixed.dart
+import 'package:flutter_riverpod/legacy.dart';
+
+// Still works in Riverpod 3, but only via the explicit legacy import --
+// prefer NotifierProvider/@riverpod codegen for new code instead.
+final counterProvider = StateProvider<int>((ref) => 0);
+```
+
+**จับได้โดย:** `flutter analyze` — แต่เฉพาะเมื่อผู้อ่านรู้แล้วว่าต้องมองหา เพราะข้อความ error เอ่ยชื่อ function จริงที่ไม่มีอยู่จริง ๆ ภายใต้ import นั้น โดยไม่มีคำใบ้เลยว่ามันย้ายไป ไม่ใช่หายไป
+
+## Widget tree & keys
+
+### 6. ไม่มี `key` บน list ของ children แบบ stateful ที่เรียงใหม่ได้
+
+ถ้าไม่มี `key` Flutter จับคู่ widget ที่ rebuild กับ `State` ของมันด้วย **type และตำแหน่ง** ไม่ใช่ identity เรียงลำดับ list ใหม่ แล้ว `State` object แต่ละตัวจะติดอยู่กับตำแหน่งบนจอแทนที่จะตามข้อมูลของมันไป
+
+```dart
+// lib/ai-bug-catalog/06-missing-key.dart
+import 'package:flutter/material.dart';
+
+class ColorBox extends StatefulWidget {
+  const ColorBox({super.key, required this.label});
+  final String label;
+  @override
+  State<ColorBox> createState() => _ColorBoxState();
+}
+
+class _ColorBoxState extends State<ColorBox> {
+  bool _tapped = false;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _tapped = true),
+      child: Text(_tapped ? '${widget.label} (tapped)' : widget.label),
+    );
+  }
+}
+
+// AI-generated: no key, so Flutter matches by TYPE + POSITION, not identity.
+class BuggyList extends StatelessWidget {
+  const BuggyList({super.key, required this.labels});
+  final List<String> labels;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [for (final l in labels) ColorBox(label: l)]);
+  }
+}
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/06-missing-key_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/06-missing-key.dart';
+
+void main() {
+  testWidgets('no key: tapped state sticks to POSITION, not the item', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BuggyList(labels: ['Milo', 'Rex'])));
+    await tester.tap(find.text('Milo'));
+    await tester.pump();
+    expect(find.text('Milo (tapped)'), findsOneWidget);
+
+    // Reorder: Rex now occupies position 0. No key -> Flutter reuses the
+    // SAME State object for position 0 -- the "tapped" flag follows the
+    // POSITION, not Milo.
+    await tester.pumpWidget(const MaterialApp(home: BuggyList(labels: ['Rex', 'Milo'])));
+    expect(find.text('Rex (tapped)'), findsOneWidget);
+    expect(find.text('Milo (tapped)'), findsNothing);
+  });
+}
+```
+
+```text
+✓ no key: tapped state sticks to POSITION, not the item
+00:00 +1: All tests passed!
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `ValueKey` ต่อรายการผูก `State` เข้ากับข้อมูล ไม่ใช่ตำแหน่ง
+
+```dart
+// lib/ai-bug-catalog/06-missing-key-fixed.dart
+import 'package:flutter/material.dart';
+
+class ColorBox extends StatefulWidget {
+  const ColorBox({super.key, required this.label});
+  final String label;
+  @override
+  State<ColorBox> createState() => _ColorBoxState();
+}
+
+class _ColorBoxState extends State<ColorBox> {
+  bool _tapped = false;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _tapped = true),
+      child: Text(_tapped ? '${widget.label} (tapped)' : widget.label),
+    );
+  }
+}
+
+class FixedList extends StatelessWidget {
+  const FixedList({super.key, required this.labels});
+  final List<String> labels;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [for (final l in labels) ColorBox(key: ValueKey(l), label: l)]);
+  }
+}
+```
+
+```text
+✓ ValueKey: tapped state stays attached to the correct item
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — มัน render ถูกต้องในรอบแรกทุกครั้ง มีแค่การเรียงใหม่-แล้วตรวจสอบด้วยมือระหว่างรีวิว (หรือ regression test ที่ seed ขั้นตอนการเรียงใหม่ไว้) เท่านั้นที่จับมันได้
+
+### 7. `GlobalKey` ตัวเดียวกันถูกใช้ซ้ำข้าม sibling widget
+
+AI assistant ที่หยิบ `GlobalKey` ระดับโมดูลตัวเดียวมาหมายถึง "รายการที่กำลังถูกเลือกอยู่" — โดยสมมติว่าจะมี widget เดียวเท่านั้นที่ถือมันในแต่ละครั้ง — จะพังทันทีที่ widget สองตัวที่ถือ key นั้นมีอยู่ใน frame เดียวกัน
+
+```dart
+// lib/ai-bug-catalog/07-global-key-reused.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: ONE GlobalKey reused for "the featured item".
+final featuredKey = GlobalKey();
+
+class BuggyTwoPanes extends StatelessWidget {
+  const BuggyTwoPanes({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(key: featuredKey, width: 100, height: 100, color: Colors.blue),
+        Container(key: featuredKey, width: 100, height: 100, color: Colors.red),
+      ],
+    );
+  }
+}
+```
+
+**อาการ — `flutter test` ที่ fail จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+Duplicate keys found.
+If multiple keyed widgets exist as children of another widget, they must have unique keys.
+Row(direction: horizontal, mainAxisAlignment: start, crossAxisAlignment: center) has multiple
+children with key [GlobalKey#52079].
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `UniqueKey()` (หรือไม่ใส่ key เลยถ้า identity ข้าม rebuild ไม่สำคัญ) ต่อ widget
+
+```dart
+// lib/ai-bug-catalog/07-global-key-reused-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedTwoPanes extends StatelessWidget {
+  const FixedTwoPanes({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(key: UniqueKey(), width: 100, height: 100, color: Colors.blue),
+        Container(key: UniqueKey(), width: 100, height: 100, color: Colors.red),
+      ],
+    );
+  }
+}
+```
+
+```text
+✓ a distinct key per widget does not throw
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** framework เอง ทันทีและเสียงดัง ในนาทีที่ widget สองตัวถือ key เดียวกันมีอยู่ในการ build เดียว — แต่เฉพาะการจัดวางแบบนั้น (sibling หรือสอง branch ที่ build ใน frame เดียวกัน) `GlobalKey` ที่ใช้ซ้ำข้าม build ที่ไม่เคยซ้อนทับกันในเวลาสามารถซ่อนได้นานกว่านั้นมาก
+
+### 8. `Scaffold.of(context)` ถูกเรียกด้วย build context ของ `Scaffold` เอง
+
+`Scaffold.of(context)` ต้องการ context ที่เป็น **descendant** ของ `Scaffold` — context ที่ `build()` ของ `Scaffold` widget เองได้รับเป็น ancestor ของมัน ไม่ใช่ descendant ดังนั้นการค้นหาจึงล้มเหลว
+
+```dart
+// lib/ai-bug-catalog/08-scaffold-of.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: calls Scaffold.of(context) with the SAME context the
+// Scaffold itself was built with.
+class BuggyPage extends StatelessWidget {
+  const BuggyPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Buggy')),
+      body: Center(
+        child: ElevatedButton(
+          onPressed: () => Scaffold.of(context).showBottomSheet(
+            (_) => const SizedBox(height: 100, child: Text('Sheet')),
+          ),
+          child: const Text('Open sheet'),
+        ),
+      ),
+    );
+  }
+}
+```
+
+**อาการ — `flutter test` ที่ fail จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+Scaffold.of() called with a context that does not contain a Scaffold.
+No Scaffold ancestor could be found starting from the context that was passed to Scaffold.of().
+This usually happens when the context provided is from the same StatefulWidget as that whose build
+function actually creates the Scaffold widget being sought.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `Builder` สร้าง context ใหม่ที่เป็น descendant ของ `Scaffold` จริง ๆ
+
+```dart
+// lib/ai-bug-catalog/08-scaffold-of-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedPage extends StatelessWidget {
+  const FixedPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Fixed')),
+      body: Center(
+        child: Builder(
+          builder: (innerContext) => ElevatedButton(
+            onPressed: () => Scaffold.of(innerContext).showBottomSheet(
+              (_) => const SizedBox(height: 100, child: Text('Sheet')),
+            ),
+            child: const Text('Open sheet'),
+          ),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```text
+✓ Scaffold.of(context) from a Builder descendant works
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรเลยจนกว่าปุ่มจะถูกกดจริง ๆ — โค้ดนี้ compile ผ่านและแม้แต่ *build* ก็ผ่านสบาย การค้นหาจะรันแล้วล้มเหลวก็ต่อเมื่อ callback ถูกยิงเท่านั้น
+
+## Layout
+
+### 9. `ListView` ได้รับความสูงไม่มีขอบเขตจาก `Column` ธรรมดา
+
+`Column` ให้ children ของมัน **ความสูงไม่มีขอบเขต** ตามแกนหลัก `ListView` ต้องการความสูงมีขอบเขตเพื่อรู้ว่า viewport ของมันใหญ่แค่ไหน วางอันหนึ่งตรง ๆ ในอีกอันโดยไม่มีอะไรคั่นกลาง แล้ว layout จะล้มเหลว
+
+```dart
+// lib/ai-bug-catalog/09-unbounded-listview.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: a ListView dropped straight into a Column.
+class BuggyPage extends StatelessWidget {
+  const BuggyPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Header'),
+        ListView(children: const [Text('one'), Text('two'), Text('three')]),
+      ],
+    );
+  }
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+Vertical viewport was given unbounded height.
+Viewports expand in the scrolling direction to fill their container. In this case, a vertical
+viewport was given an unlimited amount of vertical space in which to expand. This situation
+typically happens when a scrollable widget is nested inside another scrollable widget.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `Expanded` ให้ `ListView` ความสูงมีขอบเขต — เท่าที่เหลือใน `Column` **กติกาที่แท้จริง แม่นยำ ๆ:** ancestor ที่ให้ความสูงไม่มีขอบเขต (แกนหลักของ `Column`) ต้องการกล่องที่มีขอบเขตอยู่ตรงไหนสักที่ระหว่างมันกับ scrollable/flexible child ทิศทางย้อนกลับ — `Column` *ข้างใน* `ListView` — ไม่ต้องการอะไรเพิ่มเลย: scrollable ให้ children ของมัน cross-axis ที่มีขอบเขตและ main-axis ที่ไม่มีขอบเขตอยู่แล้ว ซึ่งตรงกับที่ `Column` ขนาดตามธรรมชาติต้องการพอดี
+
+```dart
+// lib/ai-bug-catalog/09-unbounded-listview-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedPage extends StatelessWidget {
+  const FixedPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Header'),
+        Expanded(
+          child: ListView(children: const [Text('one'), Text('two'), Text('three')]),
+        ),
+      ],
+    );
+  }
+}
+
+// The reverse needs NO extra widget:
+class ColumnInsideListView extends StatelessWidget {
+  const ColumnInsideListView({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [Column(children: const [Text('a'), Text('b'), Text('c')])]);
+  }
+}
+```
+
+```text
+✓ Expanded around the ListView fixes it
+✓ a Column INSIDE a ListView needs no extra widget at all
+00:00 +2: All tests passed!
+```
+
+**จับได้โดย:** framework เอง ทันทีและเสียงดัง ความละเอียดอ่อนที่ต้องจับในรีวิวคือทิศทาง — pattern การแก้แบบเดียวกันมักถูก apply เกินความจำเป็นกับกรณีย้อนกลับ ซึ่งไม่เคยต้องการมันเลย
+
+### 10. `Expanded` ถูกใช้นอก `Flex`
+
+`Expanded` พึ่งพา `ParentData` ที่มีแค่ `Row`/`Column`/`Flex` เท่านั้นที่ตั้งค่าให้กับ direct children ของมัน วางไว้ใน `Center`, `Container`, หรืออะไรก็ตามอื่น มันจะล้มเหลว
+
+```dart
+// lib/ai-bug-catalog/10-expanded-outside-flex.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: Expanded directly inside a Center, which is not a Flex.
+class BuggyBox extends StatelessWidget {
+  const BuggyBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Center(child: Expanded(child: Container(color: Colors.blue)));
+  }
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+Incorrect use of ParentDataWidget.
+The ParentDataWidget Expanded(flex: 1) wants to apply ParentData of type FlexParentData to a
+RenderObject, which has been set up to accept ParentData of incompatible type BoxParentData.
+Usually, this means that the Expanded widget has the wrong ancestor RenderObjectWidget. Typically,
+Expanded widgets are placed directly inside Flex widgets.
+The offending Expanded is currently placed inside a Center widget.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:**
+
+```dart
+// lib/ai-bug-catalog/10-expanded-outside-flex-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedBox extends StatelessWidget {
+  const FixedBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [Expanded(child: Container(color: Colors.blue))]);
+  }
+}
+```
+
+```text
+✓ Expanded is a child of a Row -- lays out fine
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** framework เอง ทันที และข้อความ error ยังเอ่ยชื่อ ancestor จริงที่มันเจอด้วย — entry ที่แก้ไขเร็วที่สุดในทั้ง catalog นี้เมื่อเห็นแล้ว แต่ข้อความเพียงอย่างเดียวไม่ได้บอกว่า "ห่อด้วย Row/Column" ผู้อ่านยังต้องรู้กติกานั้นเอง
+
+### 11. `RenderFlex` overflow จาก children ขนาดคงที่ที่ไม่มีทางออก
+
+`Row`/`Column` ของ children ขนาดคงที่ที่รวมกันเกินพื้นที่ที่มี โดยไม่มี `Expanded`/`Flexible`/scrolling มาดูดซับส่วนต่าง จะ overflow — เห็นได้ชัดใน debug build (ลายทางเหลือง-ดำ) และเป็น assertion จริงที่อยู่ข้างใต้
+
+```dart
+// lib/ai-bug-catalog/11-renderflex-overflow.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: 20 fixed-width boxes in a Row, wider than any phone screen.
+class BuggyRow extends StatelessWidget {
+  const BuggyRow({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: List.generate(
+        20,
+        (i) => Container(width: 100, height: 40, color: Colors.primaries[i % Colors.primaries.length]),
+      ),
+    );
+  }
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+A RenderFlex overflowed by 1200 pixels on the right.
+The overflowing RenderFlex has an orientation of Axis.horizontal.
+The edge of the RenderFlex that is overflowing has been marked in the rendering with a yellow and
+black striped pattern. This is usually caused by the contents being too big for the RenderFlex.
+Consider applying a flex factor (e.g. using an Expanded widget) to force the children of the
+RenderFlex to fit within the available space instead of being sized to their natural size.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `Expanded` ให้ทุก child แบ่งความกว้างที่มีแทนที่จะเรียกร้องความกว้างตามธรรมชาติแบบไม่มีเงื่อนไข
+
+```dart
+// lib/ai-bug-catalog/11-renderflex-overflow-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedRow extends StatelessWidget {
+  const FixedRow({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: List.generate(
+        20,
+        (i) => Expanded(
+          child: Container(height: 40, color: Colors.primaries[i % Colors.primaries.length]),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```text
+✓ Expanded children share the available width -- no overflow
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** framework เอง เห็นได้ชัด — ตัวบ่งชี้ overflow ลายเหลือง-ดำเป็นหนึ่งใน error ไม่กี่ตัวของ Flutter ที่ปรากฏ *ใน* UI ที่ render จริง ไม่ใช่แค่ใน console ซึ่งนั่นแหละคือเหตุผลที่มันมักถูก "แก้" ด้วย `Expanded` ที่ใกล้ที่สุดบ่อยที่สุด ไม่ว่าจะถูกต้องหรือไม่ก็ตาม
+
+## Async & isolate
+
+### 12. `Future` ถูกสร้างตรง ๆ ใน `build()`
+
+การเรียก async function ข้างใน `build()` สร้าง `Future` ใหม่ — และการเรียก network/database ใหม่ — ทุกครั้งที่ rebuild ไม่ใช่ครั้งเดียวต่อ "การโหลด" เชิง logic
+
+```dart
+// lib/ai-bug-catalog/12-future-in-build.dart
+import 'package:flutter/material.dart';
+
+int fetchCount = 0;
+Future<String> fetchName() async {
+  fetchCount++;
+  return 'Milo';
+}
+
+// AI-generated: calls the async function directly inside build().
+class BuggyName extends StatelessWidget {
+  const BuggyName({super.key, required this.tick});
+  final int tick; // forces a distinct widget per pump, to prove the rebuild count
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: fetchName(), // new Future every single build()
+      builder: (context, snapshot) => Text(snapshot.data ?? 'loading'),
+    );
+  }
+}
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/12-future-in-build_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/12-future-in-build.dart';
+
+void main() {
+  testWidgets('creating the Future in build() re-fetches on every rebuild', (tester) async {
+    fetchCount = 0;
+    await tester.pumpWidget(MaterialApp(home: BuggyName(tick: 0)));
+    await tester.pumpWidget(MaterialApp(home: BuggyName(tick: 1)));
+    await tester.pumpWidget(MaterialApp(home: BuggyName(tick: 2)));
+    expect(fetchCount, 3); // three build()s -> three fetches
+  });
+}
+```
+
+```text
+✓ creating the Future in build() re-fetches on every rebuild
+00:00 +1: All tests passed!
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** สร้าง `Future` ครั้งเดียว ใน `State` ไม่ใช่ใน `build()`
+
+```dart
+// lib/ai-bug-catalog/12-future-in-build-fixed.dart
+import 'package:flutter/material.dart';
+
+int fetchCount = 0;
+Future<String> fetchName() async {
+  fetchCount++;
+  return 'Milo';
+}
+
+class FixedName extends StatefulWidget {
+  const FixedName({super.key, required this.tick});
+  final int tick;
+  @override
+  State<FixedName> createState() => _FixedNameState();
+}
+
+class _FixedNameState extends State<FixedName> {
+  late final Future<String> _future = fetchName();
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _future,
+      builder: (context, snapshot) => Text(snapshot.data ?? 'loading'),
+    );
+  }
+}
+```
+
+```text
+✓ creating the Future once in initState fetches exactly once
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — rebuild-refetch ทุกครั้งยัง resolve ด้วยข้อมูลที่ถูกต้อง demo จึงทำงานได้ มีแค่การนับการเรียก backend จริง (หรือ test แบบด้านบน) เท่านั้นที่เผยการทวีคูณนั้น
+
+### 13. closure ของ `compute()` capture `BuildContext`
+
+`compute()` ของ Dart สมัยใหม่รันบน `Isolate.run` ซึ่งสามารถส่ง closure ที่ประพฤติตัวดีข้าม isolate boundary ได้จริง — closure ที่ capture `int` ธรรมดา แม้แต่ instance method ที่ bind ไว้ ข้ามได้สบายบน Dart 3.13.4 ที่คอร์สนี้ pin ไว้ สิ่งที่ยังข้ามไม่ได้คือทุกอย่างที่เข้าถึงได้จาก widget tree: `BuildContext` เข้าถึง `Zone` ได้ทางอ้อม และ `Zone` ไม่เคย sendable เลย
+
+```dart
+// lib/ai-bug-catalog/13-compute-context.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+
+// AI-generated: captures `context` to log something mid-computation.
+class BuggySummary extends StatelessWidget {
+  const BuggySummary({super.key});
+  @override
+  Widget build(BuildContext context) {
+    int withContext(List<int> xs) {
+      debugPrint('${context.widget}'); // captures `context` -> unsendable
+      return xs.reduce((a, b) => a + b);
+    }
+    compute(withContext, const [1, 2, 3]).then((r) => debugPrint('result: $r'));
+    return const SizedBox();
+  }
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+Invalid argument(s): Illegal argument in isolate message: object is unsendable -
+Library:'dart:async' Class: _CustomZone@5048458 (see restrictions listed at `SendPort.send()`
+documentation for more information)
+ <- _parentZone in Instance of 'AutomatedTestWidgetsFlutterBinding' (from package:flutter_test/src/binding.dart)
+ <- _binding in Instance of '_BindingPipelineManifold' (from package:flutter/src/rendering/binding.dart)
+ <- ... (a long ownership chain from the captured BuildContext down to a real Zone)
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** top-level function ที่รับแค่ข้อมูลล้วน ๆ ชัดเจน — ไม่มี `BuildContext`, ไม่มี `Zone`, ไม่มีอะไรผูกกับ binding ของ isolate นี้เอง
+
+```dart
+// lib/ai-bug-catalog/13-compute-context-fixed.dart
+import 'package:flutter/foundation.dart';
+
+int _sum(List<int> xs) => xs.reduce((a, b) => a + b);
+
+Future<int> fixedSummarize(List<int> values) => compute(_sum, values);
+```
+
+```text
+✓ a top-level function with only plain data crosses the isolate boundary fine
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรจนกว่าการเรียก `compute()` จะรันจริง — โค้ดนี้ compile ผ่านสะอาดสมบูรณ์ และแม้แต่ closure ที่ capture ตัวแปร local ธรรมดาก็จะรันได้สบาย ซึ่งนั่นแหละคือสิ่งที่ทำให้มันแก้ไขผิดพลาด (มากไปหรือน้อยไป) ได้ง่าย กติกาไม่ใช่ "อย่า capture อะไรเลย" แต่คือ "อย่า capture อะไรก็ตามที่เข้าถึงได้จาก Element tree หรือ binding"
+
+### 14. `StreamController` แบบ single-subscription ถูก listen สองครั้ง
+
+`StreamController()` default เป็น single-subscription การเรียก `.listen()` ครั้งที่สองที่เป็นอิสระบน stream เดียวกัน — โค้ดชิ้นหนึ่งสำหรับ UI อีกชิ้นสำหรับ analytics เป็นต้น — จะ throw มันไม่ได้สร้าง subscriber ตัวที่สองแบบเงียบ ๆ เหมือนที่ broadcast stream ทำ
+
+```dart
+// lib/ai-bug-catalog/14-stream-double-listen.dart — @expect-error a single-subscription Stream throws on the second .listen() -- see the real "Bad state" below
+import 'dart:async';
+
+// AI-generated: default StreamController, assumed multiple listeners are fine.
+StreamController<int> buggyController() => StreamController<int>();
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+Bad state: Stream has already been listened to.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `.broadcast()` อนุญาตให้มี listener อิสระหลายตัวอย่างชัดเจน
+
+```dart
+// lib/ai-bug-catalog/14-stream-double-listen-fixed.dart
+import 'dart:async';
+
+StreamController<int> fixedController() => StreamController<int>.broadcast();
+```
+
+```dart
+// test/ai-bug-catalog/14-stream-double-listen-fixed_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/14-stream-double-listen-fixed.dart';
+
+void main() {
+  test('a broadcast StreamController allows two independent listeners', () async {
+    final controller = fixedController();
+    final a = <int>[];
+    final b = <int>[];
+    controller.stream.listen(a.add);
+    controller.stream.listen(b.add); // does NOT throw
+    controller.add(1);
+    await Future<void>.delayed(Duration.zero);
+    expect(a, [1]);
+    expect(b, [1]);
+    await controller.close();
+  });
+}
+```
+
+```text
+✓ a broadcast StreamController allows two independent listeners
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** framework เอง ทันทีและเสียงดัง ในนาทีที่ `.listen()` ครั้งที่สองรัน — แต่เฉพาะถ้า listener ตัวที่สองนั้นถูกใช้งานจริงเท่านั้น code path ที่เพิ่ม listener ตัวที่สองแบบมีเงื่อนไข (analytics hook ที่เป็น optional เป็นต้น) อาจ ship ไปโดยไม่มี test คลุมถึง
+
+## Navigation
+
+### 15. `go_router`: route ที่มีพารามิเตอร์ถูกประกาศก่อน route แบบ static
+
+`go_router` จับคู่ route ตาม **ลำดับการประกาศ** ไม่ใช่ตามความเฉพาะเจาะจง `GoRoute(path: '/pets/:id')` ที่ประกาศก่อน `GoRoute(path: '/pets/new')` ในระดับ segment เดียวกัน หมายความว่า `/pets/new` จะ match กับ route แรกสุด โดยที่ `id` เท่ากับ string `'new'` ตรง ๆ
+
+```dart
+// lib/ai-bug-catalog/15-route-order.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+// AI-generated: the parameterized route declared FIRST.
+GoRouter buggyRouter() => GoRouter(
+      initialLocation: '/pets/1',
+      routes: [
+        GoRoute(path: '/pets/:id', builder: (c, s) => Text('pet id=${s.pathParameters['id']}')),
+        GoRoute(path: '/pets/new', builder: (c, s) => const Text('new pet form')),
+      ],
+    );
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/15-route-order_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/15-route-order.dart';
+
+void main() {
+  testWidgets('/pets/:id declared first swallows /pets/new as id="new"', (tester) async {
+    final router = buggyRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    router.go('/pets/new');
+    await tester.pumpAndSettle();
+    expect(find.text('pet id=new'), findsOneWidget);
+    expect(find.text('new pet form'), findsNothing);
+  });
+}
+```
+
+```text
+✓ /pets/:id declared first swallows /pets/new as id="new"
+00:00 +1: All tests passed!
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** ประกาศ route ที่เฉพาะเจาะจงแบบ static ก่อน
+
+```dart
+// lib/ai-bug-catalog/15-route-order-fixed.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+GoRouter fixedRouter() => GoRouter(
+      initialLocation: '/pets/1',
+      routes: [
+        GoRoute(path: '/pets/new', builder: (c, s) => const Text('new pet form')),
+        GoRoute(path: '/pets/:id', builder: (c, s) => Text('pet id=${s.pathParameters['id']}')),
+      ],
+    );
+```
+
+```text
+✓ /pets/new declared first matches correctly
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — ทั้งสองลำดับ compile เหมือนกันเป๊ะ มีแค่การ navigate ไปยัง route เฉพาะแล้วตรวจสอบว่า render อะไรจริง ๆ เท่านั้นที่เผยการ misroute
+
+### 16. `context.go()` ถูกใช้ในจุดที่ต้องการ `context.push()`
+
+`go()` **แทนที่** ตำแหน่งปัจจุบันใน route stack `push()` **เพิ่ม** เข้าไป การใช้ `go()` สำหรับสิ่งที่ควรเป็น navigation แบบดำดิ่งลึก (จาก list ไปหน้า detail เป็นต้น) ทำให้ user ไม่มี "ย้อนกลับ" ให้กด
+
+```dart
+// lib/ai-bug-catalog/16-go-vs-push.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+GoRouter buildRouter() => GoRouter(
+      initialLocation: '/a',
+      routes: [
+        GoRoute(path: '/a', builder: (c, s) => const _Page('A')),
+        GoRoute(path: '/b', builder: (c, s) => const _Page('B')),
+      ],
+    );
+
+class _Page extends StatelessWidget {
+  const _Page(this.label);
+  final String label;
+  @override
+  Widget build(BuildContext context) => Scaffold(body: Text('Page $label'));
+}
+```
+
+**PROOF — เปรียบเทียบความลึกของ stack โดยตรง:**
+
+```dart
+// test/ai-bug-catalog/16-go-vs-push_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/16-go-vs-push.dart';
+
+void main() {
+  testWidgets('context.go REPLACES the stack', (tester) async {
+    final router = buildRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    router.go('/b'); // AI-generated: used go() for what should be a "push"
+    await tester.pumpAndSettle();
+    expect(router.routerDelegate.currentConfiguration.matches.length, 1); // /a is GONE
+  });
+
+  testWidgets('context.push KEEPS the previous page on the stack', (tester) async {
+    final router = buildRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    router.push('/b'); // fixed: push() when the user should be able to go "back"
+    await tester.pumpAndSettle();
+    expect(router.routerDelegate.currentConfiguration.matches.length, 2); // /a is still there
+  });
+}
+```
+
+```text
+✓ context.go REPLACES the stack
+✓ context.push KEEPS the previous page on the stack
+00:00 +2: All tests passed!
+```
+
+**ทางแก้:** ใช้ `context.push()` (หรือ `router.push()`) สำหรับ navigation แบบดำดิ่งลึกที่ user ควรถอยออกมาได้ เก็บ `go()` ไว้สำหรับสลับ tab, redirect, และกรณี "แทนที่หน้าจอนี้ทั้งหมด"
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — การเรียกทั้งสองแบบ navigate ไปยังปลายทางถูกต้อง มีแค่การเช็ค `Navigator.canPop()`/กดย้อนกลับหลังจากนั้นเท่านั้นที่เผย history entry ที่หายไป
+
+### 17. `redirect` อ่าน state ภายนอกโดยไม่มี `refreshListenable`
+
+callback `redirect` ของ `go_router` default จะทำงานซ้ำเฉพาะตอนเกิด **navigation event** เท่านั้น ถ้ามันอ่าน state ภายนอก (auth flag) ที่เปลี่ยนไปโดย*ไม่มี* navigation event เกิดขึ้นพร้อมกัน router จะไม่มีวันรู้เลย
+
+```dart
+// lib/ai-bug-catalog/17-redirect-refresh.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class AuthState extends ChangeNotifier {
+  bool loggedIn = false;
+  void logIn() {
+    loggedIn = true;
+    notifyListeners();
+  }
+}
+
+// AI-generated: redirect reads auth.loggedIn, but nothing re-evaluates
+// redirects when that value changes outside of navigation.
+GoRouter buggyRouter(AuthState auth) => GoRouter(
+      initialLocation: '/login',
+      redirect: (context, state) {
+        if (!auth.loggedIn && state.matchedLocation != '/login') return '/login';
+        if (auth.loggedIn && state.matchedLocation == '/login') return '/home';
+        return null;
+      },
+      routes: [
+        GoRoute(path: '/login', builder: (c, s) => const Text('login')),
+        GoRoute(path: '/home', builder: (c, s) => const Text('home')),
+      ],
+    );
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/17-redirect-refresh_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/17-redirect-refresh.dart';
+
+void main() {
+  testWidgets('without refreshListenable, logging in does NOT redirect away from /login', (tester) async {
+    final auth = AuthState();
+    final router = buggyRouter(auth);
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    auth.logIn(); // state changed, but nothing tells the router to re-check
+    await tester.pumpAndSettle();
+    expect(find.text('login'), findsOneWidget); // still stuck
+    expect(find.text('home'), findsNothing);
+  });
+}
+```
+
+```text
+✓ without refreshListenable, logging in does NOT redirect away from /login
+00:00 +1: All tests passed!
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `refreshListenable: auth` บอกให้ `go_router` รัน `redirect` ใหม่ทุกครั้งที่ `auth.notifyListeners()` ยิง ไม่ใช่แค่ตอน navigation
+
+```dart
+// lib/ai-bug-catalog/17-redirect-refresh-fixed.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class AuthState extends ChangeNotifier {
+  bool loggedIn = false;
+  void logIn() {
+    loggedIn = true;
+    notifyListeners();
+  }
+}
+
+GoRouter fixedRouter(AuthState auth) => GoRouter(
+      initialLocation: '/login',
+      refreshListenable: auth,
+      redirect: (context, state) {
+        if (!auth.loggedIn && state.matchedLocation != '/login') return '/login';
+        if (auth.loggedIn && state.matchedLocation == '/login') return '/home';
+        return null;
+      },
+      routes: [
+        GoRoute(path: '/login', builder: (c, s) => const Text('login')),
+        GoRoute(path: '/home', builder: (c, s) => const Text('home')),
+      ],
+    );
+```
+
+```text
+✓ with refreshListenable, logging in redirects to /home immediately
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — ปุ่ม "log in" ของหน้า login เองมักจะ navigate อย่างชัดเจนอยู่แล้ว ซึ่ง trigger การเช็ค redirect และซ่อนบั๊กไว้ มันจะเผยตัวก็ต่อเมื่อ auth state เปลี่ยนจากที่อื่นที่ไม่ได้ navigate ด้วย (background token refresh, แท็บที่สอง, push notification handler)
+
+### 18. `WillPopScope` (deprecated) และ `PredictiveBackPageTransitionBuilder` ที่สะกดผิด
+
+ข้อมูลฝึกสอน AI ครอบคลุมยุค `WillPopScope` มันถูก deprecate ไปเป็น `PopScope` เพราะ `WillPopScope` ไม่รองรับ gesture predictive-back ของ Android เลย แยกต่างหาก class predictive-back transitions จริงของ Android คือ `PredictiveBackPageTransitionsBuilder` — โค้ดที่ AI สร้างมักตัดตัว "s" ใน "Transitions" ทิ้งไป
+
+```dart
+// lib/ai-bug-catalog/18-willpopscope.dart
+import 'package:flutter/material.dart';
+
+// AI-generated (trained on older Flutter docs).
+Widget buggyGuard(Widget child) {
+  return WillPopScope(onWillPop: () async => false, child: child);
+}
+```
+
+**อาการ — `flutter analyze` diagnostic จริง จับสด:**
+
+```text
+info • 'WillPopScope' is deprecated and shouldn't be used. Use PopScope instead. The Android
+predictive back feature will not work with WillPopScope. This feature was deprecated after
+v3.12.0-1.0.pre. Try replacing the use of the deprecated member with the replacement •
+deprecated_member_use
+```
+
+**และชื่อ class ที่สะกดผิด — `flutter analyze` diagnostic จริง จับสด:**
+
+```text
+error • The function 'PredictiveBackPageTransitionBuilder' isn't defined. Try importing the library
+that defines 'PredictiveBackPageTransitionBuilder', correcting the name to the name of an existing
+function, or defining a function named 'PredictiveBackPageTransitionBuilder' • undefined_function
+```
+
+**ทางแก้ analyze สะอาด:**
+
+```dart
+// lib/ai-bug-catalog/18-willpopscope-fixed.dart
+import 'package:flutter/material.dart';
+
+Widget fixedGuard(Widget child) {
+  return PopScope(canPop: false, child: child);
+}
+
+// Note the "s": PredictiveBackPageTransitionsBuilder, not …TransitionBuilder.
+final predictiveBackBuilder = PredictiveBackPageTransitionsBuilder();
+```
+
+**จับได้โดย:** `flutter analyze` สำหรับทั้งคู่ — การ deprecate เป็น `info`, การสะกดผิดเป็น `undefined_function` error จริง — แต่เฉพาะถ้าผู้อ่านรัน analyze เท่านั้น autocomplete ของ editor มัก "แก้" การสะกดผิดด้วยการแนะนำ class จริงที่ชื่อคล้ายกันแต่ผิดแทน
+
+## Platform
+
+### 19. `dart:io`/`Platform.isIOS` ถูกใช้แบบไม่มีเงื่อนไขในโค้ดที่ต้อง build สำหรับ web ด้วย
+
+การ implement `dart:io` สำหรับ web compile ผ่านสะอาด — web compiler ships facade จริงที่ type-complete ให้มัน ยืนยันได้จากการอ่าน `io_patch.dart` ของ SDK เองสำหรับเป้าหมาย `js_runtime` ที่ body ของทุก member คือ `throw UnsupportedError(...)` การ build ไม่มีวันล้มเหลว ทุก member แค่ throw ทันทีที่มันรันจริง
+
+```dart
+// lib/ai-bug-catalog/19-dartio-web.dart
+import 'dart:io';
+import 'package:flutter/material.dart';
+
+// AI-generated: reaches for dart:io directly to check the platform.
+class BuggyPlatformBadge extends StatelessWidget {
+  const BuggyPlatformBadge({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final label = Platform.isIOS ? 'iOS' : 'Other'; // throws on web, at runtime
+    return Text(label);
+  }
+}
+```
+
+**อาการ — จับสดสำหรับโมดูลนี้:**
+
+```text
+$ flutter build web --release
+Compiling lib/main.dart for the Web...
+✓ Built build/web
+```
+
+build สำเร็จโดยไม่มี warning เกี่ยวกับ `dart:io` **เลยสักคำ** ความล้มเหลวมีอยู่จริงแต่เข้าถึงได้แค่ตอน runtime ในเบราว์เซอร์จริง ในนาทีที่ `Platform.isIOS` รัน — ยืนยันตรง ๆ จาก web-target patch ของ SDK ที่ shipped จริง ที่ `_Platform._operatingSystem()` (สิ่งที่ `Platform.isIOS` อ่านในที่สุด) ถูก implement เป็น `throw UnsupportedError("Platform._operatingSystem")`
+
+**ทางแก้ พิสูจน์แล้วว่า build สะอาด:** `kIsWeb` เป็นค่าคงที่ที่ปลอดภัยตอน compile-time จาก `package:flutter/foundation.dart` — เช็คมันก่อนเลย ก่อนอะไรก็ตามที่แตะ `Platform`
+
+```dart
+// lib/ai-bug-catalog/19-dartio-web-fixed.dart
+import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+String platformLabel() {
+  if (kIsWeb) return 'Web';
+  return Platform.isIOS ? 'iOS' : 'Other';
+}
+```
+
+**จับได้โดย:** ไม่มีอะไรเลย — ไม่ใช่ analyzer, ไม่ใช่ build, แม้แต่ `flutter build web --wasm` (ก็พิสูจน์แล้วว่า compile snippet นี้ผ่านสะอาด จับสดสำหรับโมดูลนี้เช่นกัน) มีแค่การรันจริงบนเป้าหมาย web จริงเท่านั้นที่เผยมันออกมา
+
+### 20. `MethodChannel.invokeMethod` ที่ไม่มี native handler ลงทะเบียนไว้
+
+การเรียก platform channel method สมมติว่ามี native implementation ลงทะเบียนไว้บน platform ที่กำลังรันอยู่ — จริงก็ต่อเมื่อมี plugin จริง (หรือ mock ของ test เอง) ต่อสายไว้จริง ๆ เท่านั้น
+
+```dart
+// lib/ai-bug-catalog/20-missing-plugin.dart
+import 'package:flutter/services.dart';
+
+// AI-generated: assumes SOME native implementation exists.
+const _channel = MethodChannel('com.example/battery');
+
+Future<int> buggyBatteryLevel() {
+  return _channel.invokeMethod<int>('getBatteryLevel').then((v) => v ?? -1);
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+MissingPluginException(No implementation found for method getBatteryLevel on channel com.example/battery)
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** ใน test ให้ลงทะเบียน mock handler ใน production ให้มี implementation จริงเฉพาะ platform (plugin จริง หรือโค้ดเฉพาะ platform ที่ลงทะเบียนในโปรเจกต์ native)
+
+```dart
+// test/ai-bug-catalog/20-missing-plugin_test.dart
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/20-missing-plugin.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('no native handler registered -> MissingPluginException', () async {
+    await expectLater(buggyBatteryLevel(), throwsA(isA<MissingPluginException>()));
+  });
+
+  test('registering a mock handler fixes it', () async {
+    const channel = MethodChannel('com.example/battery');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => call.method == 'getBatteryLevel' ? 87 : null);
+    final level = await buggyBatteryLevel();
+    expect(level, 87);
+  });
+}
+```
+
+```text
+✓ no native handler registered -> MissingPluginException
+✓ registering a mock handler fixes it
+00:00 +2: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไร static เลย — โค้ดนี้ compile และ analyze ผ่านสมบูรณ์แบบ มีแค่การเรียก channel จริง ๆ (บน device/emulator จริง หรือใน test ที่ไม่มี mock ลงทะเบียนไว้) เท่านั้นที่เผย native side ที่ขาดหายไป
+
+### 21. `FlutterError.onError` ถูกตั้งโดยไม่มี `runZonedGuarded` (หรือกลับกัน)
+
+`FlutterError.onError` ยิงเฉพาะ error ที่ FRAMEWORK ดักจับได้เท่านั้น — ระหว่าง build, layout, และ paint error ที่ throw จาก `Future` ธรรมดา, `Timer`, หรือโค้ด async ล้วน ๆ นอกจุด try/catch ของ framework เองไม่มีวันไปถึงมันเลย
+
+```dart
+// lib/ai-bug-catalog/21-zone-errors.dart
+import 'dart:async';
+
+// AI-generated: sets FlutterError.onError, assumes that's "global error
+// handling" done -- it is not, for anything outside the framework.
+Future<void> triggerAsyncErrorOutsideFramework() {
+  return Future<void>(() => throw StateError('boom from a bare Future'));
+}
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:** `runZonedGuarded` ห่อทั้ง zone ดักจับ error ที่ `FlutterError.onError` ไม่เคยเห็น
+
+```dart
+// lib/ai-bug-catalog/21-zone-errors-fixed.dart
+import 'dart:async';
+
+void runGuarded(void Function() body, void Function(Object, StackTrace) onError) {
+  runZonedGuarded(body, onError);
+}
+```
+
+```dart
+// test/ai-bug-catalog/21-zone-errors-fixed_test.dart
+import 'dart:async';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/21-zone-errors-fixed.dart';
+import 'package:my_app/ai-bug-catalog/21-zone-errors.dart';
+
+void main() {
+  test('runZonedGuarded catches an error a bare Future throws', () async {
+    final caught = Completer<Object>();
+    runGuarded(() => triggerAsyncErrorOutsideFramework(), (error, stack) => caught.complete(error));
+    final error = await caught.future.timeout(const Duration(seconds: 2));
+    expect(error, isA<StateError>());
+  });
+}
+```
+
+```text
+✓ runZonedGuarded catches an error a bare Future throws
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** ไม่มีอะไร static เลย และนี่คือกับดักที่แหลมคมที่สุดในกลุ่มนี้: `FlutterError.onError` เพียงลำพัง ดู*เหมือน*ว่าครอบคลุม error ทั้งหมด (มันดักจับ crash ของ framework จริงที่มองเห็นได้ระหว่าง development) ซึ่งนั่นแหละคือเหตุผลที่ช่องว่างสำหรับโค้ด async ล้วน ๆ ไม่ถูกสังเกตจนกว่า error ที่ไม่ถูกดักจับจริง ๆ จะไปถึง production โดยไม่มีรายงานเลย `PlatformDispatcher.onError` (3.3+) เป็นทางเลือก/ส่วนเสริมสมัยใหม่ที่ควรรู้ไว้เช่นกัน ดักจับ error ที่ระดับ platform-dispatcher
+
+## Performance
+
+### 22. `AnimationController` ถูกสร้างแต่ไม่เคย dispose
+
+`Ticker` ของ `AnimationController` (สร้างผ่าน `SingleTickerProviderStateMixin`) จะอยู่นานกว่า `State` object ถ้าไม่มีอะไรเรียก `.dispose()` บน controller — framework เองจะจับมันได้เสียงดังใน debug mode
+
+```dart
+// lib/ai-bug-catalog/22-animation-controller.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: no dispose() override at all.
+class BuggySpinner extends StatefulWidget {
+  const BuggySpinner({super.key});
+  @override
+  State<BuggySpinner> createState() => _BuggySpinnerState();
+}
+
+class _BuggySpinnerState extends State<BuggySpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller =
+      AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat();
+
+  @override
+  Widget build(BuildContext context) =>
+      RotationTransition(turns: _controller, child: const Icon(Icons.sync));
+}
+```
+
+**อาการ — ผลลัพธ์จริง ไม่มีการแก้ไข จับสดสำหรับโมดูลนี้:**
+
+```text
+_BuggySpinnerState#73be2(ticker active) was disposed with an active Ticker.
+_BuggySpinnerState created a Ticker via its SingleTickerProviderStateMixin, but at the time
+dispose() was called on the mixin, that Ticker was still active. The Ticker must be disposed before
+calling super.dispose().
+Tickers used by AnimationControllers should be disposed by calling dispose() on the
+AnimationController itself. Otherwise, the ticker will leak.
+```
+
+**ทางแก้ พิสูจน์แล้วว่าผ่าน:**
+
+```dart
+// lib/ai-bug-catalog/22-animation-controller-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedSpinner extends StatefulWidget {
+  const FixedSpinner({super.key});
+  @override
+  State<FixedSpinner> createState() => _FixedSpinnerState();
+}
+
+class _FixedSpinnerState extends State<FixedSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller =
+      AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      RotationTransition(turns: _controller, child: const Icon(Icons.sync));
+}
+```
+
+```text
+✓ disposing the controller in dispose() leaves no leaked ticker
+00:00 +1: All tests passed!
+```
+
+**จับได้โดย:** `flutter_test` เอง โดยไม่มีเงื่อนไข ถ้า widget ถูก tear down ใน test เลยสักครั้ง — แต่ widget ที่ไม่เคยถูก dispose เลยระหว่าง session demo สั้น ๆ ด้วยมือจะไม่มีวันไปโดนมัน และการรั่ว (Ticker ที่ยังมีชีวิตยิง frame ตลอดไป) ยังคงกิน CPU และแบตเตอรี่ใน production ต่อไปไม่ว่าจะอย่างไร
+
+### 23. `Opacity(opacity: 1.0)` ยังคงจอง compositing layer จริง
+
+doc comment ของ widget `Opacity` เองบอกว่า "ค่า 1.0 และ 0.0 ถูกวาดด้วย fast path" — ซึ่งจริง แต่อธิบายแค่ต้นทุนตอน PAINT เท่านั้น อ่าน source จริงของ `RenderOpacity`: `isRepaintBoundary => alwaysNeedsCompositing` และ `alwaysNeedsCompositing => child != null && _alpha > 0` นั่นเป็น TRUE สำหรับ `opacity: 1.0` (alpha 255) พอ ๆ กับ `opacity: 0.5` — มีแค่ `opacity: 0.0` (alpha 0) เท่านั้นที่ข้าม compositing ไปทั้งหมด `Opacity(opacity: 1.0)` ไม่ฟรี มันคือ repaint boundary จริงพร้อม `OpacityLayer` จริง
+
+**PROOF — อ่านตรง ๆ จาก `RenderObject` ที่มีชีวิต ไม่ใช่สมมติจาก doc comment:**
+
+```dart
+// test/ai-bug-catalog/23-opacity-layer_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  testWidgets('Opacity(opacity: 1.0) is STILL a repaint boundary', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Opacity(opacity: 1.0, child: ColoredBox(color: Colors.blue))),
+    );
+    final render = tester.renderObject<RenderOpacity>(find.byType(Opacity));
+    expect(render.isRepaintBoundary, isTrue);
+    expect(render.alwaysNeedsCompositing, isTrue);
+  });
+
+  testWidgets('Opacity(opacity: 0.0) is the ONE value that skips compositing entirely', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Opacity(opacity: 0.0, child: ColoredBox(color: Colors.blue))),
+    );
+    final render = tester.renderObject<RenderOpacity>(find.byType(Opacity));
+    expect(render.isRepaintBoundary, isFalse);
+    expect(render.alwaysNeedsCompositing, isFalse);
+  });
+}
+```
+
+```text
+✓ Opacity(opacity: 1.0) is STILL a repaint boundary
+✓ Opacity(opacity: 0.0) is the ONE value that skips compositing entirely
+00:00 +2: All tests passed!
+```
+
+**ทางแก้:** ถ้า opacity เป็นค่าคงที่ตอน compile-time `1.0` (widget ที่ถูกแสดง/ซ่อนแบบมีเงื่อนไขด้วยการสลับมันออกไปทั้งหมด เป็นต้น) ข้าม `Opacity` ไปเลย — คืนค่า child ตรง ๆ หรือใช้ `Visibility`/ternary ที่เอา widget ออกแทนที่จะทำให้มืดลง เก็บ `Opacity`/`AnimatedOpacity`/`FadeTransition` ไว้สำหรับ opacity ที่เปลี่ยนแปลงจริง ๆ
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย และนี่คือการแก้ไขที่ละเอียดอ่อนจริง ๆ: `Opacity(opacity: 1.0)` ไม่ crash และไม่แม้แต่ render ผิด — มันแค่จ่ายค่า layer ที่ปกติไม่จำเป็นตลอดเวลา และ doc comment ของ framework เองก็อ่านได้ (ผิด ๆ) ว่าบอกเป็นอย่างอื่น
+
+### 24. `cacheExtent` ถูก deprecate → `scrollCacheExtent` (type sealed class ใหม่ ไม่ใช่แค่เปลี่ยนชื่อ)
+
+`cacheExtent` (`double` ธรรมดา) ถูก deprecate ใน Flutter 3.41 เพื่อให้ใช้ `scrollCacheExtent` แทน — แต่สิ่งที่มาแทนไม่ใช่แค่เปลี่ยนชื่อ: `scrollCacheExtent` รับ sealed class ใหม่ `ScrollCacheExtent` ที่มี factory constructor `.pixels(double)` และ `.viewport(double)` และ type นั้นไม่ถูก re-export โดย `package:flutter/material.dart` ด้วยซ้ำ — ต้องการ import `package:flutter/rendering.dart` แบบชัดเจน
+
+```dart
+// lib/ai-bug-catalog/24-cache-extent.dart
+import 'package:flutter/material.dart';
+
+// AI-generated (trained on older Flutter docs).
+Widget buggyList() => ListView.builder(
+      cacheExtent: 500,
+      itemCount: 100,
+      itemBuilder: (context, i) => Text('$i'),
+    );
+```
+
+**อาการ — `flutter analyze` diagnostic จริง จับสด:**
+
+```text
+info • 'cacheExtent' is deprecated and shouldn't be used. Use scrollCacheExtent instead. This
+feature was deprecated after v3.41.0-0.0.pre. Try replacing the use of the deprecated member with
+the replacement • deprecated_member_use
+```
+
+การเปลี่ยนชื่อตรง ๆ เป็น `scrollCacheExtent: 500` ล้มเหลวต่างออกไป:
+
+```text
+error • The argument type 'int' can't be assigned to the parameter type 'ScrollCacheExtent?' •
+argument_type_not_assignable
+```
+
+**ทางแก้ analyze สะอาด:**
+
+```dart
+// lib/ai-bug-catalog/24-cache-extent-fixed.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+
+Widget fixedList() => ListView.builder(
+      scrollCacheExtent: ScrollCacheExtent.pixels(500),
+      itemCount: 100,
+      itemBuilder: (context, i) => Text('$i'),
+    );
+```
+
+**จับได้โดย:** `flutter analyze` สำหรับการ deprecate และ `dart fix --dry-run` ระบุมันได้ถูกต้องว่าแก้ไขได้ (พิสูจน์ใน **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)**) — แต่การเปลี่ยนชื่อแบบ find-and-replace โดยไม่อ่าน type ใหม่ แลกเปลี่ยน diagnostic หนึ่งกับอีกแบบหนึ่ง
+
+## Tooling & release
+
+### 25. `prefer_const_constructors` ไม่ได้อยู่ใน `flutter_lints` 6
+
+`flutter_lints` 6.0.0 ships `prefer_const_constructors_in_immutables` (const ข้างใน `build()` ของ class ที่เป็น `@immutable` เอง) แต่ไม่มี rule `prefer_const_constructors` แบบทั่วไปที่แจ้งเตือนโอกาสใช้ `const` ที่พลาดไปทุกแบบ — ยืนยันจากการอ่าน rule list ของ `flutter.yaml` ในแพ็กเกจเองตรง ๆ
+
+```dart
+// lib/ai-bug-catalog/25-prefer-const.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: missing const -- flutter_lints 6 says nothing about it.
+Widget buildGreeting() {
+  return Text('hello');
+}
+```
+
+**อาการ — `flutter analyze` จริง ภายใต้ `flutter_lints: ^6.0.0` ที่คอร์สนี้ pin ไว้:**
+
+```text
+Analyzing 25-prefer-const.dart...
+No issues found!
+```
+
+**เปรียบเทียบ — ไฟล์เดียวกัน โดยเพิ่ม `prefer_const_constructors: true` เข้า `analysis_options.yaml` แบบชัดเจน:**
+
+```text
+info • Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to
+the constructor invocation • prefer_const_constructors
+```
+
+**ทางแก้:** เพิ่ม `const` หรือเปิดใช้ `prefer_const_constructors` แบบชัดเจน (หรือใช้ `very_good_analysis` ซึ่งมี rule นี้อยู่แล้ว) ถ้าทีมต้องการบังคับใช้ rule ทั่วไปนี้
+
+**จับได้โดย:** ไม่มีอะไรเลย ภายใต้ชุด lint ที่ pin ไว้แน่นอนของคอร์สนี้ — reviewer ที่เชื่อว่า "linter จะจับมันได้" สำหรับ `const` โดยเฉพาะ กำลังเชื่อใน rule ที่ไม่ได้เปิดใช้งานจริง
+
+### 26. `print()` ไม่ถูกตัดออกจาก release build
+
+ไม่มีอะไรใน release pipeline default ของ Flutter ที่ตัดการเรียก `print()` ออก string ตัวอักษรรอดเข้าไปคำต่อคำใน output ที่ compile แล้ว
+
+```dart
+// lib/ai-bug-catalog/26-print-release.dart
+void main() {
+  print('READING_FLUTTER_PRINT_MARKER_7f3a9c'); // AI-generated: "it's just a debug print"
+}
+```
+
+**อาการ — `flutter build web --release` จริง แล้ว grep bundle output จริง จับสดสำหรับโมดูลนี้:**
+
+```text
+$ flutter build web --release
+✓ Built build/web
+$ grep -c READING_FLUTTER_PRINT_MARKER_7f3a9c build/web/main.dart.js
+1
+```
+
+string marker อยู่ครบคำต่อคำ หนึ่งครั้ง ข้างใน release JS bundle ที่ minify แล้ว
+
+**ทางแก้:** ใช้ `log()` ของ `dart:developer` (ซึ่งเคารพ log level และสามารถถูกตัด/กรองโดย tooling ได้) แทน `print()` สำหรับอะไรก็ตามที่ไม่ควร ship ใน release หรือกัน debug-only print ไว้หลัง `kDebugMode` จาก `package:flutter/foundation.dart`
+
+**จับได้โดย:** ไม่มีอะไรอัตโนมัติเลย — ไม่มี lint ใน `flutter_lints` 6 ที่ pin ไว้ของคอร์สนี้แจ้งเตือน `print()` เปล่า ๆ เป็น default (`avoid_print` ถูกเปิดใช้งานจริง คุ้มค่าที่จะสังเกตเป็นข้อยกเว้นเดียว: มันยิงเป็น lint แต่ไม่มีอะไรบังคับให้แก้ lint ก่อน release build จะ ship)
+
+### 27. `switch` ที่ไม่ครบทุกกรณีบน `sealed class`
+
+AI assistant ที่ฝึกจากสไตล์เก่า "abstract class + เช็คด้วย `is`" สำหรับ state union บางครั้งยังลืม case แม้กำลังใช้ `sealed class` + `switch` expression สมัยใหม่ — แต่ในกรณีนี้ analyzer สามารถ PROVE ได้จริงว่า switch ไม่ครบ ตอน compile time เพราะ class เป็น sealed
+
+```dart
+// lib/ai-bug-catalog/27-non-exhaustive-switch.dart — @expect-error non_exhaustive_switch_expression -- see the real diagnostic below
+sealed class LoadState {}
+class Loading extends LoadState {}
+class Loaded extends LoadState {
+  Loaded(this.data);
+  final String data;
+}
+class LoadError extends LoadState {
+  LoadError(this.message);
+  final String message;
+}
+
+// AI-generated: forgot the LoadError case entirely.
+String buggyDescribe(LoadState state) {
+  return switch (state) {
+    Loading() => 'loading',
+    Loaded(:final data) => 'loaded: $data',
+  };
+}
+```
+
+**อาการ — `flutter analyze` diagnostic จริง จับสด:**
+
+```text
+error • The type 'LoadState' isn't exhaustively matched by the switch cases since it doesn't match
+the pattern 'LoadError()'. Try adding a wildcard pattern or cases that match 'LoadError()' •
+non_exhaustive_switch_expression
+```
+
+**ทางแก้ analyze สะอาด:**
+
+```dart
+// lib/ai-bug-catalog/27-non-exhaustive-switch-fixed.dart
+sealed class LoadState {}
+class Loading extends LoadState {}
+class Loaded extends LoadState {
+  Loaded(this.data);
+  final String data;
+}
+class LoadError extends LoadState {
+  LoadError(this.message);
+  final String message;
+}
+
+String fixedDescribe(LoadState state) {
+  return switch (state) {
+    Loading() => 'loading',
+    Loaded(:final data) => 'loaded: $data',
+    LoadError(:final message) => 'error: $message',
+  };
+}
+```
+
+**จับได้โดย:** `flutter analyze` เป็น ERROR จริงหนักแน่น (ไม่ใช่แค่ lint ที่ความมั่นใจของ AI สามารถโบกมือผ่านได้) นี่คือ exhaustiveness checking ของ Dart 3 เอง และเป็นข้อโต้แย้งที่หนักแน่นที่สุดในทั้ง catalog นี้สำหรับการใช้ state union แบบ `sealed class` แทนสไตล์ `abstract class` เก่า: subtype ตัวที่สี่ที่เพิ่มเข้ามาภายหลังทำให้ switch ที่มีอยู่เดิมทุกตัว compile ไม่ผ่านอีกครั้งจนกว่าจะจัดการมัน
+
+### 28. API ที่หลอน: named parameter และ method ที่ไม่มีอยู่จริง
+
+AI assistant ที่ผสม widget/API หลายตัวที่เคยเห็นเข้าด้วยกัน คิดค้น named parameter หรือชื่อ method ที่ฟังดูสมเหตุสมผลแต่ไม่มีอยู่จริงบน class ที่กำลังพูดถึง
+
+```dart
+// lib/ai-bug-catalog/28-hallucinated-api.dart — @expect-error undefined_named_parameter + undefined_method -- see the real diagnostics below
+import 'package:flutter/material.dart';
+
+Widget buggyCard() {
+  return Card(
+    elevation: 4,
+    cornerRadius: 12, // hallucinated -- Card has no such parameter
+    child: const Text('hi'),
+  );
+}
+
+void buggyScroll(ScrollController controller) {
+  controller.animateToEnd(); // hallucinated -- no such method on ScrollController
+}
+```
+
+**อาการ — `flutter analyze` diagnostic จริง จับสด:**
+
+```text
+error • The named parameter 'cornerRadius' isn't defined. Try correcting the name to an existing
+named parameter's name, or defining a named parameter with the name 'cornerRadius' •
+undefined_named_parameter
+error • The method 'animateToEnd' isn't defined for the type 'ScrollController'. Try correcting the
+name to the name of an existing method, or defining a method named 'animateToEnd' • undefined_method
+```
+
+**ทางแก้ analyze สะอาด:**
+
+```dart
+// lib/ai-bug-catalog/28-hallucinated-api-fixed.dart
+import 'package:flutter/material.dart';
+
+Widget fixedCard() {
+  return Card(
+    elevation: 4,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    child: const Text('hi'),
+  );
+}
+
+void fixedScroll(ScrollController controller) {
+  controller.animateTo(
+    controller.position.maxScrollExtent,
+    duration: const Duration(milliseconds: 300),
+    curve: Curves.easeOut,
+  );
+}
+```
+
+**จับได้โดย:** `flutter analyze` ทุกครั้ง — entry ที่ถูกที่สุดและใช้เครื่องจักรจับได้ง่ายที่สุดในทั้ง catalog นี้ และนั่นแหละคือเหตุผลที่ "คุณรัน `flutter analyze` หรือยัง" คือบรรทัดแรกของ **[Review Checklist](/flutter/th/reading-flutter/review-checklist/)** ที่ตามหลังบทนี้
+
+## Mental Model
+
+<Mermaid title="อะไรจับแต่ละกลุ่มได้จริง ถ้ามี" code={catalogCoverageDiagram} />
+
+export const catalogCoverageDiagram = `flowchart LR
+  A["State &amp; lifecycle"] --> R["Needs a real dispose/rebuild sequence<br/>to surface at all"]
+  W["Widget tree &amp; keys"] --> T["Mostly human review<br/>(renders correctly either way)"]
+  L["Layout"] --> T2["Framework catches it loudly --<br/>but only the exact arrangement that overflows"]
+  As["Async &amp; isolates"] --> R
+  N["Navigation"] --> T
+  P["Platform"] --> D["Needs the actual platform/runtime --<br/>compiles and analyzes clean otherwise"]
+  Pf["Performance"] --> M["Silent cost, not a crash --<br/>needs reading RenderObject properties directly"]
+  Tl["Tooling &amp; release"] --> M2["Analyzer/lint catches SOME --<br/>only if the rule is actually enabled"]
+`;
+
+<Callout title="สรุปในบรรทัดเดียว">
+ทุก entry ด้านบน analyze ผ่านสะอาดสมบูรณ์หรือ render ถูกต้องในรอบแรก — ส่วนใหญ่ของ 28 pattern ใน catalog นี้แสดงต้นทุนของมันก็ต่อเมื่อเกิดเหตุการณ์ที่*สอง*เท่านั้น: การ dispose, การเรียงใหม่, การ navigate รอบที่สอง, การรันบน platform จริง, หรือ release build รันเครื่องมือใน **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** ก่อน แล้วยังต้องไล่ **[Review Checklist](/flutter/th/reading-flutter/review-checklist/)** ด้วยตาสำหรับทุกอย่างที่มีแค่เหตุการณ์ที่สองเท่านั้นที่เผยออกมาได้
+</Callout>
+
+export const quizAiBugCatalog = [
+  {
+    q: "```text\nsetState() called after dispose(): _BuggyLoaderState#5aa37(lifecycle state: defunct, not mounted)\n```\nจากความล้มเหลวจริงที่จับสดนี้ การเพิ่ม `if (!mounted) return;` ก่อนเรียก setState แก้อะไรจริง ๆ?",
+    options: [
+      "มันป้องกันไม่ให้ Future เสร็จสมบูรณ์เลย",
+      "มันเปลี่ยน crash ให้เป็น no-op ที่ไม่เป็นอันตราย -- mounted เป็น getter จริงบน State ที่เปลี่ยนเป็น false ทันทีที่ dispose() รันแล้ว ดังนั้น guard นี้แค่ข้ามการเรียก setState เมื่อไม่มี widget เหลือให้ rebuild",
+      "มันยกเลิก network request ที่อยู่เบื้องหลัง",
+      "มันทำให้ widget rebuild ทันทีแทนที่จะรอ",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ: โครงสร้างเดียวกันเป๊ะของ FixedLoader โดยเพิ่มแค่ mounted guard ไม่สร้าง exception เลยภายใต้ลำดับ dispose-แล้ว-resolve เดียวกันเป๊ะที่ทำให้ BuggyLoader crash",
+  },
+  {
+    q: "Entry 13 แสดงให้เห็นว่า closure ของ compute() ที่ capture int ธรรมดาทำงานได้ปกติ แต่ตัวที่ capture BuildContext throw error 'object is unsendable' จริง ทำไมถึงต่างกัน?",
+    options: [
+      "int ไม่ sendable เสมอ นี่เป็นความผิดพลาด",
+      "int ธรรมดาเป็นข้อมูลที่ self-contained เต็มที่ แต่ BuildContext อ้างอิงไปถึง Element tree ทางอ้อม และลึกลงไปหลายชั้น อ้างถึง object Zone จริงของ dart:async -- Zone ไม่เคย sendable ข้าม isolate boundary เลย ไม่ว่าจะอยู่ลึกแค่ไหนใน object graph ที่ถูก capture",
+      "compute() ไม่เคยสร้าง isolate ใหม่จริง ๆ",
+      "เรื่องนี้เกิดเฉพาะใน test environment เท่านั้น ไม่เกิดใน production",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ: ownership chain ของ error จริงไล่จาก BuildContext ที่ถูก capture ผ่าน object ของ framework หลายตัวลงไปถึง '_CustomZone@5048458' -- ยืนยันว่าความล้มเหลวเกี่ยวกับการเข้าถึงได้ (REACHABILITY) ของ object ที่ unsendable ไม่ใช่เรื่อง closure โดยทั่วไป",
+  },
+  {
+    q: "ทำไม entry 23 ถึงบอกว่า Opacity(opacity: 1.0) ไม่ฟรี ทั้งที่ doc comment ของ widget เองบอกว่าค่า 1.0 และ 0.0 ถูกวาดด้วย 'fast path' ทั้งคู่?",
+    options: [
+      "doc comment ผิดล้วน ๆ และควรถูกละเลยไปเลย",
+      "'fast path' ที่ doc comment อธิบายเกี่ยวกับต้นทุนการผสมสีตอน PAINT ไม่ใช่เรื่องการจอง layer -- การอ่าน source ของ RenderOpacity ตรง ๆ แสดงว่า isRepaintBoundary เป็น true เมื่อใดก็ตามที่ alpha > 0 ซึ่งรวมถึง 1.0 ด้วย มีแค่ alpha == 0 (opacity 0.0) เท่านั้นที่ข้าม compositing ไปทั้งหมด",
+      "Opacity(1.0) แพงพอ ๆ กับ Opacity(0.5) ในทุกด้าน",
+      "เรื่องนี้ถูกแก้ใน Flutter เวอร์ชันหลังแล้วและไม่เกิดอีกต่อไป",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ ด้วยการอ่าน property ของ RenderObject ที่มีชีวิตจริง: Opacity(opacity: 1.0) รายงาน isRepaintBoundary=true และ alwaysNeedsCompositing=true ใน widget test จริง ตรงกับพฤติกรรมของ Opacity(opacity: 0.5) เป๊ะในแกนนั้นโดยเฉพาะ -- มีแค่ opacity: 0.0 เท่านั้นที่รายงาน false",
+  },
+  {
+    q: "Entry 15 (ลำดับ route ของ go_router) และ entry 9 (ListView ไม่มีขอบเขต) ทั้งคู่ compile และ analyze ผ่านสะอาดสมบูรณ์ ทั้งสองมีอะไรร่วมกันที่อธิบายว่าทำไมไม่มีเครื่องมือ static ตัวไหนจับได้เลย?",
+    options: [
+      "ทั้งคู่จริง ๆ แล้วถูก flutter analyze จับได้ -- นี่เป็นคำถามหลอก",
+      "ทั้งคู่เกี่ยวกับพฤติกรรม RUNTIME (route ไหน match, viewport มีความสูงมีขอบเขตหรือไม่) ที่ขึ้นกับ object graph/navigation จริงตอนที่โค้ดรัน -- analyzer เช็คแค่ type กับ syntax เท่านั้น ไม่เคยเช็ค semantics ของการจับคู่ route หรือ constraint tree ตอน runtime เลย",
+      "ทั้งคู่ส่งผลแค่กับ performance เท่านั้น ไม่เกี่ยวกับความถูกต้อง",
+      "ทั้งคู่ถูกแก้ใน Flutter 3.47 แล้วและไม่เกิดขึ้นอีก",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตลอดทั้ง catalog: บั๊กทั้งสองต้องการการเรียก pumpWidget/navigation จริงเพื่อเผยตัวเลย -- บั๊กลำดับ route ต้องการการเรียก router.go('/pets/new') จริง และบั๊กความสูงไม่มีขอบเขตต้องการ layout pass จริง ซึ่งทั้งคู่ไม่มี static analysis pass ล้วน ๆ ตัวไหนทำ",
+  },
+  {
+    q: "ทำไม entry 25 (prefer_const_constructors) ถึงสำคัญ ทั้งที่การขาด const ไม่ได้ทำให้อะไร crash เลย?",
+    options: [
+      "ไม่สำคัญ -- flutter_lints 6 จับโอกาสใช้ const ทุกตัวอยู่แล้ว",
+      "มันเป็นช่องว่างจริงและเป็นปัจจุบันในแพ็กเกจ lint ที่ถูกสมมติกันอย่างกว้างขวางว่าครบถ้วน: reviewer ที่สมมติว่า 'linter จะจับมันได้' สำหรับ const โดยเฉพาะบน flutter_lints 6.0.0 ที่ pin ไว้แน่นอนของคอร์สนี้ผิด พิสูจน์ได้จากไฟล์เดียวกันเป๊ะที่ไม่มี issue เลยโดย default และมี diagnostic ระดับ info จริงก็ต่อเมื่อเพิ่ม rule นั้นเข้าไปแบบชัดเจนเท่านั้น",
+      "const สำคัญแค่กับความเร็ว compile เท่านั้น ไม่เกี่ยวกับ performance ตอน runtime",
+      "rule นี้ถูกลบออกเพราะทำให้เกิด false positive",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ: `flutter analyze` บนไฟล์เดียวกันเป๊ะรายงาน 'No issues found!' ภายใต้ flutter_lints 6 เพียงอย่างเดียว แล้วรายงาน diagnostic prefer_const_constructors จริงที่บรรทัดเดียวกันเป๊ะก็ต่อเมื่อ rule นั้นถูกเพิ่มเข้า analysis_options.yaml แบบชัดเจนเท่านั้น -- ช่องว่างนี้มีอยู่จริง ไม่ใช่แค่สมมติ",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/ai-bug-catalog" questions={quizAiBugCatalog} />
+
+<ProgressTracker client:visible id="reading-flutter/ai-bug-catalog" />

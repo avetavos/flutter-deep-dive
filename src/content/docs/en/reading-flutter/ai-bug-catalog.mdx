@@ -1,0 +1,1826 @@
+---
+title: The AI bug catalog
+description: '28 bugs AI-generated Flutter code produces constantly — the code AI typically writes, why it is wrong, real output captured fresh for this module (an analyzer diagnostic, a flutter test failure, or a runtime error), and the fix.'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+Every snippet below was written to look exactly like the code an AI assistant actually produces — fluent, plausible, and often analyzing cleanly — then run for real against a throwaway `flutter create` scratch project on this Mac (Flutter 3.47.5, Dart 3.13.4), never the course's own shared probe. The quoted output is copied verbatim from those runs, trimmed for length, not reconstructed from memory. Group the same way as **[How to read Flutter code you did not write](/flutter/en/reading-flutter/)** and the **[Review Checklist](/flutter/en/reading-flutter/review-checklist/)** that follows this lesson.
+
+## State & lifecycle
+
+### 1. Forgot `ProviderScope`
+
+Riverpod's `ref.watch`/`ref.read` need a `ProviderContainer` to read from. `ProviderScope` is the widget that creates one and makes it reachable. Skip it, and every `ConsumerWidget` throws the moment it tries to read a provider.
+
+```dart
+// lib/ai-bug-catalog/01-provider-scope.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+final nameProvider = Provider<String>((ref) => 'Milo');
+
+class NameOnly extends ConsumerWidget {
+  const NameOnly({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final name = ref.watch(nameProvider);
+    return Text(name);
+  }
+}
+
+// AI-generated: forgot to wrap the app in ProviderScope.
+Widget buggyApp() => const MaterialApp(home: Scaffold(body: NameOnly()));
+```
+
+**Symptom — real `flutter test` failure, captured fresh for this module:**
+
+```dart
+// test/ai-bug-catalog/01-provider-scope_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/01-provider-scope.dart';
+
+void main() {
+  testWidgets('no ProviderScope -> throws', (tester) async {
+    await tester.pumpWidget(buggyApp());
+    final exception = tester.takeException();
+    expect(exception, isA<StateError>());
+    expect(exception.toString(), contains('No ProviderScope found'));
+  });
+}
+```
+
+```text
+✓ no ProviderScope -> throws
+00:00 +1: All tests passed!
+```
+
+The real exception is a `StateError` with message **"Bad state: No ProviderScope found"**.
+
+**Fix:**
+
+```dart
+Widget fixedApp() => const ProviderScope(
+      child: MaterialApp(home: Scaffold(body: NameOnly())),
+    );
+```
+
+**Caught by:** a `riverpod_lint` `missing_provider_scope` finding (proven live in **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)**), or the crash on the very first screen that reads a provider.
+
+### 2. `setState` after `await` with no `mounted` guard
+
+A `State` can be disposed (user navigates away, list item scrolled out of a lazily-built list) while a `Future` it kicked off is still pending. When it resolves and calls `setState`, there is no widget left to rebuild.
+
+```dart
+// lib/ai-bug-catalog/02-mounted-guard.dart
+import 'package:flutter/material.dart';
+
+class BuggyLoader extends StatefulWidget {
+  const BuggyLoader({super.key, required this.future});
+  final Future<String> future;
+  @override
+  State<BuggyLoader> createState() => _BuggyLoaderState();
+}
+
+class _BuggyLoaderState extends State<BuggyLoader> {
+  String _text = 'loading';
+  @override
+  void initState() {
+    super.initState();
+    // AI-generated: no `mounted` guard after the await.
+    widget.future.then((value) => setState(() => _text = value));
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_text);
+}
+```
+
+**Symptom — real, unedited `flutter test` failure, captured fresh for this module:**
+
+```text
+setState() called after dispose(): _BuggyLoaderState#5aa37(lifecycle state: defunct, not mounted)
+This error happens if you call setState() on a State object for a widget that no longer appears in
+the widget tree (e.g., whose parent widget no longer includes the widget in its build). This error
+can occur when code calls setState() from a timer, from an animation callback, or after an
+asynchronous operation (such as an awaited network request or other Future) completes after the
+widget has been removed from the tree.
+The preferred solution is to cancel the timer or stop listening to the animation in the dispose()
+callback. Another solution is to check the "mounted" property of this object before calling
+setState() to ensure the object is still in the tree.
+```
+
+**Fix, proven passing:**
+
+```dart
+// lib/ai-bug-catalog/02-mounted-guard-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedLoader extends StatefulWidget {
+  const FixedLoader({super.key, required this.future});
+  final Future<String> future;
+  @override
+  State<FixedLoader> createState() => _FixedLoaderState();
+}
+
+class _FixedLoaderState extends State<FixedLoader> {
+  String _text = 'loading';
+  @override
+  void initState() {
+    super.initState();
+    widget.future.then((value) {
+      if (!mounted) return;
+      setState(() => _text = value);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_text);
+}
+```
+
+```dart
+// test/ai-bug-catalog/02-mounted-guard-fixed_test.dart
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/02-mounted-guard-fixed.dart';
+
+void main() {
+  testWidgets('mounted-guarded setState after dispose is a silent no-op', (tester) async {
+    final completer = Completer<String>();
+    await tester.pumpWidget(MaterialApp(home: FixedLoader(future: completer.future)));
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    completer.complete('Milo');
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+}
+```
+
+```text
+✓ mounted-guarded setState after dispose is a silent no-op
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing automatic — `flutter analyze` sees a perfectly valid method call either way. Only a widget disposed mid-`await` surfaces it, in a **[Testing](/flutter/en/tooling-and-production/testing/)** suite or in production.
+
+### 3. `setState` called from a sibling's `build()` (cross-sibling)
+
+A widget that calls a callback synchronously from inside its own `build()`, and that callback calls `setState` on a *different* widget that is still mid-build, hits Flutter's "don't mutate what you're building" guard.
+
+```dart
+// lib/ai-bug-catalog/03-setstate-during-build.dart
+import 'package:flutter/material.dart';
+
+class Reporter extends StatelessWidget {
+  const Reporter({super.key, required this.onBuild});
+  final VoidCallback onBuild;
+  @override
+  Widget build(BuildContext context) {
+    // AI-generated: reports "I built" straight from build(), synchronously.
+    onBuild();
+    return const SizedBox.shrink();
+  }
+}
+
+class BuggyParent extends StatefulWidget {
+  const BuggyParent({super.key});
+  @override
+  State<BuggyParent> createState() => _BuggyParentState();
+}
+
+class _BuggyParentState extends State<BuggyParent> {
+  int _count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('$_count'),
+        if (_count == 0) Reporter(onBuild: () => setState(() => _count++)),
+      ],
+    );
+  }
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+setState() or markNeedsBuild() called during build.
+This BuggyParent widget cannot be marked as needing to build because the framework is already in the
+process of building widgets. A widget can be marked as needing to be built during the build phase
+only if one of its ancestors is currently building. This exception is allowed because the framework
+builds parent widgets before children, which means a dirty descendant will always be built.
+The widget on which setState() or markNeedsBuild() was called was:
+  BuggyParent
+The widget which was currently being built when the offending call was made was:
+  Reporter
+```
+
+**Fix, proven passing:** defer the `setState` past the current build phase with `addPostFrameCallback`.
+
+```dart
+// lib/ai-bug-catalog/03-setstate-during-build-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedParent extends StatefulWidget {
+  const FixedParent({super.key});
+  @override
+  State<FixedParent> createState() => _FixedParentState();
+}
+
+class _FixedParentState extends State<FixedParent> {
+  int _count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text('$_count'),
+        if (_count == 0)
+          _Reporter(
+            onBuild: () => WidgetsBinding.instance
+                .addPostFrameCallback((_) => setState(() => _count++)),
+          ),
+      ],
+    );
+  }
+}
+
+class _Reporter extends StatelessWidget {
+  const _Reporter({required this.onBuild});
+  final VoidCallback onBuild;
+  @override
+  Widget build(BuildContext context) {
+    onBuild();
+    return const SizedBox.shrink();
+  }
+}
+```
+
+```text
+✓ deferring to addPostFrameCallback does not throw
+00:00 +1: All tests passed!
+```
+
+**Caught by:** the framework, immediately and loudly — but only once this exact widget actually builds while its target is mid-build. A test that only pumps once and never triggers the reporting path misses it entirely.
+
+### 4. `late` field read before it is assigned
+
+`late` defers a field's initialization but does not change *when* callers expect to read it — an AI assistant that copies a `late` field without auditing every branch that might read it before the assigning method has run ships a real crash on first read, not first write.
+
+```dart
+// lib/ai-bug-catalog/04-late-field.dart
+class Session {
+  // AI-generated: assumed `configure()` always runs before `token` is read,
+  // but nothing enforces that ordering.
+  late String token;
+
+  void configure(String value) => token = value;
+}
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/04-late-field_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/04-late-field.dart';
+
+void main() {
+  test('reading a late field before it is set throws LateInitializationError', () {
+    final session = Session();
+    expect(() => session.token, throwsA(isA<Error>()));
+  });
+
+  test('configuring first makes the read safe', () {
+    final session = Session()..configure('abc123');
+    expect(session.token, 'abc123');
+  });
+}
+```
+
+```text
+✓ reading a late field before it is set throws LateInitializationError
+✓ configuring first makes the read safe
+00:00 +2: All tests passed!
+```
+
+**Fix:** either make the field nullable and check for `null`, give it a real default, or make the constructor require the value instead of a separate `configure()` step.
+
+**Caught by:** nothing static — `late` is a promise to the compiler, not a guarantee the analyzer checks. Only a real read on an unconfigured instance throws, and it throws at the READ, not at the skipped assignment, which makes the stack trace point at an innocent-looking line far from the actual bug.
+
+### 5. `StateProvider`/`StateNotifierProvider` imported as if they were still top-level Riverpod 3 API
+
+AI training data spans Riverpod 2, where `StateProvider` and `StateNotifierProvider` were front-and-center in the main `flutter_riverpod.dart` export. Riverpod 3 moved both (plus `ChangeNotifierProvider`) behind an explicit `legacy.dart` import — they still exist, they just are not where an AI assistant trained on older docs expects.
+
+```dart
+// lib/ai-bug-catalog/05-state-provider.dart — @expect-error StateProvider moved behind package:flutter_riverpod/legacy.dart in Riverpod 3; the main export no longer has it
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+// AI-generated (trained on Riverpod 2 docs).
+final counterProvider = StateProvider<int>((ref) => 0);
+```
+
+**Symptom — real `flutter analyze` diagnostic, captured fresh against `flutter_riverpod` 3.4.3:**
+
+```text
+error • The function 'StateProvider' isn't defined. Try importing the library that defines
+'StateProvider', correcting the name to the name of an existing function, or defining a function
+named 'StateProvider' • lib/ai-bug-catalog/05-state-provider.dart:5:25 • undefined_function
+```
+
+**Fix, analyzes clean:**
+
+```dart
+// lib/ai-bug-catalog/05-state-provider-fixed.dart
+import 'package:flutter_riverpod/legacy.dart';
+
+// Still works in Riverpod 3, but only via the explicit legacy import --
+// prefer NotifierProvider/@riverpod codegen for new code instead.
+final counterProvider = StateProvider<int>((ref) => 0);
+```
+
+**Caught by:** `flutter analyze` — but only after the reader already knows to look, since the error message names a real function that genuinely does not exist under that import, giving no hint that it moved rather than vanished.
+
+## Widget tree & keys
+
+### 6. No `key` on a reorderable list of stateful children
+
+Without a `key`, Flutter matches a rebuilt widget to its `State` by **type and position**, not identity. Reorder the list, and each `State` object stays pinned to its screen position instead of following its data.
+
+```dart
+// lib/ai-bug-catalog/06-missing-key.dart
+import 'package:flutter/material.dart';
+
+class ColorBox extends StatefulWidget {
+  const ColorBox({super.key, required this.label});
+  final String label;
+  @override
+  State<ColorBox> createState() => _ColorBoxState();
+}
+
+class _ColorBoxState extends State<ColorBox> {
+  bool _tapped = false;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _tapped = true),
+      child: Text(_tapped ? '${widget.label} (tapped)' : widget.label),
+    );
+  }
+}
+
+// AI-generated: no key, so Flutter matches by TYPE + POSITION, not identity.
+class BuggyList extends StatelessWidget {
+  const BuggyList({super.key, required this.labels});
+  final List<String> labels;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [for (final l in labels) ColorBox(label: l)]);
+  }
+}
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/06-missing-key_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/06-missing-key.dart';
+
+void main() {
+  testWidgets('no key: tapped state sticks to POSITION, not the item', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BuggyList(labels: ['Milo', 'Rex'])));
+    await tester.tap(find.text('Milo'));
+    await tester.pump();
+    expect(find.text('Milo (tapped)'), findsOneWidget);
+
+    // Reorder: Rex now occupies position 0. No key -> Flutter reuses the
+    // SAME State object for position 0 -- the "tapped" flag follows the
+    // POSITION, not Milo.
+    await tester.pumpWidget(const MaterialApp(home: BuggyList(labels: ['Rex', 'Milo'])));
+    expect(find.text('Rex (tapped)'), findsOneWidget);
+    expect(find.text('Milo (tapped)'), findsNothing);
+  });
+}
+```
+
+```text
+✓ no key: tapped state sticks to POSITION, not the item
+00:00 +1: All tests passed!
+```
+
+**Fix, proven passing:** a `ValueKey` per item ties the `State` to the DATA, not the position.
+
+```dart
+// lib/ai-bug-catalog/06-missing-key-fixed.dart
+import 'package:flutter/material.dart';
+
+class ColorBox extends StatefulWidget {
+  const ColorBox({super.key, required this.label});
+  final String label;
+  @override
+  State<ColorBox> createState() => _ColorBoxState();
+}
+
+class _ColorBoxState extends State<ColorBox> {
+  bool _tapped = false;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _tapped = true),
+      child: Text(_tapped ? '${widget.label} (tapped)' : widget.label),
+    );
+  }
+}
+
+class FixedList extends StatelessWidget {
+  const FixedList({super.key, required this.labels});
+  final List<String> labels;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [for (final l in labels) ColorBox(key: ValueKey(l), label: l)]);
+  }
+}
+```
+
+```text
+✓ ValueKey: tapped state stays attached to the correct item
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing automatic — this renders correctly on the first pass every time; only a manual reorder-then-inspect during review (or a regression test seeded with a reorder step) catches it.
+
+### 7. The same `GlobalKey` reused across sibling widgets
+
+An AI assistant that reaches for a single, module-level `GlobalKey` to mean "the currently featured item" — assuming only one widget will ever hold it at a time — breaks the moment two widgets carrying that key exist in the same frame.
+
+```dart
+// lib/ai-bug-catalog/07-global-key-reused.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: ONE GlobalKey reused for "the featured item".
+final featuredKey = GlobalKey();
+
+class BuggyTwoPanes extends StatelessWidget {
+  const BuggyTwoPanes({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(key: featuredKey, width: 100, height: 100, color: Colors.blue),
+        Container(key: featuredKey, width: 100, height: 100, color: Colors.red),
+      ],
+    );
+  }
+}
+```
+
+**Symptom — real, unedited `flutter test` failure, captured fresh for this module:**
+
+```text
+Duplicate keys found.
+If multiple keyed widgets exist as children of another widget, they must have unique keys.
+Row(direction: horizontal, mainAxisAlignment: start, crossAxisAlignment: center) has multiple
+children with key [GlobalKey#52079].
+```
+
+**Fix, proven passing:** a `UniqueKey()` (or no key at all, if identity across rebuilds doesn't matter) per widget.
+
+```dart
+// lib/ai-bug-catalog/07-global-key-reused-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedTwoPanes extends StatelessWidget {
+  const FixedTwoPanes({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(key: UniqueKey(), width: 100, height: 100, color: Colors.blue),
+        Container(key: UniqueKey(), width: 100, height: 100, color: Colors.red),
+      ],
+    );
+  }
+}
+```
+
+```text
+✓ a distinct key per widget does not throw
+00:00 +1: All tests passed!
+```
+
+**Caught by:** the framework, immediately and loudly, the instant two widgets carrying the same key exist in one build — but only that specific arrangement (siblings, or two branches built the same frame); a `GlobalKey` reused across builds that never overlap in time can hide for much longer.
+
+### 8. `Scaffold.of(context)` called with the `Scaffold`'s own build context
+
+`Scaffold.of(context)` needs a context that is a **descendant** of the `Scaffold` — the context the `Scaffold` widget's own `build()` method receives is an ancestor of it, not a descendant, so the lookup fails.
+
+```dart
+// lib/ai-bug-catalog/08-scaffold-of.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: calls Scaffold.of(context) with the SAME context the
+// Scaffold itself was built with.
+class BuggyPage extends StatelessWidget {
+  const BuggyPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Buggy')),
+      body: Center(
+        child: ElevatedButton(
+          onPressed: () => Scaffold.of(context).showBottomSheet(
+            (_) => const SizedBox(height: 100, child: Text('Sheet')),
+          ),
+          child: const Text('Open sheet'),
+        ),
+      ),
+    );
+  }
+}
+```
+
+**Symptom — real, unedited `flutter test` failure, captured fresh for this module:**
+
+```text
+Scaffold.of() called with a context that does not contain a Scaffold.
+No Scaffold ancestor could be found starting from the context that was passed to Scaffold.of().
+This usually happens when the context provided is from the same StatefulWidget as that whose build
+function actually creates the Scaffold widget being sought.
+```
+
+**Fix, proven passing:** a `Builder` introduces a fresh context that IS a `Scaffold` descendant.
+
+```dart
+// lib/ai-bug-catalog/08-scaffold-of-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedPage extends StatelessWidget {
+  const FixedPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Fixed')),
+      body: Center(
+        child: Builder(
+          builder: (innerContext) => ElevatedButton(
+            onPressed: () => Scaffold.of(innerContext).showBottomSheet(
+              (_) => const SizedBox(height: 100, child: Text('Sheet')),
+            ),
+            child: const Text('Open sheet'),
+          ),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```text
+✓ Scaffold.of(context) from a Builder descendant works
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing until the button is actually tapped — this compiles and even *builds* fine; the lookup only runs, and fails, when the callback fires.
+
+## Layout
+
+### 9. `ListView` given unbounded height by a plain `Column`
+
+`Column` gives its children **unbounded height** along the main axis. `ListView` needs a bounded height to know how big its viewport is. Drop one straight into the other with nothing between them, and layout fails.
+
+```dart
+// lib/ai-bug-catalog/09-unbounded-listview.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: a ListView dropped straight into a Column.
+class BuggyPage extends StatelessWidget {
+  const BuggyPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Header'),
+        ListView(children: const [Text('one'), Text('two'), Text('three')]),
+      ],
+    );
+  }
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+Vertical viewport was given unbounded height.
+Viewports expand in the scrolling direction to fill their container. In this case, a vertical
+viewport was given an unlimited amount of vertical space in which to expand. This situation
+typically happens when a scrollable widget is nested inside another scrollable widget.
+```
+
+**Fix, proven passing:** `Expanded` gives the `ListView` a bounded height — whatever space is left in the `Column`. **The real rule, precisely:** an unbounded-height ancestor (a `Column`'s main axis) needs a bounded box SOMEWHERE between it and a scrollable/flexible child. The reverse direction — a `Column` *inside* a `ListView` — needs nothing extra at all: a scrollable already gives its children a bounded cross-axis and unbounded main-axis, exactly what a naturally-sized `Column` wants.
+
+```dart
+// lib/ai-bug-catalog/09-unbounded-listview-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedPage extends StatelessWidget {
+  const FixedPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Header'),
+        Expanded(
+          child: ListView(children: const [Text('one'), Text('two'), Text('three')]),
+        ),
+      ],
+    );
+  }
+}
+
+// The reverse needs NO extra widget:
+class ColumnInsideListView extends StatelessWidget {
+  const ColumnInsideListView({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return ListView(children: [Column(children: const [Text('a'), Text('b'), Text('c')])]);
+  }
+}
+```
+
+```text
+✓ Expanded around the ListView fixes it
+✓ a Column INSIDE a ListView needs no extra widget at all
+00:00 +2: All tests passed!
+```
+
+**Caught by:** the framework, immediately and loudly. The nuance to catch in review is the DIRECTION — the same fix pattern is often over-applied to the reverse case, which never needed it.
+
+### 10. `Expanded` used outside a `Flex`
+
+`Expanded` relies on `ParentData` that only a `Row`/`Column`/`Flex` sets up for its direct children. Placed inside a `Center`, a `Container`, or anything else, it fails.
+
+```dart
+// lib/ai-bug-catalog/10-expanded-outside-flex.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: Expanded directly inside a Center, which is not a Flex.
+class BuggyBox extends StatelessWidget {
+  const BuggyBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Center(child: Expanded(child: Container(color: Colors.blue)));
+  }
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+Incorrect use of ParentDataWidget.
+The ParentDataWidget Expanded(flex: 1) wants to apply ParentData of type FlexParentData to a
+RenderObject, which has been set up to accept ParentData of incompatible type BoxParentData.
+Usually, this means that the Expanded widget has the wrong ancestor RenderObjectWidget. Typically,
+Expanded widgets are placed directly inside Flex widgets.
+The offending Expanded is currently placed inside a Center widget.
+```
+
+**Fix, proven passing:**
+
+```dart
+// lib/ai-bug-catalog/10-expanded-outside-flex-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedBox extends StatelessWidget {
+  const FixedBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [Expanded(child: Container(color: Colors.blue))]);
+  }
+}
+```
+
+```text
+✓ Expanded is a child of a Row -- lays out fine
+00:00 +1: All tests passed!
+```
+
+**Caught by:** the framework, immediately, and the error message even names the exact ancestor it found instead — the fastest diagnostic in this whole catalog to fix once seen, but the message alone doesn't say "wrap in a Row/Column," a reader still has to know that rule.
+
+### 11. `RenderFlex` overflow from fixed-size children with no escape hatch
+
+A `Row`/`Column` of fixed-size children that together exceed the available space, with no `Expanded`/`Flexible`/scrolling to absorb the difference, overflows — visibly, in a debug build (the yellow-and-black stripes), and as a real assertion underneath.
+
+```dart
+// lib/ai-bug-catalog/11-renderflex-overflow.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: 20 fixed-width boxes in a Row, wider than any phone screen.
+class BuggyRow extends StatelessWidget {
+  const BuggyRow({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: List.generate(
+        20,
+        (i) => Container(width: 100, height: 40, color: Colors.primaries[i % Colors.primaries.length]),
+      ),
+    );
+  }
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+A RenderFlex overflowed by 1200 pixels on the right.
+The overflowing RenderFlex has an orientation of Axis.horizontal.
+The edge of the RenderFlex that is overflowing has been marked in the rendering with a yellow and
+black striped pattern. This is usually caused by the contents being too big for the RenderFlex.
+Consider applying a flex factor (e.g. using an Expanded widget) to force the children of the
+RenderFlex to fit within the available space instead of being sized to their natural size.
+```
+
+**Fix, proven passing:** `Expanded` lets every child share the available width instead of demanding its natural width unconditionally.
+
+```dart
+// lib/ai-bug-catalog/11-renderflex-overflow-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedRow extends StatelessWidget {
+  const FixedRow({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: List.generate(
+        20,
+        (i) => Expanded(
+          child: Container(height: 40, color: Colors.primaries[i % Colors.primaries.length]),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```text
+✓ Expanded children share the available width -- no overflow
+00:00 +1: All tests passed!
+```
+
+**Caught by:** the framework, visibly — the yellow-and-black overflow indicator is one of the few Flutter errors that shows up IN the rendered UI itself, not just the console, which is exactly why it is also one of the most-often "fixed" by the nearest `Expanded`, correctly or not.
+
+## Async & isolates
+
+### 12. A `Future` created directly in `build()`
+
+Calling an async function inside `build()` creates a NEW `Future` — and a new network/database call — on every single rebuild, not once per logical "load."
+
+```dart
+// lib/ai-bug-catalog/12-future-in-build.dart
+import 'package:flutter/material.dart';
+
+int fetchCount = 0;
+Future<String> fetchName() async {
+  fetchCount++;
+  return 'Milo';
+}
+
+// AI-generated: calls the async function directly inside build().
+class BuggyName extends StatelessWidget {
+  const BuggyName({super.key, required this.tick});
+  final int tick; // forces a distinct widget per pump, to prove the rebuild count
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: fetchName(), // new Future every single build()
+      builder: (context, snapshot) => Text(snapshot.data ?? 'loading'),
+    );
+  }
+}
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/12-future-in-build_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/12-future-in-build.dart';
+
+void main() {
+  testWidgets('creating the Future in build() re-fetches on every rebuild', (tester) async {
+    fetchCount = 0;
+    await tester.pumpWidget(MaterialApp(home: BuggyName(tick: 0)));
+    await tester.pumpWidget(MaterialApp(home: BuggyName(tick: 1)));
+    await tester.pumpWidget(MaterialApp(home: BuggyName(tick: 2)));
+    expect(fetchCount, 3); // three build()s -> three fetches
+  });
+}
+```
+
+```text
+✓ creating the Future in build() re-fetches on every rebuild
+00:00 +1: All tests passed!
+```
+
+**Fix, proven passing:** create the `Future` ONCE, in `State`, not in `build()`.
+
+```dart
+// lib/ai-bug-catalog/12-future-in-build-fixed.dart
+import 'package:flutter/material.dart';
+
+int fetchCount = 0;
+Future<String> fetchName() async {
+  fetchCount++;
+  return 'Milo';
+}
+
+class FixedName extends StatefulWidget {
+  const FixedName({super.key, required this.tick});
+  final int tick;
+  @override
+  State<FixedName> createState() => _FixedNameState();
+}
+
+class _FixedNameState extends State<FixedName> {
+  late final Future<String> _future = fetchName();
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _future,
+      builder: (context, snapshot) => Text(snapshot.data ?? 'loading'),
+    );
+  }
+}
+```
+
+```text
+✓ creating the Future once in initState fetches exactly once
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing automatic — every rebuild-refetch still resolves with the right data, so the demo works; only counting real backend calls (or a test like the one above) reveals the multiplication.
+
+### 13. `compute()` closure capturing a `BuildContext`
+
+Modern Dart's `compute()` runs on `Isolate.run`, which genuinely can send well-behaved closures across the isolate boundary — a closure capturing a plain `int`, even a bound instance method, crosses fine on this course's pinned Dart 3.13.4. What still cannot cross is anything reachable from the widget tree: a `BuildContext` transitively reaches a `Zone`, and a `Zone` is never sendable.
+
+```dart
+// lib/ai-bug-catalog/13-compute-context.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+
+// AI-generated: captures `context` to log something mid-computation.
+class BuggySummary extends StatelessWidget {
+  const BuggySummary({super.key});
+  @override
+  Widget build(BuildContext context) {
+    int withContext(List<int> xs) {
+      debugPrint('${context.widget}'); // captures `context` -> unsendable
+      return xs.reduce((a, b) => a + b);
+    }
+    compute(withContext, const [1, 2, 3]).then((r) => debugPrint('result: $r'));
+    return const SizedBox();
+  }
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+Invalid argument(s): Illegal argument in isolate message: object is unsendable -
+Library:'dart:async' Class: _CustomZone@5048458 (see restrictions listed at `SendPort.send()`
+documentation for more information)
+ <- _parentZone in Instance of 'AutomatedTestWidgetsFlutterBinding' (from package:flutter_test/src/binding.dart)
+ <- _binding in Instance of '_BindingPipelineManifold' (from package:flutter/src/rendering/binding.dart)
+ <- ... (a long ownership chain from the captured BuildContext down to a real Zone)
+```
+
+**Fix, proven passing:** a top-level function that takes only plain, explicit data — no `BuildContext`, no `Zone`, nothing tied to this isolate's own binding.
+
+```dart
+// lib/ai-bug-catalog/13-compute-context-fixed.dart
+import 'package:flutter/foundation.dart';
+
+int _sum(List<int> xs) => xs.reduce((a, b) => a + b);
+
+Future<int> fixedSummarize(List<int> values) => compute(_sum, values);
+```
+
+```text
+✓ a top-level function with only plain data crosses the isolate boundary fine
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing until the `compute()` call actually runs — this compiles perfectly cleanly, and even a closure capturing a plain local variable would run fine, which is exactly what makes this easy to under- or over-correct: the rule isn't "never capture anything," it's "never capture anything reachable from the Element tree or the binding."
+
+### 14. A single-subscription `StreamController` listened to twice
+
+`StreamController()` defaults to single-subscription. A second, independent `.listen()` call on the same stream — one piece of code for UI, another for analytics, say — throws; it does not silently create a second subscriber the way a broadcast stream would.
+
+```dart
+// lib/ai-bug-catalog/14-stream-double-listen.dart — @expect-error a single-subscription Stream throws on the second .listen() -- see the real "Bad state" below
+import 'dart:async';
+
+// AI-generated: default StreamController, assumed multiple listeners are fine.
+StreamController<int> buggyController() => StreamController<int>();
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+Bad state: Stream has already been listened to.
+```
+
+**Fix, proven passing:** `.broadcast()` explicitly allows multiple independent listeners.
+
+```dart
+// lib/ai-bug-catalog/14-stream-double-listen-fixed.dart
+import 'dart:async';
+
+StreamController<int> fixedController() => StreamController<int>.broadcast();
+```
+
+```dart
+// test/ai-bug-catalog/14-stream-double-listen-fixed_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/14-stream-double-listen-fixed.dart';
+
+void main() {
+  test('a broadcast StreamController allows two independent listeners', () async {
+    final controller = fixedController();
+    final a = <int>[];
+    final b = <int>[];
+    controller.stream.listen(a.add);
+    controller.stream.listen(b.add); // does NOT throw
+    controller.add(1);
+    await Future<void>.delayed(Duration.zero);
+    expect(a, [1]);
+    expect(b, [1]);
+    await controller.close();
+  });
+}
+```
+
+```text
+✓ a broadcast StreamController allows two independent listeners
+00:00 +1: All tests passed!
+```
+
+**Caught by:** the framework, immediately and loudly, the moment the second `.listen()` runs — but only if that second listener is ever actually exercised; code paths that only add the second listener conditionally (an optional analytics hook, say) can ship untested.
+
+## Navigation
+
+### 15. `go_router`: a parameterized route declared before a static one
+
+`go_router` matches routes in **declaration order**, not by specificity. `GoRoute(path: '/pets/:id')` declared before `GoRoute(path: '/pets/new')` at the same segment level means `/pets/new` matches the FIRST route, with `id` literally equal to the string `'new'`.
+
+```dart
+// lib/ai-bug-catalog/15-route-order.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+// AI-generated: the parameterized route declared FIRST.
+GoRouter buggyRouter() => GoRouter(
+      initialLocation: '/pets/1',
+      routes: [
+        GoRoute(path: '/pets/:id', builder: (c, s) => Text('pet id=${s.pathParameters['id']}')),
+        GoRoute(path: '/pets/new', builder: (c, s) => const Text('new pet form')),
+      ],
+    );
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/15-route-order_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/15-route-order.dart';
+
+void main() {
+  testWidgets('/pets/:id declared first swallows /pets/new as id="new"', (tester) async {
+    final router = buggyRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    router.go('/pets/new');
+    await tester.pumpAndSettle();
+    expect(find.text('pet id=new'), findsOneWidget);
+    expect(find.text('new pet form'), findsNothing);
+  });
+}
+```
+
+```text
+✓ /pets/:id declared first swallows /pets/new as id="new"
+00:00 +1: All tests passed!
+```
+
+**Fix, proven passing:** declare the specific, static route FIRST.
+
+```dart
+// lib/ai-bug-catalog/15-route-order-fixed.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+GoRouter fixedRouter() => GoRouter(
+      initialLocation: '/pets/1',
+      routes: [
+        GoRoute(path: '/pets/new', builder: (c, s) => const Text('new pet form')),
+        GoRoute(path: '/pets/:id', builder: (c, s) => Text('pet id=${s.pathParameters['id']}')),
+      ],
+    );
+```
+
+```text
+✓ /pets/new declared first matches correctly
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing automatic — both orderings compile identically; only navigating to the specific route and checking what actually rendered reveals the misroute.
+
+### 16. `context.go()` used where `context.push()` was needed
+
+`go()` **replaces** the current location in the route stack. `push()` **adds** to it. Using `go()` for what should be a drill-down navigation (a list to a detail screen, say) leaves the user with no "back" to press.
+
+```dart
+// lib/ai-bug-catalog/16-go-vs-push.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+GoRouter buildRouter() => GoRouter(
+      initialLocation: '/a',
+      routes: [
+        GoRoute(path: '/a', builder: (c, s) => const _Page('A')),
+        GoRoute(path: '/b', builder: (c, s) => const _Page('B')),
+      ],
+    );
+
+class _Page extends StatelessWidget {
+  const _Page(this.label);
+  final String label;
+  @override
+  Widget build(BuildContext context) => Scaffold(body: Text('Page $label'));
+}
+```
+
+**PROOF — stack depth, compared directly:**
+
+```dart
+// test/ai-bug-catalog/16-go-vs-push_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/16-go-vs-push.dart';
+
+void main() {
+  testWidgets('context.go REPLACES the stack', (tester) async {
+    final router = buildRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    router.go('/b'); // AI-generated: used go() for what should be a "push"
+    await tester.pumpAndSettle();
+    expect(router.routerDelegate.currentConfiguration.matches.length, 1); // /a is GONE
+  });
+
+  testWidgets('context.push KEEPS the previous page on the stack', (tester) async {
+    final router = buildRouter();
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    router.push('/b'); // fixed: push() when the user should be able to go "back"
+    await tester.pumpAndSettle();
+    expect(router.routerDelegate.currentConfiguration.matches.length, 2); // /a is still there
+  });
+}
+```
+
+```text
+✓ context.go REPLACES the stack
+✓ context.push KEEPS the previous page on the stack
+00:00 +2: All tests passed!
+```
+
+**Fix:** use `context.push()` (or `router.push()`) for drill-down navigation the user should be able to back out of; reserve `go()` for tab switches, redirects, and "replace this screen entirely" cases.
+
+**Caught by:** nothing automatic — both calls navigate correctly to the destination; only checking `Navigator.canPop()`/pressing back afterward reveals the missing history entry.
+
+### 17. `redirect` reads external state with no `refreshListenable`
+
+`go_router`'s `redirect` callback only re-runs on **navigation events** by default. If it reads some external state (an auth flag) that changes WITHOUT a navigation event happening at the same time, the router never notices.
+
+```dart
+// lib/ai-bug-catalog/17-redirect-refresh.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class AuthState extends ChangeNotifier {
+  bool loggedIn = false;
+  void logIn() {
+    loggedIn = true;
+    notifyListeners();
+  }
+}
+
+// AI-generated: redirect reads auth.loggedIn, but nothing re-evaluates
+// redirects when that value changes outside of navigation.
+GoRouter buggyRouter(AuthState auth) => GoRouter(
+      initialLocation: '/login',
+      redirect: (context, state) {
+        if (!auth.loggedIn && state.matchedLocation != '/login') return '/login';
+        if (auth.loggedIn && state.matchedLocation == '/login') return '/home';
+        return null;
+      },
+      routes: [
+        GoRoute(path: '/login', builder: (c, s) => const Text('login')),
+        GoRoute(path: '/home', builder: (c, s) => const Text('home')),
+      ],
+    );
+```
+
+**PROOF:**
+
+```dart
+// test/ai-bug-catalog/17-redirect-refresh_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/17-redirect-refresh.dart';
+
+void main() {
+  testWidgets('without refreshListenable, logging in does NOT redirect away from /login', (tester) async {
+    final auth = AuthState();
+    final router = buggyRouter(auth);
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    auth.logIn(); // state changed, but nothing tells the router to re-check
+    await tester.pumpAndSettle();
+    expect(find.text('login'), findsOneWidget); // still stuck
+    expect(find.text('home'), findsNothing);
+  });
+}
+```
+
+```text
+✓ without refreshListenable, logging in does NOT redirect away from /login
+00:00 +1: All tests passed!
+```
+
+**Fix, proven passing:** `refreshListenable: auth` tells `go_router` to re-run `redirect` every time `auth.notifyListeners()` fires, not just on navigation.
+
+```dart
+// lib/ai-bug-catalog/17-redirect-refresh-fixed.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class AuthState extends ChangeNotifier {
+  bool loggedIn = false;
+  void logIn() {
+    loggedIn = true;
+    notifyListeners();
+  }
+}
+
+GoRouter fixedRouter(AuthState auth) => GoRouter(
+      initialLocation: '/login',
+      refreshListenable: auth,
+      redirect: (context, state) {
+        if (!auth.loggedIn && state.matchedLocation != '/login') return '/login';
+        if (auth.loggedIn && state.matchedLocation == '/login') return '/home';
+        return null;
+      },
+      routes: [
+        GoRoute(path: '/login', builder: (c, s) => const Text('login')),
+        GoRoute(path: '/home', builder: (c, s) => const Text('home')),
+      ],
+    );
+```
+
+```text
+✓ with refreshListenable, logging in redirects to /home immediately
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing automatic — the login screen's OWN "log in" button usually navigates explicitly anyway, which triggers a redirect check and hides the bug; it only surfaces when auth state changes from somewhere that doesn't also navigate (a background token refresh, a second tab, a push notification handler).
+
+### 18. `WillPopScope` (deprecated), and the misspelled `PredictiveBackPageTransitionBuilder`
+
+AI training data spans a `WillPopScope` era; it was deprecated in favor of `PopScope` because `WillPopScope` does not support Android's predictive-back gesture at all. Separately, the real Android predictive-back transitions class is `PredictiveBackPageTransitionsBuilder` — AI-generated code often drops the "s" in "Transitions."
+
+```dart
+// lib/ai-bug-catalog/18-willpopscope.dart
+import 'package:flutter/material.dart';
+
+// AI-generated (trained on older Flutter docs).
+Widget buggyGuard(Widget child) {
+  return WillPopScope(onWillPop: () async => false, child: child);
+}
+```
+
+**Symptom — real `flutter analyze` diagnostic, captured fresh:**
+
+```text
+info • 'WillPopScope' is deprecated and shouldn't be used. Use PopScope instead. The Android
+predictive back feature will not work with WillPopScope. This feature was deprecated after
+v3.12.0-1.0.pre. Try replacing the use of the deprecated member with the replacement •
+deprecated_member_use
+```
+
+**And the misspelled class name — real `flutter analyze` diagnostic, captured fresh:**
+
+```text
+error • The function 'PredictiveBackPageTransitionBuilder' isn't defined. Try importing the library
+that defines 'PredictiveBackPageTransitionBuilder', correcting the name to the name of an existing
+function, or defining a function named 'PredictiveBackPageTransitionBuilder' • undefined_function
+```
+
+**Fix, analyzes clean:**
+
+```dart
+// lib/ai-bug-catalog/18-willpopscope-fixed.dart
+import 'package:flutter/material.dart';
+
+Widget fixedGuard(Widget child) {
+  return PopScope(canPop: false, child: child);
+}
+
+// Note the "s": PredictiveBackPageTransitionsBuilder, not …TransitionBuilder.
+final predictiveBackBuilder = PredictiveBackPageTransitionsBuilder();
+```
+
+**Caught by:** `flutter analyze` for both — the deprecation as an `info`, the typo as a real `undefined_function` error — but only if the reader runs analyze at all; an editor's autocomplete often "fixes" the typo by suggesting the WRONG but similarly-named real class instead.
+
+## Platform
+
+### 19. `dart:io`/`Platform.isIOS` used unconditionally in code that also builds for web
+
+`dart:io`'s web implementation compiles cleanly — the web compiler ships a real, type-complete facade for it, confirmed by reading the SDK's own `io_patch.dart` for the `js_runtime` target, where every member's body is `throw UnsupportedError(...)`. The build never fails; every member just throws the moment it actually **runs**.
+
+```dart
+// lib/ai-bug-catalog/19-dartio-web.dart
+import 'dart:io';
+import 'package:flutter/material.dart';
+
+// AI-generated: reaches for dart:io directly to check the platform.
+class BuggyPlatformBadge extends StatelessWidget {
+  const BuggyPlatformBadge({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final label = Platform.isIOS ? 'iOS' : 'Other'; // throws on web, at runtime
+    return Text(label);
+  }
+}
+```
+
+**Symptom — real, freshly captured for this module:**
+
+```text
+$ flutter build web --release
+Compiling lib/main.dart for the Web...
+✓ Built build/web
+```
+
+The build succeeds with **zero** warning about `dart:io`. The failure is real but only reachable at runtime, in an actual browser, the moment `Platform.isIOS` executes — confirmed directly from the shipped SDK's web-target patch, where `_Platform._operatingSystem()` (what `Platform.isIOS` ultimately reads) is implemented as `throw UnsupportedError("Platform._operatingSystem")`.
+
+**Fix, proven to build clean:** `kIsWeb` is a compile-time-safe constant from `package:flutter/foundation.dart` — check it FIRST, before anything that touches `Platform`.
+
+```dart
+// lib/ai-bug-catalog/19-dartio-web-fixed.dart
+import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+String platformLabel() {
+  if (kIsWeb) return 'Web';
+  return Platform.isIOS ? 'iOS' : 'Other';
+}
+```
+
+**Caught by:** nothing — not the analyzer, not the build, not even `flutter build web --wasm` (also proven to compile this exact snippet cleanly, fresh for this module). Only an actual run on an actual web target surfaces it.
+
+### 20. `MethodChannel.invokeMethod` with no native handler registered
+
+Invoking a platform channel method assumes a native implementation is registered on the running platform — true only if a real plugin (or a test's own mock) actually wires it up.
+
+```dart
+// lib/ai-bug-catalog/20-missing-plugin.dart
+import 'package:flutter/services.dart';
+
+// AI-generated: assumes SOME native implementation exists.
+const _channel = MethodChannel('com.example/battery');
+
+Future<int> buggyBatteryLevel() {
+  return _channel.invokeMethod<int>('getBatteryLevel').then((v) => v ?? -1);
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+MissingPluginException(No implementation found for method getBatteryLevel on channel com.example/battery)
+```
+
+**Fix, proven passing:** in tests, register a mock handler; in production, a real platform-specific implementation (a real plugin, or platform-specific code registered in the native project).
+
+```dart
+// test/ai-bug-catalog/20-missing-plugin_test.dart
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/20-missing-plugin.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('no native handler registered -> MissingPluginException', () async {
+    await expectLater(buggyBatteryLevel(), throwsA(isA<MissingPluginException>()));
+  });
+
+  test('registering a mock handler fixes it', () async {
+    const channel = MethodChannel('com.example/battery');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => call.method == 'getBatteryLevel' ? 87 : null);
+    final level = await buggyBatteryLevel();
+    expect(level, 87);
+  });
+}
+```
+
+```text
+✓ no native handler registered -> MissingPluginException
+✓ registering a mock handler fixes it
+00:00 +2: All tests passed!
+```
+
+**Caught by:** nothing static — this compiles and analyzes perfectly; only actually invoking the channel (on a real device/emulator, or in a test with no mock registered) reveals a missing native side.
+
+### 21. `FlutterError.onError` set with no `runZonedGuarded` (or vice versa)
+
+`FlutterError.onError` only fires for errors the FRAMEWORK catches — during build, layout, and paint. An error thrown from a bare `Future`, a `Timer`, or any plain async code outside the framework's own try/catch points never reaches it at all.
+
+```dart
+// lib/ai-bug-catalog/21-zone-errors.dart
+import 'dart:async';
+
+// AI-generated: sets FlutterError.onError, assumes that's "global error
+// handling" done -- it is not, for anything outside the framework.
+Future<void> triggerAsyncErrorOutsideFramework() {
+  return Future<void>(() => throw StateError('boom from a bare Future'));
+}
+```
+
+**Fix, proven passing:** `runZonedGuarded` wraps the WHOLE zone, catching errors `FlutterError.onError` never sees.
+
+```dart
+// lib/ai-bug-catalog/21-zone-errors-fixed.dart
+import 'dart:async';
+
+void runGuarded(void Function() body, void Function(Object, StackTrace) onError) {
+  runZonedGuarded(body, onError);
+}
+```
+
+```dart
+// test/ai-bug-catalog/21-zone-errors-fixed_test.dart
+import 'dart:async';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/ai-bug-catalog/21-zone-errors-fixed.dart';
+import 'package:my_app/ai-bug-catalog/21-zone-errors.dart';
+
+void main() {
+  test('runZonedGuarded catches an error a bare Future throws', () async {
+    final caught = Completer<Object>();
+    runGuarded(() => triggerAsyncErrorOutsideFramework(), (error, stack) => caught.complete(error));
+    final error = await caught.future.timeout(const Duration(seconds: 2));
+    expect(error, isA<StateError>());
+  });
+}
+```
+
+```text
+✓ runZonedGuarded catches an error a bare Future throws
+00:00 +1: All tests passed!
+```
+
+**Caught by:** nothing static, and this is the sharpest trap in this group: `FlutterError.onError` alone LOOKS like complete error coverage (it catches real, visible framework crashes during development), which is exactly why the gap for bare async code goes unnoticed until a genuinely uncaught error reaches production with no report at all. `PlatformDispatcher.onError` (3.3+) is the modern alternative/complement worth knowing about too, catching errors at the platform-dispatcher level.
+
+## Performance
+
+### 22. `AnimationController` created but never disposed
+
+An `AnimationController`'s `Ticker` (created via `SingleTickerProviderStateMixin`) outlives the `State` object if nothing calls `.dispose()` on the controller — the framework itself catches this, loudly, in debug mode.
+
+```dart
+// lib/ai-bug-catalog/22-animation-controller.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: no dispose() override at all.
+class BuggySpinner extends StatefulWidget {
+  const BuggySpinner({super.key});
+  @override
+  State<BuggySpinner> createState() => _BuggySpinnerState();
+}
+
+class _BuggySpinnerState extends State<BuggySpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller =
+      AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat();
+
+  @override
+  Widget build(BuildContext context) =>
+      RotationTransition(turns: _controller, child: const Icon(Icons.sync));
+}
+```
+
+**Symptom — real, unedited output, captured fresh for this module:**
+
+```text
+_BuggySpinnerState#73be2(ticker active) was disposed with an active Ticker.
+_BuggySpinnerState created a Ticker via its SingleTickerProviderStateMixin, but at the time
+dispose() was called on the mixin, that Ticker was still active. The Ticker must be disposed before
+calling super.dispose().
+Tickers used by AnimationControllers should be disposed by calling dispose() on the
+AnimationController itself. Otherwise, the ticker will leak.
+```
+
+**Fix, proven passing:**
+
+```dart
+// lib/ai-bug-catalog/22-animation-controller-fixed.dart
+import 'package:flutter/material.dart';
+
+class FixedSpinner extends StatefulWidget {
+  const FixedSpinner({super.key});
+  @override
+  State<FixedSpinner> createState() => _FixedSpinnerState();
+}
+
+class _FixedSpinnerState extends State<FixedSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller =
+      AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      RotationTransition(turns: _controller, child: const Icon(Icons.sync));
+}
+```
+
+```text
+✓ disposing the controller in dispose() leaves no leaked ticker
+00:00 +1: All tests passed!
+```
+
+**Caught by:** `flutter_test` itself, unconditionally, if the widget is ever torn down in a test at all — but a widget that is simply never disposed during a short manual demo session never trips it, and the leak (a live Ticker firing frames forever) keeps costing CPU and battery in production regardless.
+
+### 23. `Opacity(opacity: 1.0)` still allocates a real compositing layer
+
+The `Opacity` widget's own doc comment says "Values 1.0 and 0.0 are painted with a fast path" — which is true, but only describes the PAINT cost. Reading `RenderOpacity`'s actual source: `isRepaintBoundary => alwaysNeedsCompositing`, and `alwaysNeedsCompositing => child != null && _alpha > 0`. That is TRUE for `opacity: 1.0` (alpha 255) exactly as much as for `opacity: 0.5` — only `opacity: 0.0` (alpha 0) skips compositing entirely. `Opacity(opacity: 1.0)` is not free; it is a real repaint boundary with a real `OpacityLayer`.
+
+**PROOF — read directly off the live `RenderObject`, not assumed from the doc comment:**
+
+```dart
+// test/ai-bug-catalog/23-opacity-layer_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  testWidgets('Opacity(opacity: 1.0) is STILL a repaint boundary', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Opacity(opacity: 1.0, child: ColoredBox(color: Colors.blue))),
+    );
+    final render = tester.renderObject<RenderOpacity>(find.byType(Opacity));
+    expect(render.isRepaintBoundary, isTrue);
+    expect(render.alwaysNeedsCompositing, isTrue);
+  });
+
+  testWidgets('Opacity(opacity: 0.0) is the ONE value that skips compositing entirely', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Opacity(opacity: 0.0, child: ColoredBox(color: Colors.blue))),
+    );
+    final render = tester.renderObject<RenderOpacity>(find.byType(Opacity));
+    expect(render.isRepaintBoundary, isFalse);
+    expect(render.alwaysNeedsCompositing, isFalse);
+  });
+}
+```
+
+```text
+✓ Opacity(opacity: 1.0) is STILL a repaint boundary
+✓ Opacity(opacity: 0.0) is the ONE value that skips compositing entirely
+00:00 +2: All tests passed!
+```
+
+**Fix:** if the opacity is a compile-time constant `1.0` (a widget conditionally shown/hidden by swapping it out entirely, say), skip `Opacity` altogether — return the child directly, or use `Visibility`/a ternary that removes the widget instead of dimming it. Reserve `Opacity`/`AnimatedOpacity`/`FadeTransition` for opacity that genuinely varies.
+
+**Caught by:** nothing automatic, and this is a genuinely nuanced correction: `Opacity(opacity: 1.0)` does not crash and does not even mis-render — it just always pays for a layer it usually does not need to, and the framework's own doc comment can be read (incorrectly) as saying otherwise.
+
+### 24. `cacheExtent` deprecated → `scrollCacheExtent` (a new sealed-class type, not just a rename)
+
+`cacheExtent` (a plain `double`) was deprecated in Flutter 3.41 in favor of `scrollCacheExtent` — but the replacement is not a drop-in rename: `scrollCacheExtent` takes a NEW sealed class, `ScrollCacheExtent`, with factory constructors `.pixels(double)` and `.viewport(double)`, and that type is not even re-exported by `package:flutter/material.dart` — it needs an explicit `package:flutter/rendering.dart` import.
+
+```dart
+// lib/ai-bug-catalog/24-cache-extent.dart
+import 'package:flutter/material.dart';
+
+// AI-generated (trained on older Flutter docs).
+Widget buggyList() => ListView.builder(
+      cacheExtent: 500,
+      itemCount: 100,
+      itemBuilder: (context, i) => Text('$i'),
+    );
+```
+
+**Symptom — real `flutter analyze` diagnostic, captured fresh:**
+
+```text
+info • 'cacheExtent' is deprecated and shouldn't be used. Use scrollCacheExtent instead. This
+feature was deprecated after v3.41.0-0.0.pre. Try replacing the use of the deprecated member with
+the replacement • deprecated_member_use
+```
+
+A naive rename to `scrollCacheExtent: 500` fails differently:
+
+```text
+error • The argument type 'int' can't be assigned to the parameter type 'ScrollCacheExtent?' •
+argument_type_not_assignable
+```
+
+**Fix, analyzes clean:**
+
+```dart
+// lib/ai-bug-catalog/24-cache-extent-fixed.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+
+Widget fixedList() => ListView.builder(
+      scrollCacheExtent: ScrollCacheExtent.pixels(500),
+      itemCount: 100,
+      itemBuilder: (context, i) => Text('$i'),
+    );
+```
+
+**Caught by:** `flutter analyze` for the deprecation, and `dart fix --dry-run` correctly identifies it as fixable (proven in **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)**) — but a reflexive find-and-replace rename, without reading the new type, trades one diagnostic for a different one.
+
+## Tooling & release
+
+### 25. `prefer_const_constructors` is NOT in `flutter_lints` 6
+
+`flutter_lints` 6.0.0 ships `prefer_const_constructors_in_immutables` (const inside an `@immutable` class's own `build()`) but not the general `prefer_const_constructors` rule that flags ANY missed `const` opportunity — confirmed by reading the package's own `flutter.yaml` rule list directly.
+
+```dart
+// lib/ai-bug-catalog/25-prefer-const.dart
+import 'package:flutter/material.dart';
+
+// AI-generated: missing const -- flutter_lints 6 says nothing about it.
+Widget buildGreeting() {
+  return Text('hello');
+}
+```
+
+**Symptom — real `flutter analyze`, under this course's pinned `flutter_lints: ^6.0.0`:**
+
+```text
+Analyzing 25-prefer-const.dart...
+No issues found!
+```
+
+**Contrast — the SAME file, with `prefer_const_constructors: true` added explicitly to `analysis_options.yaml`:**
+
+```text
+info • Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to
+the constructor invocation • prefer_const_constructors
+```
+
+**Fix:** either add `const`, or explicitly enable `prefer_const_constructors` (or adopt `very_good_analysis`, which does include it) if the team wants the general rule enforced.
+
+**Caught by:** nothing, under this course's exact pinned lint set — a reviewer relying on "the linter would have caught it" for `const` specifically is relying on a rule that is not actually enabled.
+
+### 26. `print()` is not stripped from a release build
+
+Nothing in Flutter's default release pipeline strips `print()` calls. The literal string survives verbatim into the compiled output.
+
+```dart
+// lib/ai-bug-catalog/26-print-release.dart
+void main() {
+  print('READING_FLUTTER_PRINT_MARKER_7f3a9c'); // AI-generated: "it's just a debug print"
+}
+```
+
+**Symptom — real `flutter build web --release`, then grepping the actual output bundle, captured fresh for this module:**
+
+```text
+$ flutter build web --release
+✓ Built build/web
+$ grep -c READING_FLUTTER_PRINT_MARKER_7f3a9c build/web/main.dart.js
+1
+```
+
+The marker string is present, verbatim, once, inside the minified release JS bundle.
+
+**Fix:** use `dart:developer`'s `log()` (which respects log levels and can be stripped/filtered by tooling) instead of `print()` for anything that should not ship in release, or gate debug-only prints behind `kDebugMode` from `package:flutter/foundation.dart`.
+
+**Caught by:** nothing automatic — no lint in this course's pinned `flutter_lints` 6 flags a bare `print()` by default (`avoid_print` IS enabled, worth noting as the one exception: it fires as a lint, but nothing enforces fixing lints before a release build ships).
+
+### 27. Non-exhaustive `switch` on a `sealed class`
+
+An AI assistant trained on the old "abstract class + `is`-check" style for state unions sometimes still forgets a case even when using a modern `sealed class` + `switch` expression — but here, the analyzer can actually PROVE the switch is incomplete, at compile time, because the class is sealed.
+
+```dart
+// lib/ai-bug-catalog/27-non-exhaustive-switch.dart — @expect-error non_exhaustive_switch_expression -- see the real diagnostic below
+sealed class LoadState {}
+class Loading extends LoadState {}
+class Loaded extends LoadState {
+  Loaded(this.data);
+  final String data;
+}
+class LoadError extends LoadState {
+  LoadError(this.message);
+  final String message;
+}
+
+// AI-generated: forgot the LoadError case entirely.
+String buggyDescribe(LoadState state) {
+  return switch (state) {
+    Loading() => 'loading',
+    Loaded(:final data) => 'loaded: $data',
+  };
+}
+```
+
+**Symptom — real `flutter analyze` diagnostic, captured fresh:**
+
+```text
+error • The type 'LoadState' isn't exhaustively matched by the switch cases since it doesn't match
+the pattern 'LoadError()'. Try adding a wildcard pattern or cases that match 'LoadError()' •
+non_exhaustive_switch_expression
+```
+
+**Fix, analyzes clean:**
+
+```dart
+// lib/ai-bug-catalog/27-non-exhaustive-switch-fixed.dart
+sealed class LoadState {}
+class Loading extends LoadState {}
+class Loaded extends LoadState {
+  Loaded(this.data);
+  final String data;
+}
+class LoadError extends LoadState {
+  LoadError(this.message);
+  final String message;
+}
+
+String fixedDescribe(LoadState state) {
+  return switch (state) {
+    Loading() => 'loading',
+    Loaded(:final data) => 'loaded: $data',
+    LoadError(:final message) => 'error: $message',
+  };
+}
+```
+
+**Caught by:** `flutter analyze`, as a real, hard ERROR (not a lint an AI's confidence can wave away) — this is Dart 3's own exhaustiveness checking, and it is the single strongest argument in this whole catalog for adopting `sealed class` state unions over the old `abstract class` style: a fourth subtype added later makes every existing switch fail to compile again until it is handled.
+
+### 28. Hallucinated API: a named parameter and a method that do not exist
+
+An AI assistant blending several widgets/APIs it has seen invents a plausible-sounding named parameter or method name that does not actually exist on the class in question.
+
+```dart
+// lib/ai-bug-catalog/28-hallucinated-api.dart — @expect-error undefined_named_parameter + undefined_method -- see the real diagnostics below
+import 'package:flutter/material.dart';
+
+Widget buggyCard() {
+  return Card(
+    elevation: 4,
+    cornerRadius: 12, // hallucinated -- Card has no such parameter
+    child: const Text('hi'),
+  );
+}
+
+void buggyScroll(ScrollController controller) {
+  controller.animateToEnd(); // hallucinated -- no such method on ScrollController
+}
+```
+
+**Symptom — real `flutter analyze` diagnostics, captured fresh:**
+
+```text
+error • The named parameter 'cornerRadius' isn't defined. Try correcting the name to an existing
+named parameter's name, or defining a named parameter with the name 'cornerRadius' •
+undefined_named_parameter
+error • The method 'animateToEnd' isn't defined for the type 'ScrollController'. Try correcting the
+name to the name of an existing method, or defining a method named 'animateToEnd' • undefined_method
+```
+
+**Fix, analyzes clean:**
+
+```dart
+// lib/ai-bug-catalog/28-hallucinated-api-fixed.dart
+import 'package:flutter/material.dart';
+
+Widget fixedCard() {
+  return Card(
+    elevation: 4,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    child: const Text('hi'),
+  );
+}
+
+void fixedScroll(ScrollController controller) {
+  controller.animateTo(
+    controller.position.maxScrollExtent,
+    duration: const Duration(milliseconds: 300),
+    curve: Curves.easeOut,
+  );
+}
+```
+
+**Caught by:** `flutter analyze` every time — the cheapest, most mechanical entry in this whole catalog to catch, and exactly why "did you even run `flutter analyze`" is the first line of the **[Review Checklist](/flutter/en/reading-flutter/review-checklist/)** that follows this lesson.
+
+## Mental Model
+
+<Mermaid title="What actually catches each group, if anything" code={catalogCoverageDiagram} />
+
+export const catalogCoverageDiagram = `flowchart LR
+  A["State &amp; lifecycle"] --> R["Needs a real dispose/rebuild sequence<br/>to surface at all"]
+  W["Widget tree &amp; keys"] --> T["Mostly human review<br/>(renders correctly either way)"]
+  L["Layout"] --> T2["Framework catches it loudly --<br/>but only the exact arrangement that overflows"]
+  As["Async &amp; isolates"] --> R
+  N["Navigation"] --> T
+  P["Platform"] --> D["Needs the actual platform/runtime --<br/>compiles and analyzes clean otherwise"]
+  Pf["Performance"] --> M["Silent cost, not a crash --<br/>needs reading RenderObject properties directly"]
+  Tl["Tooling &amp; release"] --> M2["Analyzer/lint catches SOME --<br/>only if the rule is actually enabled"]
+`;
+
+<Callout title="The one-line takeaway">
+Every entry above either analyzes perfectly cleanly or renders correctly on the first pass — most of this catalog's 28 patterns only show their cost on a SECOND event: a dispose, a reorder, a second navigation, an actual platform run, or a release build. Run the tools in **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)** first, then still work through the **[Review Checklist](/flutter/en/reading-flutter/review-checklist/)** by eye for everything only a second event can surface.
+</Callout>
+
+export const quizAiBugCatalog = [
+  {
+    q: "```text\nsetState() called after dispose(): _BuggyLoaderState#5aa37(lifecycle state: defunct, not mounted)\n```\nGiven this real, freshly-captured failure, what does adding `if (!mounted) return;` before the setState call actually fix?",
+    options: [
+      "It prevents the Future from ever completing",
+      "It turns a crash into a harmless no-op -- mounted is a real getter on State that flips to false once dispose() has run, so the guard simply skips the setState call when there is no widget left to rebuild",
+      "It cancels the underlying network request",
+      "It makes the widget rebuild immediately instead of waiting",
+    ],
+    answer: 1,
+    explain: "Proven directly: FixedLoader's identical structure, with only the mounted guard added, produces zero exception under the exact same dispose-then-resolve sequence that crashes BuggyLoader.",
+  },
+  {
+    q: "Entry 13 shows a compute() closure capturing a plain int working fine, but one capturing BuildContext throwing a real 'object is unsendable' error. Why the difference?",
+    options: [
+      "Ints are always unsendable, this is a mistake",
+      "A plain int is fully self-contained data; a BuildContext transitively references the Element tree and, several links down, a real dart:async Zone object -- Zones are never sendable across an isolate boundary, no matter how deep in the captured object graph they appear",
+      "compute() never actually spawns a new isolate",
+      "This only happens in test environments, never in production",
+    ],
+    answer: 1,
+    explain: "Proven directly: the real error's ownership chain traces from the captured BuildContext through several framework objects down to '_CustomZone@5048458' -- confirming the failure is about REACHABILITY of an unsendable object, not about closures in general.",
+  },
+  {
+    q: "Why does entry 23 say Opacity(opacity: 1.0) is NOT free, even though the widget's own doc comment says values 1.0 and 0.0 are both painted with a 'fast path'?",
+    options: [
+      "The doc comment is simply wrong and should be ignored entirely",
+      "The 'fast path' the doc comment describes is about PAINT-time blending cost, not about layer allocation -- reading RenderOpacity's source directly shows isRepaintBoundary is true whenever alpha > 0, which includes 1.0; only alpha == 0 (opacity 0.0) skips compositing entirely",
+      "Opacity(1.0) is exactly as expensive as Opacity(0.5) in every respect",
+      "This was fixed in a later Flutter version and no longer applies",
+    ],
+    answer: 1,
+    explain: "Proven directly by reading the live RenderObject's own properties: Opacity(opacity: 1.0) reports isRepaintBoundary=true and alwaysNeedsCompositing=true in a real widget test, exactly matching Opacity(opacity: 0.5)'s behavior on that specific axis -- only opacity: 0.0 reports false.",
+  },
+  {
+    q: "Entry 15 (go_router route order) and entry 9 (unbounded ListView) both compile and analyze perfectly cleanly. What do they have in common that explains why neither is caught by any static tool?",
+    options: [
+      "Both are actually caught by flutter analyze -- this is a trick question",
+      "Both are about RUNTIME BEHAVIOR (which route matches, whether a viewport has a bounded height) that depends on the actual object graph/navigation at the moment code runs -- the analyzer only checks types and syntax, never route-matching semantics or the runtime constraint tree",
+      "Both only affect performance, never correctness",
+      "Both were fixed in Flutter 3.47 and no longer occur",
+    ],
+    answer: 1,
+    explain: "Proven throughout the catalog: both bugs require an actual pumpWidget/navigation call to surface at all -- the route-order bug needed an actual router.go('/pets/new') call, and the unbounded-height bug needed an actual layout pass, neither of which a purely static analysis pass performs.",
+  },
+  {
+    q: "Why does entry 25 (prefer_const_constructors) matter even though the missing const doesn't crash anything?",
+    options: [
+      "It doesn't matter -- flutter_lints 6 already catches every const opportunity",
+      "It's a real, current gap in a widely-assumed-complete lint package: a reviewer who assumes 'the linter would catch missing const' for this course's exact pinned flutter_lints 6.0.0 is wrong, proven by the SAME file producing zero issues by default and a real info diagnostic only once the rule is explicitly added",
+      "const only matters for compile speed, never runtime performance",
+      "This rule was removed because it caused false positives",
+    ],
+    answer: 1,
+    explain: "Proven directly: `flutter analyze` on the exact same file reports 'No issues found!' under flutter_lints 6 alone, then reports the real prefer_const_constructors diagnostic at the identical line once that one rule is added explicitly to analysis_options.yaml -- the gap is real, not assumed.",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/ai-bug-catalog" questions={quizAiBugCatalog} />
+
+<ProgressTracker client:visible id="reading-flutter/ai-bug-catalog" />
