@@ -1,6 +1,6 @@
 ---
 title: 'BLoC & Patterns'
-description: 'Unidirectional data flow with BLoC and Cubit — events in, states out, business logic separated from UI, and when the extra ceremony is worth it.'
+description: 'Unidirectional data flow with BLoC and Cubit — sealed event/state unions proven exhaustive by the analyzer, BlocBuilder buildWhen/BlocListener proven with real rebuild counts, bloc_test blocTest, Equatable, and when the extra ceremony is worth it.'
 sidebar:
   order: 5
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## One direction, always
 
@@ -26,19 +27,27 @@ export const flowDiagram = `sequenceDiagram
 
 This one-way discipline is the whole value. Because state only ever changes in one place, in response to explicit inputs, the app becomes predictable and testable — you can feed events to a BLoC in a test and assert the exact sequence of states, with no widgets involved.
 
+The `flutter_bloc` package (current: **9.1.1** on pub.dev) ships both flavors covered in this lesson, plus `bloc_test` (**10.0.0**) for the `blocTest` helper and `equatable` (**3.0.0**) for cheap value equality on events/states — all confirmed on pub.dev and used as the pinned versions below.
+
 ## Cubit: the simpler half
 
-The BLoC library ships two flavors. **Cubit** is the simpler one — no event classes, you just call methods that `emit` new states. Start here.
+**Cubit** is the simpler flavor — no event classes, you just call methods that `emit` new states. Start here.
 
 ```dart
-// State flows out; methods are the inputs.
-class CounterCubit extends Cubit<int> {
-  CounterCubit() : super(0);          // initial state
+// lib/counter_cubit.dart
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-  void increment() => emit(state + 1); // emit a new state
+/// Cubit: the simpler half of the library — no event classes, methods emit
+/// states directly.
+class CounterCubit extends Cubit<int> {
+  CounterCubit() : super(0);
+
+  void increment() => emit(state + 1);
   void reset() => emit(0);
 }
+```
 
+```dart
 // In the UI: BlocBuilder rebuilds when a new state is emitted.
 BlocBuilder<CounterCubit, int>(
   builder: (context, count) => Text('$count'),
@@ -48,20 +57,358 @@ BlocBuilder<CounterCubit, int>(
 context.read<CounterCubit>().increment();
 ```
 
-**BLoC** proper adds explicit `Event` classes between the UI and the logic (`add(IncrementPressed())` instead of `increment()`). That indirection buys you a documented, loggable list of every possible input — valuable in large apps, overkill in small ones.
+**BLoC** proper adds explicit `Event` classes between the UI and the logic (`add(Increment())` instead of `increment()`). That indirection buys you a documented, loggable list of every possible input — valuable in large apps, overkill in small ones.
+
+## Sealed event/state unions, proven exhaustive by the analyzer
+
+Real BLoC code models events and states as **sealed class unions** (Dart 3) — every possible event/state variant is a known, closed set, and a `switch` over them is checked for completeness at compile time, not caught later at runtime.
+
+```dart
+// lib/counter_bloc.dart
+import 'package:equatable/equatable.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+sealed class CounterEvent {
+  const CounterEvent();
+}
+
+final class Increment extends CounterEvent {
+  const Increment();
+}
+
+final class Decrement extends CounterEvent {
+  const Decrement();
+}
+
+final class Reset extends CounterEvent {
+  const Reset();
+}
+
+sealed class CounterState extends Equatable {
+  const CounterState(this.value);
+  final int value;
+
+  @override
+  List<Object?> get props => [value];
+}
+
+final class CounterValue extends CounterState {
+  const CounterValue(super.value);
+}
+
+/// A distinct state variant — not just "CounterValue(5)" — so UI can branch
+/// on the TYPE, not re-check a magic number everywhere.
+final class CounterAtMax extends CounterState {
+  const CounterAtMax(super.value);
+}
+
+const _max = 5;
+
+class CounterBloc extends Bloc<CounterEvent, CounterState> {
+  CounterBloc() : super(const CounterValue(0)) {
+    on<CounterEvent>((event, emit) {
+      final next = switch (event) {
+        Increment() => state.value + 1,
+        Decrement() => state.value - 1,
+        Reset() => 0,
+      };
+      emit(next >= _max ? CounterAtMax(_max) : CounterValue(next));
+    });
+  }
+}
+```
+
+`CounterState extends Equatable` with `props = [value]` is what makes `bloc_test`'s `expect: () => [...]` (below) compare emitted states **by value**, not by identity — without it, two separately-constructed `CounterValue(1)` instances would be unequal and every `blocTest` assertion would fail on a technicality.
+
+Now the exhaustiveness proof: delete the `Reset()` case from that same `switch` and run `flutter analyze` — the real, unedited diagnostic:
+
+```dart
+// @expect-error missing `Reset()` case — real non_exhaustive_switch_expression, proven below
+int handle(CounterEvent event, int current) {
+  return switch (event) {
+    Increment() => current + 1,
+    Decrement() => current - 1,
+  };
+}
+```
+
+```text
+error • The type 'CounterEvent' isn't exhaustively matched by the switch cases since it doesn't match
+  the pattern 'Reset()'. Try adding a wildcard pattern or cases that match 'Reset()'
+  • non_exhaustive_switch_expression
+```
+
+This is the real payoff of `sealed`: add a **fourth** event class later (say `SetTo(int value)`), and every `switch` over `CounterEvent` anywhere in the codebase that doesn't handle it fails `flutter analyze` immediately — not "someone eventually notices the UI doing nothing for the new event in production."
+
+## `BlocProvider`, `BlocBuilder` with `buildWhen`, `BlocListener`
+
+`BlocProvider` puts a BLoC/Cubit in the widget tree (it's `InheritedWidget`-based, same mechanism as the [InheritedWidget lesson](/flutter/en/state-management/inherited-widget/)) so `context.read`/`BlocBuilder`/`BlocListener` below it can find it. `BlocBuilder` rebuilds on every new state by default — `buildWhen` narrows that, exactly like `InheritedModel`'s aspects or Riverpod's `.select()`: return `false` to skip a rebuild for a state change your UI doesn't actually care about.
+
+```dart
+// lib/counter_bloc_widgets.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:my_app/counter_bloc.dart';
+
+int capBannerBuildCount = 0;
+final capReachedLog = <int>[];
+
+/// Only cares about whether we've hit the cap, not the running count — so
+/// buildWhen skips every intermediate increment and rebuilds ONLY when the
+/// state's runtime TYPE actually changes (CounterValue <-> CounterAtMax).
+class CapBanner extends StatelessWidget {
+  const CapBanner({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<CounterBloc, CounterState>(
+      buildWhen: (previous, current) => previous.runtimeType != current.runtimeType,
+      builder: (context, state) {
+        capBannerBuildCount++;
+        return state is CounterAtMax ? const Text('capped') : const SizedBox.shrink();
+      },
+    );
+  }
+}
+
+/// A side effect (logging here; in a real app: SnackBar, navigation) that
+/// fires once when the cap is reached, without itself rebuilding anything.
+class CapListener extends StatelessWidget {
+  const CapListener({super.key, required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    return BlocListener<CounterBloc, CounterState>(
+      listener: (context, state) {
+        if (state is CounterAtMax) capReachedLog.add(state.value);
+      },
+      child: child,
+    );
+  }
+}
+```
+
+```dart
+// test/counter_bloc_widgets_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/counter_bloc.dart';
+import 'package:my_app/counter_bloc_widgets.dart';
+
+void main() {
+  testWidgets('buildWhen skips rebuilds while the state TYPE stays the same', (tester) async {
+    capBannerBuildCount = 0;
+    final bloc = CounterBloc();
+    addTearDown(bloc.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BlocProvider.value(value: bloc, child: const CapBanner()),
+      ),
+    );
+    expect(capBannerBuildCount, 1, reason: 'initial build always happens');
+
+    // 0 -> 1 -> 2 -> 3 -> 4: all stay CounterValue, buildWhen returns false —
+    // no rebuild for any of these four.
+    for (var i = 0; i < 4; i++) {
+      bloc.add(const Increment());
+      await tester.pump();
+    }
+    expect(capBannerBuildCount, 1, reason: 'runtimeType never changed — buildWhen skipped every rebuild');
+    expect(find.text('capped'), findsNothing);
+
+    // 4 -> 5: CounterValue -> CounterAtMax, runtimeType changes — rebuilds.
+    bloc.add(const Increment());
+    await tester.pump();
+    expect(capBannerBuildCount, 2, reason: 'runtimeType changed — buildWhen allowed exactly one rebuild');
+    expect(find.text('capped'), findsOneWidget);
+  });
+
+  testWidgets('BlocListener fires exactly once when the cap is reached, without rebuilding', (tester) async {
+    capReachedLog.clear();
+    final bloc = CounterBloc();
+    addTearDown(bloc.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BlocProvider.value(
+          value: bloc,
+          child: CapListener(child: const SizedBox.shrink()),
+        ),
+      ),
+    );
+    expect(capReachedLog, isEmpty);
+
+    for (var i = 0; i < 5; i++) {
+      bloc.add(const Increment());
+      await tester.pump();
+    }
+
+    expect(capReachedLog, [5], reason: 'listener fired exactly once, with the capped value');
+  });
+}
+```
+
+```text
+✓ buildWhen skips rebuilds while the state TYPE stays the same
+✓ BlocListener fires exactly once when the cap is reached, without rebuilding
+
+00:00 +2: All tests passed!
+```
+
+Four `Increment` events land four new `CounterValue` states, and `capBannerBuildCount` never moves — proof that `buildWhen` genuinely prevents the rebuild, not just "the output happens to look the same." Only the fifth event, the one that actually changes the state's runtime type, causes a second build.
+
+## `bloc_test`'s `blocTest`: asserting the exact emitted sequence
+
+`blocTest` builds the bloc, drives it with `act`, and asserts the full ordered list of emitted states with `expect` — no widget involved at all, exactly the "predictable and testable" payoff from the unidirectional rule.
+
+```dart
+// test/counter_bloc_actions_test.dart
+import 'package:bloc_test/bloc_test.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/counter_bloc.dart';
+
+void main() {
+  group('CounterBloc', () {
+    blocTest<CounterBloc, CounterState>(
+      'emits [CounterValue(1)] when Increment is added once',
+      build: CounterBloc.new,
+      act: (bloc) => bloc.add(const Increment()),
+      expect: () => [const CounterValue(1)],
+    );
+
+    blocTest<CounterBloc, CounterState>(
+      'emits CounterAtMax once the count reaches 5',
+      build: CounterBloc.new,
+      act: (bloc) {
+        for (var i = 0; i < 5; i++) {
+          bloc.add(const Increment());
+        }
+      },
+      expect: () => [
+        const CounterValue(1),
+        const CounterValue(2),
+        const CounterValue(3),
+        const CounterValue(4),
+        const CounterAtMax(5),
+      ],
+    );
+
+    blocTest<CounterBloc, CounterState>(
+      'Reset emits CounterValue(0) regardless of prior state',
+      build: CounterBloc.new,
+      seed: () => const CounterAtMax(5),
+      act: (bloc) => bloc.add(const Reset()),
+      expect: () => [const CounterValue(0)],
+    );
+  });
+}
+```
+
+```text
+✓ CounterBloc emits [CounterValue(1)] when Increment is added once
+✓ CounterBloc emits CounterAtMax once the count reaches 5
+✓ CounterBloc Reset emits CounterValue(0) regardless of prior state
+
+00:00 +3: All tests passed!
+```
+
+`seed:` starts the bloc from a specific state without replaying every event that would normally lead there — essential for testing "what happens next from state X" in isolation. `expect: () => [...]` compares by value thanks to `Equatable`; without it, this whole file would fail even though the logic is correct.
+
+```yaml
+# pubspec.yaml
+dependencies:
+  flutter_bloc: ^9.1.1
+  equatable: ^3.0.0
+
+dev_dependencies:
+  bloc_test: ^10.0.0
+```
 
 ## When the ceremony pays off
 
 BLoC is more structure than `setState` or Provider, and that structure is a cost you pay upfront. It earns back when:
 
-- The app is **large** and you want business logic in testable units, fully separate from UI.
-- State transitions are **complex** — many events, async flows, and you want them explicit and traceable.
-- A **team** benefits from one enforced pattern across the codebase.
+- The app is **large** and you want business logic in testable units, fully separate from UI — proven above: the entire `CounterBloc` state machine is asserted with zero widgets.
+- State transitions are **complex** — many events, async flows, distinct state *variants* (not just field changes) — and you want them explicit, exhaustively checked, and traceable.
+- A **team** benefits from one enforced pattern across the codebase, where every possible input is a named, discoverable class instead of an ad hoc method call.
 
 For a small app or a single screen's local state, BLoC is over-engineering — `setState` or a simple `ChangeNotifier` is clearer. The skill is matching the ceremony to the complexity.
 
+## Mental Model
+
+A BLoC is a **pure function machine wearing a stream**: `(currentState, event) -> newState`, with `emit` as the only way out and `add` as the only way in. Cubit strips the event layer off that machine — the "input" is just "which method got called" — trading traceability for less boilerplate. `sealed` on the event/state hierarchies is what turns "we think we handled every case" into "the compiler refuses to build until we do." `buildWhen`/`listenWhen` are the same idea as `InheritedModel` aspects or Riverpod's `.select()`, applied to BLoC's stream of states instead of a provider's value.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Cubit | Least ceremony — methods that `emit` | No event log/traceability; harder to see "what inputs are possible" from the type alone |
+| Full BLoC with sealed events | Every input is a named, exhaustively-checked class | More boilerplate per feature — event classes, a `switch`/`on<T>` handler |
+| Sealed state union (multiple variants) | UI branches on type, not on magic values buried in one field | More classes than "one state class with a bunch of nullable fields" |
+| `Equatable` on states/events | `blocTest`/`BlocBuilder` compare by value, not identity | One more base class and a `props` list to keep in sync with fields |
+| `buildWhen`/`listenWhen` | Skip rebuilds/side effects the UI doesn't care about, proven above | Another predicate to get right — a bug here silently suppresses real updates |
+
+## Common Misconceptions
+
+- **"Cubit and Bloc are unrelated APIs."** `Bloc<Event, State>` is a `Cubit<State>` that additionally accepts a stream of typed events instead of direct method calls — the state-emission machinery underneath is the same.
+- **"A `switch` over a sealed class is exhaustive automatically, no matter how it's written."** Proven above: the analyzer genuinely refuses to compile a `switch` expression that's missing a case, with a specific, real diagnostic (`non_exhaustive_switch_expression`) — but this protection only exists because the class hierarchy is `sealed`; a plain `abstract class` gets no such check.
+- **"buildWhen just optimizes performance, the UI behaves the same either way."** Proven above: `capBannerBuildCount` staying flat across four events is the whole functional point, not a micro-optimization — if the builder had a side effect, `buildWhen: false` genuinely skips it.
+- **"Without Equatable, states just compare a little slower."** Proven implicitly above: without `Equatable`, `blocTest`'s `expect: () => [CounterValue(1)]` would fail on identity inequality even though the emitted state has the exact right value — this is a correctness issue for tests, not a performance one.
+- **"BLoC is always the right choice for 'serious' state management."** The lesson's own trade-off table and "when the ceremony pays off" section say the opposite: for a single screen's simple state, the extra classes are pure overhead with no payoff.
+
+## Reading AI-generated code
+
+AI-generated BLoC code tends to get the shape right (sealed events, a `Bloc<Event, State>`) but skip the two things that only matter once the feature grows: `Equatable` (silently breaks every equality-based test and `buildWhen`/`listenWhen` comparison) and actually widening the `switch` to a real exhaustive form instead of a chain of `if (event is X)` that the analyzer can't check for completeness.
+
+```dart
+// AI-generated: "handle the counter events"
+class CounterBloc extends Bloc<CounterEvent, CounterState> {
+  CounterBloc() : super(const CounterValue(0)) {
+    on<CounterEvent>((event, emit) {
+      if (event is Increment) {
+        emit(CounterValue(state.value + 1));
+      } else if (event is Decrement) {
+        emit(CounterValue(state.value - 1));
+      }
+      // Reset silently does nothing — no compiler warning, because this is
+      // an if/else chain, not a switch over a sealed type.
+    });
+  }
+}
+```
+
+Before trusting generated BLoC/Cubit code, check for:
+
+- A `switch (event) { ... }` (or `switch (state) { ... }`) over the sealed hierarchy, not an `if (event is X) ... else if (event is Y) ...` chain — only the `switch` form gets real exhaustiveness checking from the analyzer, proven above.
+- `Equatable` (or manual `==`/`hashCode`) on every state and event class that will ever be compared — in a test's `expect: () => [...]`, in `buildWhen`, or in `BlocListener`'s default equality-based dedup.
+- `buildWhen`/`listenWhen` predicates that actually reference the fields/types they claim to gate on, not a stub that always returns `true` (defeats the purpose) or always `false` (UI never updates).
+- Every event class the `sealed` hierarchy declares is actually handled somewhere — the analyzer only catches this inside a real `switch`, so a generated handler that silently drops an event (like `Reset` above) ships clean if it never uses `switch` in the first place.
+
+<SpotTheBug code={`sealed class AuthState {}
+final class Unauthenticated extends AuthState {}
+final class Authenticated extends AuthState {
+  Authenticated(this.userId);
+  final String userId;
+}
+final class AuthError extends AuthState {
+  AuthError(this.message);
+  final String message;
+}
+
+class AuthCubit extends Cubit<AuthState> {
+  AuthCubit() : super(Unauthenticated());
+
+  String statusLabel() => switch (state) {
+    Authenticated(:final userId) => 'Signed in as \$userId',
+    Unauthenticated() => 'Signed out',
+  };
+}`}>
+This does not compile: `AuthState` has three sealed subtypes (`Unauthenticated`, `Authenticated`, `AuthError`), but the `switch` expression in `statusLabel()` only covers two of them — the real analyzer error is `non_exhaustive_switch_expression`, saying exactly what's missing: `"doesn't match the pattern 'AuthError()'"`. This is the exact class of bug proven earlier in this lesson with `CounterEvent`. The fix is adding the missing case (`AuthError(:final message) => 'Error: \$message'`) — and because the hierarchy is `sealed`, the compiler will force this same fix on every other `switch` over `AuthState` in the codebase too, not just this one.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-BLoC enforces **unidirectional data flow**: events/methods go in, states come out, and the UI only rebuilds from emitted states — which makes logic predictable and testable without widgets. **Cubit** is the simple form (call methods that `emit`); full **BLoC** adds explicit event classes for traceability. Reach for it when apps are large, flows are complex, or a team needs one pattern — not for a single screen.
+BLoC enforces **unidirectional data flow**: events/methods go in, states come out, and the UI only rebuilds from emitted states — proven testable above with `blocTest`'s exact-sequence assertions and zero widgets involved. **Cubit** is the simple form (call methods that `emit`); full **BLoC** adds explicit, `sealed` event classes that the analyzer checks for exhaustiveness — proven above with a real `non_exhaustive_switch_expression` error and its fix. `BlocBuilder`'s `buildWhen`/`BlocListener`'s `listenWhen` skip rebuilds/side effects the UI doesn't care about, proven with a build counter that stays flat across four irrelevant state changes. `Equatable` on states/events is what makes value-based comparisons (tests, `buildWhen`) actually work. Reach for BLoC when apps are large, flows are complex, or a team needs one pattern — not for a single screen.
 </Callout>
 
 export const quizBloc = [
@@ -74,36 +421,73 @@ export const quizBloc = [
       'It avoids the build method',
     ],
     answer: 1,
+    explain: 'Because state only changes in one place in response to explicit inputs, the whole state machine is testable with blocTest and zero widgets, proven in this lesson.',
   },
   {
     q: 'How does Cubit differ from full BLoC?',
     options: [
       'Cubit is for animations only',
-      'Cubit uses methods that emit states directly; full BLoC adds explicit Event classes',
+      'Cubit uses methods that emit states directly; full BLoC adds explicit, typically sealed Event classes handled via on<Event>',
       'Cubit cannot hold state',
       'They are unrelated',
     ],
     answer: 1,
+    explain: 'Bloc<Event, State> is a Cubit<State> that additionally accepts a stream of typed events instead of direct method calls.',
   },
   {
-    q: 'Why is BLoC considered testable?',
+    q: 'A switch expression over a sealed CounterEvent hierarchy is missing the Reset() case. What is the real, proven outcome?',
     options: [
-      'It requires no tests',
-      'You can feed events to it and assert the exact sequence of emitted states, with no widgets involved',
-      'It runs tests automatically',
-      'It disables state',
+      'It compiles fine and Reset is silently ignored at runtime',
+      'flutter analyze reports a real error: non_exhaustive_switch_expression, naming the exact missing pattern and how to fix it',
+      'It only warns, never blocks a build',
+      'Dart silently picks the closest matching case',
     ],
     answer: 1,
+    explain: 'Proven with the exact captured diagnostic: "The type \'CounterEvent\' isn\'t exhaustively matched by the switch cases since it doesn\'t match the pattern \'Reset()\'..."',
   },
   {
-    q: 'When is BLoC likely over-engineering?',
+    q: 'Proven with a real widget test in this lesson, what does BlocBuilder\'s buildWhen actually do?',
     options: [
-      'For a large app with complex async flows',
-      'For a single screen\'s simple local state, where setState is clearer',
-      'When a team needs one enforced pattern',
-      'When you need traceable state transitions',
+      'It is a pure performance hint with no functional effect',
+      'It genuinely skips the builder callback (and any side effect inside it) for state changes that do not satisfy the predicate — proven by a build counter staying flat across four irrelevant events',
+      'It only affects the very first build',
+      'It replaces the need for a Bloc entirely',
     ],
     answer: 1,
+    explain: 'capBannerBuildCount stayed at 1 through four Increment events that only changed CounterValue\'s numeric field, and only incremented on the fifth event that changed the state\'s runtime type.',
+  },
+  {
+    q: 'Why does this lesson\'s CounterState extend Equatable, proven relevant by the blocTest assertions?',
+    options: [
+      'Purely for performance — equality is faster with Equatable',
+      'blocTest\'s expect: () => [...] and BlocBuilder/BlocListener compare states by value; without Equatable, two separately-constructed equal-looking states would be unequal by identity and every such comparison would fail',
+      'Equatable is required by the Dart language for all sealed classes',
+      'It has no effect on tests, only on UI',
+    ],
+    answer: 1,
+    explain: 'Without Equatable\'s value-based == and hashCode, blocTest\'s exact-sequence assertions in this lesson would fail even though the emitted values are logically correct.',
+  },
+  {
+    q: 'What does blocTest\'s seed: parameter do, used in this lesson\'s Reset test?',
+    options: [
+      'It replays every event needed to reach that state from scratch',
+      'It starts the bloc directly from a specific state, letting you test "what happens next from state X" in isolation without replaying prior events',
+      'It seeds a random number generator for the test',
+      'It is required on every blocTest call',
+    ],
+    answer: 1,
+    explain: 'The Reset test seeds CounterAtMax(5) directly, then asserts Reset alone produces CounterValue(0) — no prior Increment events needed.',
+  },
+  {
+    q: 'Per this lesson\'s trade-off table, when is BLoC over-engineering?',
+    options: [
+      'For a large app with complex async flows and many event types',
+      'For a single screen\'s simple local state, where setState or a plain ChangeNotifier is clearer and has far less ceremony',
+      'When a team needs one enforced pattern across a codebase',
+      'When state transitions need to be exhaustively checked',
+    ],
+    answer: 1,
+    explain: 'The skill is matching the ceremony to the complexity — BLoC\'s sealed event classes, switch handlers, and Equatable boilerplate pay off at scale, not for one screen\'s local state.',
   },
 ];
 

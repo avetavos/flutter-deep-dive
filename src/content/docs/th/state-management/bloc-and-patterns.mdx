@@ -1,6 +1,6 @@
 ---
 title: 'BLoC & Patterns'
-description: 'unidirectional data flow ด้วย BLoC และ Cubit — event เข้า state ออก, แยก business logic จาก UI และเมื่อไรที่ ceremony เพิ่มเติมคุ้มค่า'
+description: 'unidirectional data flow ด้วย BLoC และ Cubit — sealed event/state union ที่พิสูจน์ exhaustiveness ด้วย analyzer จริง, BlocBuilder buildWhen/BlocListener พิสูจน์ด้วยการนับ rebuild จริง, bloc_test blocTest, Equatable และเมื่อไรที่ ceremony เพิ่มเติมคุ้มค่า'
 sidebar:
   order: 5
 ---
@@ -9,12 +9,13 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ทิศทางเดียว เสมอ
 
 **BLoC** (Business Logic Component) คือ pattern ที่สร้างบนกฎเข้ม: data ไหลไป **ทิศทางเดียว** UI ส่ง *event* (หรือเรียก method) เข้า; BLoC emit *state* ออก; UI rebuild จาก state เหล่านั้น UI ไม่เคย mutate state ตรง ๆ และ business logic ไม่เคยแตะ widget
 
-<Mermaid title="Unidirectional data flow" code={flowDiagram} />
+<Mermaid title="Unidirectional data flow — ข้อมูลไหลทิศทางเดียว" code={flowDiagram} />
 
 export const flowDiagram = `sequenceDiagram
   participant UI
@@ -26,19 +27,27 @@ export const flowDiagram = `sequenceDiagram
 
 วินัยทางเดียวนี้คือคุณค่าทั้งหมด เพราะ state เปลี่ยนได้ที่เดียวเท่านั้น ตอบสนองต่อ input ที่ชัดเจน app จึงคาดเดาได้และ test ได้ — คุณ feed event ให้ BLoC ใน test แล้ว assert ลำดับ state ที่แน่นอนได้ โดยไม่ต้องมี widget เลย
 
+package `flutter_bloc` (ปัจจุบัน: **9.1.1** บน pub.dev) มาพร้อมทั้งสองแบบที่บทนี้ครอบคลุม บวก `bloc_test` (**10.0.0**) สำหรับ helper `blocTest` และ `equatable` (**3.0.0**) สำหรับ value equality ที่ถูก ๆ บน event/state — ยืนยันทั้งหมดบน pub.dev และใช้เป็นเวอร์ชัน pin ข้างล่าง
+
 ## Cubit: ครึ่งที่ง่ายกว่า
 
-library ของ BLoC มาพร้อมสองแบบ **Cubit** คือแบบที่ง่ายกว่า — ไม่มี event class คุณแค่เรียก method ที่ `emit` state ใหม่ เริ่มที่นี่
+**Cubit** คือแบบที่ง่ายกว่า — ไม่มี event class คุณแค่เรียก method ที่ `emit` state ใหม่ เริ่มที่นี่
 
 ```dart
-// State flows out; methods are the inputs.
-class CounterCubit extends Cubit<int> {
-  CounterCubit() : super(0);          // initial state
+// lib/counter_cubit.dart
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-  void increment() => emit(state + 1); // emit a new state
+/// Cubit: the simpler half of the library — no event classes, methods emit
+/// states directly.
+class CounterCubit extends Cubit<int> {
+  CounterCubit() : super(0);
+
+  void increment() => emit(state + 1);
   void reset() => emit(0);
 }
+```
 
+```dart
 // In the UI: BlocBuilder rebuilds when a new state is emitted.
 BlocBuilder<CounterCubit, int>(
   builder: (context, count) => Text('$count'),
@@ -48,20 +57,358 @@ BlocBuilder<CounterCubit, int>(
 context.read<CounterCubit>().increment();
 ```
 
-**BLoC** เต็มรูปเพิ่ม `Event` class ที่ชัดเจนระหว่าง UI กับ logic (`add(IncrementPressed())` แทน `increment()`) การอ้อมนั้นแลกมาด้วย list ของทุก input ที่เป็นไปได้ที่ document และ log ได้ — มีค่าใน app ใหญ่ เกินจำเป็นใน app เล็ก
+**BLoC** เต็มรูปเพิ่ม `Event` class ที่ชัดเจนระหว่าง UI กับ logic (`add(Increment())` แทน `increment()`) การอ้อมนั้นแลกมาด้วย list ของทุก input ที่เป็นไปได้ที่ document และ log ได้ — มีค่าใน app ใหญ่ เกินจำเป็นใน app เล็ก
+
+## sealed event/state union พิสูจน์ exhaustiveness ด้วย analyzer
+
+BLoC code จริงจะ model event และ state เป็น **sealed class union** (Dart 3) — variant ทุกตัวที่เป็นไปได้ของ event/state คือ set ที่รู้และปิดแล้ว และ `switch` ที่ครอบมันถูกเช็คความครบถ้วนตอน compile time ไม่ใช่มาเจอตอน runtime ทีหลัง
+
+```dart
+// lib/counter_bloc.dart
+import 'package:equatable/equatable.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+sealed class CounterEvent {
+  const CounterEvent();
+}
+
+final class Increment extends CounterEvent {
+  const Increment();
+}
+
+final class Decrement extends CounterEvent {
+  const Decrement();
+}
+
+final class Reset extends CounterEvent {
+  const Reset();
+}
+
+sealed class CounterState extends Equatable {
+  const CounterState(this.value);
+  final int value;
+
+  @override
+  List<Object?> get props => [value];
+}
+
+final class CounterValue extends CounterState {
+  const CounterValue(super.value);
+}
+
+/// A distinct state variant — not just "CounterValue(5)" — so UI can branch
+/// on the TYPE, not re-check a magic number everywhere.
+final class CounterAtMax extends CounterState {
+  const CounterAtMax(super.value);
+}
+
+const _max = 5;
+
+class CounterBloc extends Bloc<CounterEvent, CounterState> {
+  CounterBloc() : super(const CounterValue(0)) {
+    on<CounterEvent>((event, emit) {
+      final next = switch (event) {
+        Increment() => state.value + 1,
+        Decrement() => state.value - 1,
+        Reset() => 0,
+      };
+      emit(next >= _max ? CounterAtMax(_max) : CounterValue(next));
+    });
+  }
+}
+```
+
+`CounterState extends Equatable` พร้อม `props = [value]` คือสิ่งที่ทำให้ `expect: () => [...]` ของ `bloc_test` (ข้างล่าง) เทียบ state ที่ emit **ตามค่า** ไม่ใช่ตาม identity — ถ้าไม่มีมัน `CounterValue(1)` สอง instance ที่สร้างแยกกันจะไม่เท่ากัน และทุก assertion ของ `blocTest` จะพังด้วยเรื่องเทคนิคเปล่า ๆ
+
+ทีนี้พิสูจน์ exhaustiveness: ลบ case `Reset()` ออกจาก `switch` เดียวกันนั้นแล้วรัน `flutter analyze` — diagnostic จริงไม่แก้ไข:
+
+```dart
+// @expect-error missing `Reset()` case — real non_exhaustive_switch_expression, proven below
+int handle(CounterEvent event, int current) {
+  return switch (event) {
+    Increment() => current + 1,
+    Decrement() => current - 1,
+  };
+}
+```
+
+```text
+error • The type 'CounterEvent' isn't exhaustively matched by the switch cases since it doesn't match
+  the pattern 'Reset()'. Try adding a wildcard pattern or cases that match 'Reset()'
+  • non_exhaustive_switch_expression
+```
+
+นี่คือผลตอบแทนจริงของ `sealed`: เพิ่ม event class ตัวที่**สี่**ทีหลัง (สมมติ `SetTo(int value)`) แล้ว `switch` ทุกตัวที่ครอบ `CounterEvent` ที่ไหนก็ตามใน codebase ที่ไม่ได้จัดการมันจะ fail `flutter analyze` ทันที — ไม่ใช่ "มีคนมาสังเกตทีหลังว่า UI ไม่ทำอะไรเลยสำหรับ event ใหม่บน production"
+
+## `BlocProvider`, `BlocBuilder` พร้อม `buildWhen`, `BlocListener`
+
+`BlocProvider` วาง BLoC/Cubit ไว้ใน widget tree (มันสร้างบน `InheritedWidget` กลไกเดียวกับ[บท InheritedWidget](/flutter/th/state-management/inherited-widget/)) เพื่อให้ `context.read`/`BlocBuilder`/`BlocListener` ข้างล่างหามันเจอ `BlocBuilder` rebuild ทุกครั้งที่มี state ใหม่โดย default — `buildWhen` ทำให้แคบลง เหมือน aspect ของ `InheritedModel` หรือ `.select()` ของ Riverpod เป๊ะ: คืน `false` เพื่อข้าม rebuild สำหรับการเปลี่ยน state ที่ UI ไม่ได้สนใจจริง ๆ
+
+```dart
+// lib/counter_bloc_widgets.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:my_app/counter_bloc.dart';
+
+int capBannerBuildCount = 0;
+final capReachedLog = <int>[];
+
+/// Only cares about whether we've hit the cap, not the running count — so
+/// buildWhen skips every intermediate increment and rebuilds ONLY when the
+/// state's runtime TYPE actually changes (CounterValue <-> CounterAtMax).
+class CapBanner extends StatelessWidget {
+  const CapBanner({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<CounterBloc, CounterState>(
+      buildWhen: (previous, current) => previous.runtimeType != current.runtimeType,
+      builder: (context, state) {
+        capBannerBuildCount++;
+        return state is CounterAtMax ? const Text('capped') : const SizedBox.shrink();
+      },
+    );
+  }
+}
+
+/// A side effect (logging here; in a real app: SnackBar, navigation) that
+/// fires once when the cap is reached, without itself rebuilding anything.
+class CapListener extends StatelessWidget {
+  const CapListener({super.key, required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    return BlocListener<CounterBloc, CounterState>(
+      listener: (context, state) {
+        if (state is CounterAtMax) capReachedLog.add(state.value);
+      },
+      child: child,
+    );
+  }
+}
+```
+
+```dart
+// test/counter_bloc_widgets_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/counter_bloc.dart';
+import 'package:my_app/counter_bloc_widgets.dart';
+
+void main() {
+  testWidgets('buildWhen skips rebuilds while the state TYPE stays the same', (tester) async {
+    capBannerBuildCount = 0;
+    final bloc = CounterBloc();
+    addTearDown(bloc.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BlocProvider.value(value: bloc, child: const CapBanner()),
+      ),
+    );
+    expect(capBannerBuildCount, 1, reason: 'initial build always happens');
+
+    // 0 -> 1 -> 2 -> 3 -> 4: all stay CounterValue, buildWhen returns false —
+    // no rebuild for any of these four.
+    for (var i = 0; i < 4; i++) {
+      bloc.add(const Increment());
+      await tester.pump();
+    }
+    expect(capBannerBuildCount, 1, reason: 'runtimeType never changed — buildWhen skipped every rebuild');
+    expect(find.text('capped'), findsNothing);
+
+    // 4 -> 5: CounterValue -> CounterAtMax, runtimeType changes — rebuilds.
+    bloc.add(const Increment());
+    await tester.pump();
+    expect(capBannerBuildCount, 2, reason: 'runtimeType changed — buildWhen allowed exactly one rebuild');
+    expect(find.text('capped'), findsOneWidget);
+  });
+
+  testWidgets('BlocListener fires exactly once when the cap is reached, without rebuilding', (tester) async {
+    capReachedLog.clear();
+    final bloc = CounterBloc();
+    addTearDown(bloc.close);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BlocProvider.value(
+          value: bloc,
+          child: CapListener(child: const SizedBox.shrink()),
+        ),
+      ),
+    );
+    expect(capReachedLog, isEmpty);
+
+    for (var i = 0; i < 5; i++) {
+      bloc.add(const Increment());
+      await tester.pump();
+    }
+
+    expect(capReachedLog, [5], reason: 'listener fired exactly once, with the capped value');
+  });
+}
+```
+
+```text
+✓ buildWhen skips rebuilds while the state TYPE stays the same
+✓ BlocListener fires exactly once when the cap is reached, without rebuilding
+
+00:00 +2: All tests passed!
+```
+
+event `Increment` สี่ครั้งได้ `CounterValue` ใหม่สี่ตัว และ `capBannerBuildCount` ไม่ขยับเลย — พิสูจน์ว่า `buildWhen` กัน rebuild ได้จริง ไม่ใช่แค่ "output บังเอิญหน้าตาเหมือนเดิม" มีแค่ event ที่ห้าเท่านั้น ตัวที่เปลี่ยน runtime type ของ state จริง ๆ ที่ทำให้ build ครั้งที่สองเกิดขึ้น
+
+## `blocTest` ของ `bloc_test`: assert ลำดับ state ที่ emit เป๊ะ ๆ
+
+`blocTest` สร้าง bloc ขับเคลื่อนมันด้วย `act` แล้ว assert list ของ state ที่ emit ทั้งหมดตามลำดับด้วย `expect` — ไม่มี widget เกี่ยวข้องเลย ตรงกับผลตอบแทน "คาดเดาได้และ test ได้" จากกฎทางเดียวเป๊ะ ๆ
+
+```dart
+// test/counter_bloc_actions_test.dart
+import 'package:bloc_test/bloc_test.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/counter_bloc.dart';
+
+void main() {
+  group('CounterBloc', () {
+    blocTest<CounterBloc, CounterState>(
+      'emits [CounterValue(1)] when Increment is added once',
+      build: CounterBloc.new,
+      act: (bloc) => bloc.add(const Increment()),
+      expect: () => [const CounterValue(1)],
+    );
+
+    blocTest<CounterBloc, CounterState>(
+      'emits CounterAtMax once the count reaches 5',
+      build: CounterBloc.new,
+      act: (bloc) {
+        for (var i = 0; i < 5; i++) {
+          bloc.add(const Increment());
+        }
+      },
+      expect: () => [
+        const CounterValue(1),
+        const CounterValue(2),
+        const CounterValue(3),
+        const CounterValue(4),
+        const CounterAtMax(5),
+      ],
+    );
+
+    blocTest<CounterBloc, CounterState>(
+      'Reset emits CounterValue(0) regardless of prior state',
+      build: CounterBloc.new,
+      seed: () => const CounterAtMax(5),
+      act: (bloc) => bloc.add(const Reset()),
+      expect: () => [const CounterValue(0)],
+    );
+  });
+}
+```
+
+```text
+✓ CounterBloc emits [CounterValue(1)] when Increment is added once
+✓ CounterBloc emits CounterAtMax once the count reaches 5
+✓ CounterBloc Reset emits CounterValue(0) regardless of prior state
+
+00:00 +3: All tests passed!
+```
+
+`seed:` เริ่ม bloc จาก state ที่กำหนดโดยตรง โดยไม่ต้อง replay ทุก event ที่ปกติจะนำไปสู่ state นั้น — จำเป็นมากสำหรับ test "จะเกิดอะไรต่อจาก state X" แบบแยกโดด ๆ `expect: () => [...]` เทียบตามค่าได้เพราะ `Equatable` — ถ้าไม่มีมัน ทั้งไฟล์นี้จะ fail ทั้งที่ logic ถูกต้องเป๊ะ
+
+```yaml
+# pubspec.yaml
+dependencies:
+  flutter_bloc: ^9.1.1
+  equatable: ^3.0.0
+
+dev_dependencies:
+  bloc_test: ^10.0.0
+```
 
 ## เมื่อไร ceremony ถึงคุ้ม
 
 BLoC มีโครงสร้างมากกว่า `setState` หรือ Provider และโครงสร้างนั้นคือต้นทุนที่คุณจ่ายล่วงหน้า ซึ่งคืนทุนเมื่อ:
 
-- app **ใหญ่** และคุณอยากได้ business logic เป็น unit ที่ test ได้ แยกจาก UI อย่างสมบูรณ์
-- state transition **ซับซ้อน** — event เยอะ, async flow, และคุณอยากให้ transition ชัดเจนและ trace ได้
-- **ทีม** ได้ประโยชน์จาก pattern เดียวที่ enforce ทั่ว codebase
+- app **ใหญ่** และคุณอยากได้ business logic เป็น unit ที่ test ได้ แยกจาก UI อย่างสมบูรณ์ — พิสูจน์ข้างบน: `CounterBloc` state machine ทั้งตัวถูก assert โดยไม่มี widget เลย
+- state transition **ซับซ้อน** — event เยอะ, async flow, state *variant* ที่แยกจากกันจริง ๆ (ไม่ใช่แค่ field เปลี่ยน) — และคุณอยากให้มันชัดเจน เช็ค exhaustiveness ได้ และ trace ได้
+- **ทีม** ได้ประโยชน์จาก pattern เดียวที่ enforce ทั่ว codebase ที่ทุก input ที่เป็นไปได้คือ class ที่มีชื่อและค้นเจอได้ ไม่ใช่การเรียก method แบบ ad hoc
 
 สำหรับ app เล็กหรือ local state ของหน้าเดียว BLoC คือ over-engineering — `setState` หรือ `ChangeNotifier` ง่าย ๆ ชัดกว่า ทักษะคือการจับคู่ ceremony กับความซับซ้อน
 
+## Mental Model
+
+BLoC คือ **เครื่องฟังก์ชันบริสุทธิ์ที่สวม stream**: `(currentState, event) -> newState` โดยมี `emit` เป็นทางออกทางเดียว และ `add` เป็นทางเข้าทางเดียว Cubit ถอด layer ของ event ออกจากเครื่องนั้น — "input" คือแค่ "method ไหนถูกเรียก" — แลก traceability กับ boilerplate ที่น้อยลง `sealed` บน hierarchy ของ event/state คือสิ่งที่เปลี่ยน "เราคิดว่าเราจัดการทุกเคสแล้ว" ให้กลายเป็น "compiler ปฏิเสธไม่ build จนกว่าจะทำจริง" `buildWhen`/`listenWhen` คือไอเดียเดียวกับ aspect ของ `InheritedModel` หรือ `.select()` ของ Riverpod แค่นำมาใช้กับ stream ของ state ของ BLoC แทนค่าของ provider
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| Cubit | ceremony น้อยที่สุด — method ที่ `emit` | ไม่มี event log/traceability; เห็น "input ที่เป็นไปได้อะไรบ้าง" จาก type อย่างเดียวยากกว่า |
+| BLoC เต็มรูปพร้อม sealed event | ทุก input คือ class ที่มีชื่อและถูกเช็ค exhaustiveness | boilerplate ต่อ feature มากกว่า — event class, `switch`/`on<T>` handler |
+| sealed state union (หลาย variant) | UI แยกตาม type ไม่ใช่ค่ามหัศจรรย์ที่ซ่อนใน field เดียว | class เยอะกว่า "state class เดียวที่มี nullable field เพียบ" |
+| `Equatable` บน state/event | `blocTest`/`BlocBuilder` เทียบตามค่า ไม่ใช่ identity | class base เพิ่มอีกตัว กับ list `props` ที่ต้อง sync กับ field เอง |
+| `buildWhen`/`listenWhen` | ข้าม rebuild/side effect ที่ UI ไม่สนใจ พิสูจน์ข้างบน | predicate อีกตัวที่ต้องทำให้ถูก — bug ตรงนี้จะกด update จริงให้เงียบไปเฉย ๆ |
+
+## Common Misconceptions
+
+- **"Cubit กับ Bloc คือ API ที่ไม่เกี่ยวกัน"** `Bloc<Event, State>` คือ `Cubit<State>` ที่เพิ่มรับ stream ของ event ที่ typed แทนการเรียก method ตรง ๆ — กลไกการ emit state ข้างใต้เหมือนกัน
+- **"`switch` ที่ครอบ sealed class exhaustive อัตโนมัติ ไม่ว่าจะเขียนยังไง"** พิสูจน์ผิดข้างบน: analyzer ปฏิเสธ compile `switch` expression ที่ขาด case จริง ๆ พร้อม diagnostic จริงเจาะจง (`non_exhaustive_switch_expression`) — แต่การป้องกันนี้มีอยู่ก็เพราะ class hierarchy เป็น `sealed` เท่านั้น; `abstract class` ธรรมดาไม่มีการเช็คแบบนี้
+- **"buildWhen แค่ optimize performance UI ทำงานเหมือนเดิมไม่ว่ายังไง"** พิสูจน์ข้างบน: `capBannerBuildCount` นิ่งตลอดสี่ event คือประเด็นเชิงฟังก์ชันทั้งหมด ไม่ใช่ micro-optimization — ถ้า builder มี side effect `buildWhen: false` จะข้ามมันจริง ๆ
+- **"ไม่มี Equatable state ก็แค่เทียบช้าลงนิดหน่อย"** พิสูจน์โดยนัยข้างบน: ไม่มี `Equatable` แล้ว `expect: () => [CounterValue(1)]` ของ `blocTest` จะ fail ทั้งที่ state ที่ emit มีค่าที่ถูกต้องเป๊ะ — นี่คือปัญหาเรื่อง correctness ของ test ไม่ใช่ performance
+- **"BLoC คือตัวเลือกที่ถูกเสมอสำหรับ state management แบบ 'จริงจัง'"** ตาราง trade-off กับหัวข้อ "เมื่อไร ceremony ถึงคุ้ม" ของบทนี้บอกตรงข้ามเลย: สำหรับ state ง่าย ๆ ของหน้าเดียว class เพิ่มเติมคือ overhead ล้วน ๆ ไม่มีผลตอบแทน
+
+## Reading AI-generated code
+
+BLoC code ที่ AI generate มามักได้รูปทรงถูกต้อง (sealed event, `Bloc<Event, State>`) แต่ข้ามสองอย่างที่สำคัญเฉพาะตอน feature โตขึ้น: `Equatable` (ทำให้ equality-based test และการเทียบของ `buildWhen`/`listenWhen` พังเงียบ ๆ) และการทำให้ `switch` กว้างครอบจริง ๆ แทนที่จะเป็นสาย `if (event is X)` ที่ analyzer เช็คความครบถ้วนให้ไม่ได้
+
+```dart
+// AI-generated: "handle the counter events"
+class CounterBloc extends Bloc<CounterEvent, CounterState> {
+  CounterBloc() : super(const CounterValue(0)) {
+    on<CounterEvent>((event, emit) {
+      if (event is Increment) {
+        emit(CounterValue(state.value + 1));
+      } else if (event is Decrement) {
+        emit(CounterValue(state.value - 1));
+      }
+      // Reset silently does nothing — no compiler warning, because this is
+      // an if/else chain, not a switch over a sealed type.
+    });
+  }
+}
+```
+
+ก่อนเชื่อ BLoC/Cubit code ที่ generate มา เช็คสิ่งเหล่านี้:
+
+- มี `switch (event) { ... }` (หรือ `switch (state) { ... }`) ที่ครอบ sealed hierarchy ไหม ไม่ใช่สาย `if (event is X) ... else if (event is Y) ...` — มีแค่รูปแบบ `switch` เท่านั้นที่ได้การเช็ค exhaustiveness จริงจาก analyzer พิสูจน์ข้างบนแล้ว
+- มี `Equatable` (หรือ `==`/`hashCode` แบบเขียนมือ) บนทุก state และ event class ที่จะถูกเทียบไหม — ใน `expect: () => [...]` ของ test, ใน `buildWhen`, หรือใน dedup แบบ equality-based default ของ `BlocListener`
+- predicate ของ `buildWhen`/`listenWhen` อ้างอิง field/type ที่มันอ้างว่าเป็นเงื่อนไขจริงไหม ไม่ใช่ stub ที่คืน `true` เสมอ (เสียจุดประสงค์) หรือ `false` เสมอ (UI ไม่เคย update เลย)
+- ทุก event class ที่ `sealed` hierarchy ประกาศไว้ถูกจัดการที่ไหนสักแห่งจริงไหม — analyzer จะจับตรงนี้ได้ก็ต่อเมื่ออยู่ใน `switch` จริง ดังนั้น handler ที่ generate มาแล้วทิ้ง event ไปเงียบ ๆ (เหมือน `Reset` ข้างบน) จะ ship ออกไปสะอาดถ้ามันไม่เคยใช้ `switch` ตั้งแต่แรก
+
+<SpotTheBug code={`sealed class AuthState {}
+final class Unauthenticated extends AuthState {}
+final class Authenticated extends AuthState {
+  Authenticated(this.userId);
+  final String userId;
+}
+final class AuthError extends AuthState {
+  AuthError(this.message);
+  final String message;
+}
+
+class AuthCubit extends Cubit<AuthState> {
+  AuthCubit() : super(Unauthenticated());
+
+  String statusLabel() => switch (state) {
+    Authenticated(:final userId) => 'Signed in as \$userId',
+    Unauthenticated() => 'Signed out',
+  };
+}`}>
+โค้ดนี้ compile ไม่ผ่าน: `AuthState` มี sealed subtype สามตัว (`Unauthenticated`, `Authenticated`, `AuthError`) แต่ `switch` expression ใน `statusLabel()` ครอบแค่สองตัว — analyzer error จริงคือ `non_exhaustive_switch_expression` บอกตรง ๆ ว่าขาดอะไร: `"doesn't match the pattern 'AuthError()'"` นี่คือ bug ประเภทเดียวกับที่พิสูจน์ไว้ก่อนหน้าในบทนี้ด้วย `CounterEvent` เป๊ะ วิธีแก้คือเพิ่ม case ที่ขาด (`AuthError(:final message) => 'Error: \$message'`) — และเพราะ hierarchy เป็น `sealed` compiler จะบังคับให้แก้แบบเดียวกันนี้กับทุก `switch` อื่นที่ครอบ `AuthState` ใน codebase ด้วย ไม่ใช่แค่ตัวนี้
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-BLoC บังคับ **unidirectional data flow**: event/method เข้า, state ออก และ UI rebuild จาก state ที่ emit เท่านั้น — ทำให้ logic คาดเดาได้และ test ได้โดยไม่ต้องมี widget **Cubit** คือรูปแบบง่าย (เรียก method ที่ `emit`); **BLoC** เต็มรูปเพิ่ม event class ที่ชัดเจนเพื่อ traceability หยิบมาใช้เมื่อ app ใหญ่, flow ซับซ้อน หรือทีมต้องการ pattern เดียว — ไม่ใช่สำหรับหน้าเดียว
+BLoC บังคับ **unidirectional data flow**: event/method เข้า, state ออก และ UI rebuild จาก state ที่ emit เท่านั้น — พิสูจน์ว่า test ได้ข้างบนด้วย assertion ลำดับเป๊ะของ `blocTest` โดยไม่มี widget เกี่ยวข้องเลย **Cubit** คือรูปแบบง่าย (เรียก method ที่ `emit`); **BLoC** เต็มรูปเพิ่ม event class ที่ `sealed` และชัดเจนที่ analyzer เช็ค exhaustiveness ให้ — พิสูจน์ข้างบนด้วย error `non_exhaustive_switch_expression` จริงและวิธีแก้ `buildWhen` ของ `BlocBuilder`/`listenWhen` ของ `BlocListener` ข้าม rebuild/side effect ที่ UI ไม่สนใจ พิสูจน์ด้วย build counter ที่นิ่งตลอดสี่การเปลี่ยน state ที่ไม่เกี่ยวข้อง `Equatable` บน state/event คือสิ่งที่ทำให้การเทียบตามค่า (test, `buildWhen`) ทำงานได้จริง หยิบ BLoC มาใช้เมื่อ app ใหญ่, flow ซับซ้อน หรือทีมต้องการ pattern เดียว — ไม่ใช่สำหรับหน้าเดียว
 </Callout>
 
 export const quizBloc = [
@@ -74,36 +421,73 @@ export const quizBloc = [
       'เลี่ยง build method',
     ],
     answer: 1,
+    explain: 'เพราะ state เปลี่ยนได้ที่เดียวเท่านั้น ตอบสนองต่อ input ที่ชัดเจน state machine ทั้งตัวจึง test ได้ด้วย blocTest โดยไม่มี widget เลย พิสูจน์ในบทนี้',
   },
   {
     q: 'Cubit ต่างจาก BLoC เต็มรูปอย่างไร?',
     options: [
       'Cubit ใช้สำหรับ animation เท่านั้น',
-      'Cubit ใช้ method ที่ emit state ตรง ๆ; BLoC เต็มรูปเพิ่ม Event class ที่ชัดเจน',
+      'Cubit ใช้ method ที่ emit state ตรง ๆ; BLoC เต็มรูปเพิ่ม Event class ที่ชัดเจน มักเป็น sealed จัดการผ่าน on<Event>',
       'Cubit ถือ state ไม่ได้',
       'ไม่เกี่ยวกัน',
     ],
     answer: 1,
+    explain: 'Bloc<Event, State> คือ Cubit<State> ที่เพิ่มรับ stream ของ event ที่ typed แทนการเรียก method ตรง ๆ',
   },
   {
-    q: 'ทำไม BLoC ถึงถือว่า test ได้?',
+    q: 'switch expression ที่ครอบ sealed CounterEvent hierarchy ขาด case Reset() ผลลัพธ์จริงที่พิสูจน์คืออะไร?',
     options: [
-      'ไม่ต้องการ test',
-      'คุณ feed event เข้าไปแล้ว assert ลำดับ state ที่ emit ได้แน่นอน โดยไม่ต้องมี widget',
-      'รัน test อัตโนมัติ',
-      'disable state',
+      'compile ผ่านสะอาด แล้ว Reset ถูกละเว้นเงียบ ๆ ตอน runtime',
+      'flutter analyze รายงาน error จริง: non_exhaustive_switch_expression ระบุ pattern ที่ขาดและวิธีแก้ตรง ๆ',
+      'แค่ warning ไม่เคยกัน build',
+      'Dart เลือก case ที่ใกล้เคียงที่สุดให้เงียบ ๆ',
     ],
     answer: 1,
+    explain: 'พิสูจน์ด้วย diagnostic จริงที่ capture มา: "The type \'CounterEvent\' isn\'t exhaustively matched by the switch cases since it doesn\'t match the pattern \'Reset()\'..."',
   },
   {
-    q: 'เมื่อไรที่ BLoC มักเป็น over-engineering?',
+    q: 'พิสูจน์ด้วย widget test จริงในบทนี้ buildWhen ของ BlocBuilder ทำอะไรจริง ๆ?',
     options: [
-      'สำหรับ app ใหญ่ที่มี async flow ซับซ้อน',
-      'สำหรับ local state ง่าย ๆ ของหน้าเดียว ที่ setState ชัดกว่า',
-      'เมื่อทีมต้องการ pattern เดียว',
-      'เมื่อคุณต้องการ state transition ที่ trace ได้',
+      'เป็นแค่ performance hint ที่ไม่มีผลเชิงฟังก์ชัน',
+      'มันข้าม builder callback (และ side effect ข้างในถ้ามี) สำหรับการเปลี่ยน state ที่ไม่ผ่าน predicate จริง ๆ — พิสูจน์ด้วย build counter ที่นิ่งตลอดสี่ event ที่ไม่เกี่ยวข้อง',
+      'มีผลแค่กับ build แรกสุดเท่านั้น',
+      'แทนที่ความจำเป็นของ Bloc ไปเลย',
     ],
     answer: 1,
+    explain: 'capBannerBuildCount ค้างที่ 1 ตลอดสี่ event Increment ที่เปลี่ยนแค่ field ตัวเลขของ CounterValue และเพิ่มเฉพาะตอน event ที่ห้าที่เปลี่ยน runtime type ของ state',
+  },
+  {
+    q: 'ทำไม CounterState ของบทนี้ extend Equatable ตามที่พิสูจน์เกี่ยวข้องจริงจาก assertion ของ blocTest?',
+    options: [
+      'เพื่อ performance ล้วน ๆ — equality เร็วขึ้นด้วย Equatable',
+      'expect: () => [...] ของ blocTest และ BlocBuilder/BlocListener เทียบ state ตามค่า; ถ้าไม่มี Equatable state สอง instance ที่หน้าตาเท่ากันแต่สร้างแยกกันจะไม่เท่ากันตาม identity และการเทียบแบบนั้นทุกครั้งจะ fail',
+      'Equatable เป็นข้อบังคับของภาษา Dart สำหรับ sealed class ทุกตัว',
+      'ไม่มีผลกับ test เลย มีผลแค่กับ UI',
+    ],
+    answer: 1,
+    explain: 'ถ้าไม่มี == และ hashCode แบบตามค่าของ Equatable assertion ลำดับเป๊ะของ blocTest ในบทนี้จะ fail ทั้งที่ค่าที่ emit ถูกต้องตาม logic',
+  },
+  {
+    q: 'parameter seed: ของ blocTest ที่ใช้ใน test ของ Reset ในบทนี้ทำอะไร?',
+    options: [
+      'replay ทุก event ที่จำเป็นเพื่อไปถึง state นั้นตั้งแต่ต้น',
+      'เริ่ม bloc จาก state ที่กำหนดโดยตรง ให้ test "จะเกิดอะไรต่อจาก state X" แบบแยกโดด ๆ โดยไม่ต้อง replay event ก่อนหน้า',
+      'seed ตัวสุ่มเลขสำหรับ test',
+      'จำเป็นต้องมีในทุกการเรียก blocTest',
+    ],
+    answer: 1,
+    explain: 'test ของ Reset seed CounterAtMax(5) ตรง ๆ แล้ว assert ว่า Reset อย่างเดียวได้ CounterValue(0) — ไม่ต้องมี event Increment ก่อนหน้าเลย',
+  },
+  {
+    q: 'ตามตาราง trade-off ของบทนี้ BLoC เป็น over-engineering เมื่อไร?',
+    options: [
+      'สำหรับ app ใหญ่ที่มี async flow ซับซ้อนและ event type เยอะ',
+      'สำหรับ local state ง่าย ๆ ของหน้าเดียว ที่ setState หรือ ChangeNotifier ธรรมดาชัดกว่าและมี ceremony น้อยกว่ามาก',
+      'เมื่อทีมต้องการ pattern เดียวที่ enforce ทั่ว codebase',
+      'เมื่อ state transition ต้องถูกเช็คแบบ exhaustive',
+    ],
+    answer: 1,
+    explain: 'ทักษะคือการจับคู่ ceremony กับความซับซ้อน — sealed event class, switch handler, และ boilerplate ของ Equatable ของ BLoC คุ้มค่าตอน scale ไม่ใช่สำหรับ local state ของหน้าเดียว',
   },
 ];
 
