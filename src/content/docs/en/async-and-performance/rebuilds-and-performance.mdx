@@ -138,7 +138,7 @@ On a real device/emulator (which this course's environment does not have — no 
 
 ## `const`: skip the rebuild entirely
 
-Proven above: a `const` widget is canonicalized at compile time, and when a parent rebuilds, Flutter reuses the identical instance and skips calling `build()` on it altogether — `constChildBuildCount` stayed at `1` through a `setState` that rebuilt its parent. Turn on the `prefer_const_constructors` lint (part of `flutter_lints`, covered in the [project-and-tooling lesson](/flutter/en/tooling-and-production/project-and-tooling/)) and obey it — it is the cheapest, most mechanical performance win available.
+Proven above: a `const` widget is canonicalized at compile time, and when a parent rebuilds, Flutter reuses the identical instance and skips calling `build()` on it altogether — `constChildBuildCount` stayed at `1` through a `setState` that rebuilt its parent. Turn on the `prefer_const_constructors` lint and obey it — it is the cheapest, most mechanical performance win available. One real correction worth making here: this lint is **not** part of `flutter_lints`' default rule set (confirmed by reading `flutter_lints` 6.0.0's own `lib/flutter.yaml` — it ships only the narrower `prefer_const_constructors_in_immutables`); `very_good_analysis` 11.0.0 does include the general `prefer_const_constructors` rule out of the box. Both lint sets, and this exact gap, are covered in the [project-and-tooling lesson](/flutter/en/tooling-and-production/project-and-tooling/).
 
 ## Narrowing scope: `ValueListenableBuilder` (and Riverpod's `select`)
 

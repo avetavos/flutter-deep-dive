@@ -138,7 +138,7 @@ void main() {
 
 ## `const`: ข้าม rebuild ไปเลย
 
-พิสูจน์แล้วด้านบน: `const` widget ถูก canonicalize ตอน compile time และเมื่อ parent rebuild Flutter ใช้ instance เดิมซ้ำและข้ามการเรียก `build()` ไปเลย — `constChildBuildCount` ค้างที่ `1` ตลอด `setState` ที่ rebuild parent ของมัน เปิด lint `prefer_const_constructors` (ส่วนหนึ่งของ `flutter_lints` ครอบคลุมใน[บทเรียน project-and-tooling](/flutter/th/tooling-and-production/project-and-tooling/)) แล้วทำตามมัน — มันคือชัยชนะด้านประสิทธิภาพที่ถูกที่สุดและเป็นกลไกล้วน ๆ ที่มีอยู่
+พิสูจน์แล้วด้านบน: `const` widget ถูก canonicalize ตอน compile time และเมื่อ parent rebuild Flutter ใช้ instance เดิมซ้ำและข้ามการเรียก `build()` ไปเลย — `constChildBuildCount` ค้างที่ `1` ตลอด `setState` ที่ rebuild parent ของมัน เปิด lint `prefer_const_constructors` แล้วทำตามมัน — มันคือชัยชนะด้านประสิทธิภาพที่ถูกที่สุดและเป็นกลไกล้วน ๆ ที่มีอยู่ มีจุดแก้ไขจริงที่ควรพูดถึงตรงนี้: lint ตัวนี้**ไม่ได้**อยู่ใน default rule set ของ `flutter_lints` (ยืนยันจากการอ่าน `lib/flutter.yaml` ของ `flutter_lints` 6.0.0 เอง — มันมีแค่ `prefer_const_constructors_in_immutables` ที่แคบกว่า); `very_good_analysis` 11.0.0 มี rule `prefer_const_constructors` แบบทั่วไปมาให้ตั้งแต่แรก lint set ทั้งสองตัว และช่องว่างนี้เป๊ะ ๆ ครอบคลุมอยู่ใน[บทเรียน project-and-tooling](/flutter/th/tooling-and-production/project-and-tooling/)
 
 ## การจำกัดขอบเขต: `ValueListenableBuilder` (และ `select` ของ Riverpod)
 
