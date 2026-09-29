@@ -1,6 +1,6 @@
 ---
 title: 'Animations'
-description: 'implicit animation ที่ interpolate ไปยังค่าใหม่ให้คุณ, explicit animation ที่ขับด้วย AnimationController และ Tween, curve และเลือกใช้แต่ละแบบเมื่อไร'
+description: 'implicit เทียบกับ explicit animation พิสูจน์ด้วย tester.pump(Duration) เช็คค่ากลางทาง, error จริงตอน dispose AnimationController (สองแบบ), Curves, การจับคู่ tag ของ Hero, key ของ AnimatedSwitcher และ TickerMode — พิสูจน์ด้วย widget test จริงทั้งหมด'
 sidebar:
   order: 4
 ---
@@ -9,115 +9,583 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## animation สองตระกูล
+## สองตระกูลของ animation
 
-animation ใน Flutter แยกเป็นสองตระกูล และการเลือกให้ถูกคือทักษะเกือบทั้งหมด:
+animation ใน Flutter แบ่งเป็นสองตระกูล และการเลือกให้ถูกคือทักษะหลักของเรื่องนี้:
 
-- **Implicit** — คุณเปลี่ยนค่า Flutter animate *ไปหา* ค่าใหม่ให้อัตโนมัติ ไม่มี controller ไม่มี lifecycle ให้จัดการ
-- **Explicit** — คุณขับ animation เองด้วย `AnimationController` ควบคุมได้เต็มที่ (repeat, reverse, sync หลายค่า, ตอบสนอง gesture) แลกกับ ticker และการ dispose
+- **Implicit** — คุณเปลี่ยนค่า Flutter animate *ไปหาค่านั้น* ให้เอง ไม่มี controller ไม่มี lifecycle ให้จัดการ
+- **Explicit** — คุณขับ animation เองด้วย `AnimationController` ควบคุมได้เต็มที่ (repeat, reverse, sync หลายค่า, ตอบสนอง gesture) แลกกับต้องมี ticker และการ dispose
 
-เริ่มที่ implicit แล้วค่อยไป explicit เมื่อ implicit ทำสิ่งที่ต้องการไม่ได้
+เริ่มจาก implicit ก่อน แล้วค่อยไป explicit เมื่อ implicit แสดงสิ่งที่คุณต้องการไม่ได้
 
-## Implicit: animate ไปยังค่าใหม่
+## Implicit พิสูจน์ด้วยค่ากลางทาง
 
-widget ตระกูล `AnimatedFoo` (`AnimatedContainer`, `AnimatedOpacity`, `AnimatedPadding`, …) รับ `duration` และ animate ทุกครั้งที่ property เป้าหมายเปลี่ยน
-
-```dart
-AnimatedContainer(
-  duration: const Duration(milliseconds: 300),
-  curve: Curves.easeInOut,
-  width: _expanded ? 200 : 100,     // change this (e.g. in setState)...
-  height: 100,
-  color: Colors.blue,
-  // ...and Flutter smoothly animates from the old width to the new one.
-)
-```
-
-`TweenAnimationBuilder` generalize สิ่งนี้: ให้ `Tween` กับค่าเป้าหมาย จะ animate ค่าและ rebuild builder ของคุณ — implicit animation สำหรับ property ใด ๆ
-
-## Explicit: ขับ animation เอง
-
-`AnimationController` ผลิตค่าจาก 0 ถึง 1 ตลอด duration โดยถูก tick ด้วย `vsync` `Tween` map 0..1 ไปยัง range ของคุณ และ `AnimatedBuilder` rebuild เฉพาะส่วนที่ animate
+`TweenAnimationBuilder` รับ `Tween` กับเป้าหมาย แล้ว animate ค่านั้นทุกครั้งที่ rebuild ที่เป้าหมายเปลี่ยน — นี่คือรูปแบบทั่วไปที่อยู่เบื้องหลัง widget ตระกูล `AnimatedFoo` ทุกตัว (`AnimatedContainer`, `AnimatedOpacity`, …)
 
 ```dart
-class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,                                  // the ticker (why we need the mixin)
-    duration: const Duration(seconds: 1),
-  )..repeat(reverse: true);
+// lib/animation_demo.dart
+import 'package:flutter/material.dart';
+
+class ImplicitValue extends StatelessWidget {
+  const ImplicitValue({super.key, required this.target});
+  final double target;
 
   @override
-  void dispose() { _c.dispose(); super.dispose(); }   // ALWAYS dispose the controller
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: target),
+      duration: const Duration(milliseconds: 1000),
+      curve: Curves.linear,
+      builder: (context, value, child) => Text(value.toStringAsFixed(2)),
+    );
+  }
+}
+
+class ExplicitPulse extends StatefulWidget {
+  const ExplicitPulse({super.key});
+  @override
+  State<ExplicitPulse> createState() => _ExplicitPulseState();
+}
+
+class _ExplicitPulseState extends State<ExplicitPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  )..forward();
+
+  @override
+  void dispose() {
+    controller.dispose(); // ALWAYS dispose the controller
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _c,
-      builder: (context, child) => Opacity(opacity: _c.value, child: child),
-      child: const FlutterLogo(),                 // built once, not rebuilt each tick
+      animation: controller,
+      builder: (context, _) => Text(controller.value.toStringAsFixed(2)),
+    );
+  }
+}
+
+class LeakyPulse extends StatefulWidget {
+  const LeakyPulse({super.key, this.onControllerReady});
+  final ValueChanged<AnimationController>? onControllerReady;
+  @override
+  State<LeakyPulse> createState() => _LeakyPulseState();
+}
+
+class _LeakyPulseState extends State<LeakyPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 1),
+  )..repeat();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.onControllerReady?.call(controller);
+  }
+
+  // BUG: no dispose() override -- the controller (and its Ticker) leaks.
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+```
+
+```dart
+// test/animation_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/animation_demo.dart';
+
+void main() {
+  testWidgets('TweenAnimationBuilder animates linearly to the target value',
+      (tester) async {
+    await tester
+        .pumpWidget(const MaterialApp(home: ImplicitValue(target: 100)));
+    expect(find.text('0.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('50.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('100.00'), findsOneWidget);
+  });
+
+  testWidgets('AnimationController.value walks 0 -> 1 over the duration',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ExplicitPulse()));
+    expect(find.text('0.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('0.50'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('1.00'), findsOneWidget);
+  });
+
+  testWidgets(
+      'an AnimationController that is never disposed throws the real Ticker leak error on removal',
+      (tester) async {
+    late AnimationController leaked;
+    await tester.pumpWidget(MaterialApp(
+      home: LeakyPulse(onControllerReady: (c) => leaked = c),
+    ));
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+
+    final error = tester.takeException();
+    expect(error, isA<FlutterError>());
+    expect(error.toString(), contains('was disposed with an active Ticker'));
+
+    // Clean up the leaked ticker so it doesn't ALSO fail the test a second
+    // way — see the real "animation still running" error quoted below,
+    // which TestWidgetsFlutterBinding raises separately at end-of-test if
+    // a ticker is still scheduling frames when the test finishes.
+    leaked.dispose();
+  });
+}
+```
+
+```text
+00:00 +0: TweenAnimationBuilder animates linearly to the target value
+00:00 +1: AnimationController.value walks 0 -> 1 over the duration
+00:00 +2: an AnimationController that is never disposed throws the real Ticker leak error on removal
+
+00:00 +3: All tests passed!
+```
+
+`ExplicitPulse` (ที่มี `dispose()`) กับ `LeakyPulse` (ที่ไม่มี) เหมือนกันทุกอย่างนอกจากจุดนั้น — test ค่ากลางทางด้านบนพิสูจน์ว่า `.value` ของ `AnimationController` เป็น linear ramp จาก 0 ถึง 1 จริง ๆ ที่คุณ assert ได้ ณ จุดใดก็ตามผ่าน `tester.pump(Duration)` และ test การรั่วพิสูจน์ว่าเกิดอะไรขึ้นเมื่อบรรทัดเดียวที่สำคัญ (`controller.dispose()`) หายไป
+
+## Curves
+
+`Curve` (`Curves.easeInOut`, `Curves.elasticOut`, `Curves.bounceOut`, …) เปลี่ยนเวลาเชิงเส้นให้กลายเป็นการเคลื่อนไหวที่เป็นธรรมชาติ — ทั้ง `TweenAnimationBuilder` และ `CurvedAnimation` ที่ขับด้วย `AnimationController` รับมันได้ test ด้านบนใช้ `Curves.linear` โดยตั้งใจ เพื่อให้ค่ากลางทาง (`50.00` ที่จุดครึ่งทาง) assert ตรง ๆ ได้ง่าย; curve อื่นก็ test ได้แบบเดียวกันทุกอย่าง — `tester.pump(Duration)` — แค่ค่ากลางทางจะไม่ใช่ linear interpolation ธรรมดา ดังนั้นคุณจะ assert เทียบกับ transform ของ curve เอง (`Curves.easeInOut.transform(0.5)`) แทนที่จะเป็น `0.5` ดิบ ๆ
+
+## การ dispose `AnimationController`: error จริงสองแบบที่ต่างกัน
+
+การลืม `controller.dispose()` ไม่ได้แค่เสี่ยงกับ "การรั่ว" แบบนามธรรมเฉย ๆ — พิสูจน์แล้วด้านบนว่ามัน throw error จริงที่เจาะจงทันทีที่ widget ถูกลบออกขณะที่ ticker ของมันยังทำงานอยู่:
+
+```text
+FlutterError: _LeakyPulseState#c6bd8(ticker active) was disposed with an active Ticker.
+_LeakyPulseState created a Ticker via its SingleTickerProviderStateMixin, but at the time dispose() was called on the mixin, that Ticker was still active. The Ticker must be disposed before calling super.dispose().
+Tickers used by AnimationControllers should be disposed by calling dispose() on the AnimationController itself. Otherwise, the ticker will leak.
+The offending ticker was:
+  Ticker(created by _LeakyPulseState#c6bd8)
+```
+
+ข้อความนั้น (จับได้ผ่าน `tester.takeException()` ด้านบน) มาจาก `assert` จริงใน `SingleTickerProviderStateMixin.dispose()` ของ Flutter SDK 3.47.5 ที่ติดตั้งจริง (`~/flutter/packages/flutter/lib/src/widgets/ticker_provider.dart` แถวประมาณ 365) — ซึ่งหมายความว่ามันเป็นการเช็คที่ทำงาน**เฉพาะ debug mode เท่านั้น** (มันจะไม่ทำงานเลยใน `--release` build จริง ๆ ดู[บทเรียน production-concerns](/flutter/th/tooling-and-production/production-concerns/) สำหรับความหมายของการตัด `assert` ออกใน release build)
+
+ถ้าคุณ*ไม่*จับ error แรกนั้นได้ (เช่น state object ของ controller ที่รั่วถูก dispose แบบเงียบ ๆ ด้วยวิธีอื่น) จะมี error จริงตัวที่สอง ที่เป็นอิสระต่อกัน เกิดขึ้นทีหลัง จากส่วนที่ต่างออกไปโดยสิ้นเชิงของ framework — การเช็ค orphaned scheduled callback ตอนจบ test ของ `TestWidgetsFlutterBinding` เอง:
+
+```text
+EXCEPTION CAUGHT BY SCHEDULER LIBRARY
+The following message was thrown:
+An animation is still running even after the widget tree was disposed.
+
+There was one transient callback left. The stack trace for when it was registered is as follows:
+── callback 3 ──
+#3      Ticker.scheduleTick (package:flutter/src/scheduler/ticker.dart:299:46)
+#4      Ticker.start (package:flutter/src/scheduler/ticker.dart:201:7)
+#5      AnimationController._startSimulation (package:flutter/src/animation/animation_controller.dart:861:42)
+#6      AnimationController.repeat (package:flutter/src/animation/animation_controller.dart:739:12)
+```
+
+นี่คือเหตุผลที่ test ด้านบนจบด้วย `leaked.dispose()` — ถ้าไม่มีบรรทัดนั้น การรั่วที่*พิสูจน์แล้ว*จาก `LeakyPulse` จะเดินต่อในพื้นหลังตลอด test run ที่เหลือ และทำให้ test พังอีกแบบหนึ่งที่ต่างออกไป ทันทีที่ test binding สังเกตเห็น scheduled frame callback ที่ไม่มีใครหยุดมัน
+
+### `LeakTesting`/`leak_tracker_flutter_testing`: มีอยู่จริง แต่ไม่ใช่สิ่งที่บทนี้ใช้
+
+SDK ที่ติดตั้งจริงตัวนี้เองมีตัวเลือกที่อัตโนมัติกว่า: `testWidgets(..., experimentalLeakTesting: LeakTesting.settings)` (`~/flutter/packages/flutter_test/lib/src/widget_tester.dart` พารามิเตอร์ `experimentalLeakTesting`) หนุนหลังด้วย package `leak_tracker_flutter_testing` จริง (ยืนยันแล้วว่ามีอยู่ใน pub cache ของเครื่องนี้ที่เวอร์ชัน `3.0.10` ซึ่งถูกดึงมาแบบ transitive ผ่าน `flutter_test`) มันมีอยู่จริงและจับ `AnimationController` ที่รั่วได้อัตโนมัติจริง โดยไม่ต้องเขียน test เฉพาะแบบด้านบน แต่ doc comment ของ SDK เองบน parameter ตัวนั้นตรงไปตรงมาเรื่องสถานะของมัน: *"The argument `experimentalLeakTesting` is experimental and is not recommended for use outside of the Flutter framework."* บทนี้พิสูจน์การรั่วด้วยวิธีที่ test suite ของแอปจริงส่วนใหญ่ทำกันอยู่ทุกวันนี้ — assert บน `tester.takeException()` รอบการลบ widget ออกโดยตั้งใจ — เพราะนั่นคือเส้นทางที่รองรับจริงและไม่ใช่ experimental หยิบ `LeakTesting` มาใช้ก็ต่อเมื่อคุณอ่าน docs ที่ลิงก์ไว้แล้วและยอมรับสถานะ experimental ของมัน
+
+## `Hero`: shared-element transition พิสูจน์ทั้งสองด้าน
+
+`Hero` บิน widget ระหว่างสอง route เมื่อทั้งสองฝั่งใช้ `tag` เดียวกัน พิสูจน์ด้วย `Navigator.push` สองหน้าจอจริง:
+
+```dart
+// lib/hero_demo.dart
+import 'package:flutter/material.dart';
+
+class ScreenA extends StatelessWidget {
+  const ScreenA({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: GestureDetector(
+          onTap: () => Navigator.of(context)
+              .push(MaterialPageRoute<void>(builder: (_) => const ScreenB())),
+          child: const Hero(
+            tag: 'logo',
+            child: FlutterLogo(key: ValueKey('logoA'), size: 50),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ScreenB extends StatelessWidget {
+  const ScreenB({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(
+        child: Hero(
+          tag: 'logo',
+          child: FlutterLogo(key: ValueKey('logoB'), size: 200),
+        ),
+      ),
+    );
+  }
+}
+
+// A destination route with TWO Heroes sharing the same tag -- proven below
+// to throw a real assertion during the flight, not a silent mismatch.
+class ScreenADuplicate extends StatelessWidget {
+  const ScreenADuplicate({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: GestureDetector(
+          onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const ScreenBDuplicate())),
+          child: const Hero(
+            tag: 'logo',
+            child: FlutterLogo(key: ValueKey('logoA'), size: 50),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ScreenBDuplicate extends StatelessWidget {
+  const ScreenBDuplicate({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Column(
+        children: [
+          Hero(tag: 'logo', child: FlutterLogo(key: ValueKey('dup1'), size: 50)),
+          Hero(tag: 'logo', child: Icon(Icons.star, key: ValueKey('dup2'))),
+        ],
+      ),
     );
   }
 }
 ```
 
-<Mermaid title="pipeline ของ explicit animation" code={animDiagram} />
+```dart
+// test/hero_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/hero_demo.dart';
 
-export const animDiagram = `flowchart LR
-  ctrl["AnimationController\ntick 0 ถึง 1 ผ่าน vsync"] --> tween["Tween / Curve\nmap 0..1 ไปยัง range ของคุณ"]
-  tween --> ab["AnimatedBuilder\nrebuild เฉพาะส่วนที่ animate"]
-  ab --> ui["widget update ทุก tick"]`;
+void main() {
+  testWidgets('matching Hero tags fly between routes without error', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ScreenA()));
+    await tester.tap(find.byType(GestureDetector));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('logoB')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
-สองกฎที่กันบั๊กที่พบบ่อย: controller ต้องมี `vsync` (mix in `SingleTickerProviderStateMixin`) และคุณต้อง `dispose()` controller ทิ้ง — controller ที่ leak จะ tick ต่อไปเรื่อย ๆ ส่งส่วนที่ไม่เปลี่ยนเป็น `child` เพื่อไม่ให้ถูก rebuild ทุก tick
+  testWidgets(
+      'two Heroes sharing a tag on the destination route throw a real assertion during the flight',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ScreenADuplicate()));
+    await tester.tap(find.byType(GestureDetector));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
 
-## Curves
+    final error = tester.takeException();
+    expect(error, isA<FlutterError>());
+    expect(
+      error.toString(),
+      contains('There are multiple heroes that share the same tag within a subtree'),
+    );
+  });
+}
+```
 
-`Curve` (`Curves.easeInOut`, `Curves.elasticOut`, …) reshape เวลาเชิงเส้นให้เป็นการเคลื่อนไหวที่เป็นธรรมชาติ ทั้งสองตระกูลรับ curve ได้ การใส่ curve คือความต่างระหว่างการ slide แบบกลไกกับการเคลื่อนไหวที่รู้สึกว่าออกแบบมา
+```text
+00:00 +0: matching Hero tags fly between routes without error
+00:00 +1: two Heroes sharing a tag on the destination route throw a real assertion during the flight
+
+00:00 +2: All tests passed!
+```
+
+ข้อความ error จริงที่จับได้สำหรับกรณีซ้ำ: *"There are multiple heroes that share the same tag within a subtree. Within each subtree for which heroes are to be animated (i.e. a `PageRoute` subtree), each Hero must have a unique non-null tag. In this case, multiple heroes had the following tag: logo"* — พิสูจน์ว่า `Hero` tag ที่ชนกันคือความล้มเหลวที่ดังและเจาะจง ไม่ใช่ transition ที่ผิดแบบเงียบ ๆ
+
+## `AnimatedSwitcher`: key เป็นตัวตัดสินว่ามันจะ animate หรือไม่
+
+`AnimatedSwitcher` cross-fade ระหว่าง `child` ของมันทุกครั้งที่ child นั้น *เปลี่ยน identity* — พิสูจน์ด้านล่าง ว่า "เปลี่ยน identity" หมายถึง `runtimeType` ต่างกัน **หรือ** `Key` ต่างกัน ซึ่งเป็นกฎ `Widget.canUpdate` เดียวกันเป๊ะกับที่ควบคุมการอัปเดต widget ทุกตัวใน Flutter ไม่ใช่อะไรพิเศษเฉพาะของ `AnimatedSwitcher`
+
+```dart
+// lib/switcher_demo.dart
+import 'package:flutter/material.dart';
+
+class SwitcherDemo extends StatelessWidget {
+  const SwitcherDemo({super.key, required this.value});
+  final int value;
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 200),
+      child: Text('$value', key: ValueKey(value)), // distinct key per value
+    );
+  }
+}
+
+class SwitcherNoKeyDemo extends StatelessWidget {
+  const SwitcherNoKeyDemo({super.key, required this.value});
+  final int value;
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 200),
+      child: Text('$value'), // NO key -- same identity to AnimatedSwitcher
+    );
+  }
+}
+```
+
+```dart
+// test/switcher_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/switcher_demo.dart';
+
+void main() {
+  testWidgets('AnimatedSwitcher with a distinct ValueKey per child cross-fades',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: SwitcherDemo(value: 1)));
+    expect(find.text('1'), findsOneWidget);
+
+    await tester.pumpWidget(const MaterialApp(home: SwitcherDemo(value: 2)));
+    await tester.pump(const Duration(milliseconds: 100)); // mid-transition
+    expect(find.text('1'), findsOneWidget); // old child still fading out
+    expect(find.text('2'), findsOneWidget); // new child fading in
+
+    await tester.pump(const Duration(milliseconds: 200)); // finish
+    expect(find.text('1'), findsNothing);
+    expect(find.text('2'), findsOneWidget);
+  });
+
+  testWidgets('AnimatedSwitcher with NO key on same-type children does not animate at all',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: SwitcherNoKeyDemo(value: 1)));
+    expect(find.text('1'), findsOneWidget);
+
+    await tester.pumpWidget(const MaterialApp(home: SwitcherNoKeyDemo(value: 2)));
+    await tester.pump(const Duration(milliseconds: 1)); // barely any time passed
+    expect(find.text('1'), findsNothing); // already gone -- no cross-fade happened
+    expect(find.text('2'), findsOneWidget);
+  });
+}
+```
+
+```text
+00:00 +0: AnimatedSwitcher with a distinct ValueKey per child cross-fades
+00:00 +1: AnimatedSwitcher with NO key on same-type children does not animate at all
+
+00:00 +2: All tests passed!
+```
+
+test ที่สองคือตัวที่ทำให้คนแปลกใจ: ถ้าไม่มี key `Text('1')` กับ `Text('2')` คือ*identity ของ widget เดียวกัน*ในสายตาของ `AnimatedSwitcher` (และการ diffing element ของ Flutter โดยทั่วไป) — `runtimeType` เดียวกัน ไม่มี key — มันจึงแค่อัปเดต element `Text` เดิมตรง ๆ โดย**ไม่มี**การ cross-fade เลย แม้ข้อความที่เห็นจะเปลี่ยนไปแล้วก็ตาม `ValueKey` (หรือ key ที่แตกต่างใด ๆ) คือสิ่งที่บอก `AnimatedSwitcher` ว่า "นี่คือ child ที่ต่างออกไปจริง ๆ" ซึ่งเป็นสิ่งเดียวที่จะ trigger transition
+
+## `RepaintBoundary` รอบ animation
+
+animation ที่กำลัง tick อยู่จะ repaint ทุกเฟรม — การห่อมันด้วย `RepaintBoundary` จำกัดการ repaint นั้นไว้ใน layer ของตัวเอง แทนที่จะบังคับให้ ancestor/sibling ต้อง repaint ไปด้วย กลไกของ paint layer และเหตุผลที่มันสำคัญครอบคลุมอยู่ใน[บทเรียน render-pipeline](/flutter/th/layout-and-rendering/render-pipeline/) แบบเจาะลึก; สรุปสั้น ๆ สำหรับบทนี้คือ: subtree ที่ขับด้วย `AnimatedBuilder`/`AnimationController` ที่อยู่ติดกับเนื้อหา static ที่มีต้นทุนสูง เป็นตัวเลือกที่ดีสำหรับ `RepaintBoundary` ของตัวเอง
+
+## โหมด `Ticker` ใน test: `TickerMode`
+
+`TickerMode(enabled: false, child: ...)` ปิดเสียง ticker ทุกตัวใน subtree ของมัน — ticker ยังคงอยู่ แต่หยุด schedule frame callback จริง ๆ ซึ่งพิสูจน์ได้ว่าต่างจาก "ไม่ animate" (`AnimationController` ยังคง `forward()` อยู่ เป้าหมาย `.value` ของมันไม่เปลี่ยน มันแค่ไม่เดินหน้าต่อเท่านั้น):
+
+```dart
+// test/tickermode_test.dart (uses ExplicitPulse from lib/animation_demo.dart)
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/animation_demo.dart';
+
+void main() {
+  testWidgets('TickerMode(enabled: false) mutes the ticker so it never advances',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+      home: TickerMode(enabled: false, child: ExplicitPulse()),
+    ));
+    expect(find.text('0.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('0.00'), findsOneWidget); // still 0.00 -- muted, not advancing
+  });
+}
+```
+
+```text
+00:00 +0: TickerMode(enabled: false) mutes the ticker so it never advances
+
+00:00 +1: All tests passed!
+```
+
+นี่คือกลไกเดียวกันเป๊ะที่ Flutter เองใช้เพื่อหยุด animation ที่อยู่นอกจอโดยอัตโนมัติ (route ที่ถูก route อื่นบังอยู่, tab ที่ไม่ได้แสดงอยู่ตอนนี้) — `TickerMode` ถูกตั้งเป็น `false` รอบ ๆ route/tab ที่ไม่ active เพื่อให้ `AnimationController` ของมันหยุดเผาเฟรมโดยไม่ต้อง pause/resume ด้วยมือ
 
 <Callout title="สรุปหนึ่งบรรทัด">
-เลือก **implicit** animation ก่อน (`AnimatedContainer`, `TweenAnimationBuilder`) — เปลี่ยนค่าแล้ว Flutter interpolate ไปหาค่าใหม่ให้เองโดยไม่มี lifecycle ให้จัดการ ใช้ **explicit** (`AnimationController` + `Tween` + `AnimatedBuilder`) เมื่อต้อง repeat, reverse, chain หรือขับด้วย gesture — และจำสองกฎ: ให้ `vsync` ticker และ `dispose()` controller ทิ้ง เพิ่ม `Curve` เพื่อการเคลื่อนไหวที่เป็นธรรมชาติ
+เลือก animation แบบ **implicit** ก่อน (`TweenAnimationBuilder`/`AnimatedFoo`) — พิสูจน์แล้วด้านบนด้วย `tester.pump(Duration)` ที่เดินค่าเชิงเส้นจาก `0.00` ถึง `100.00` เลือก **explicit** (`AnimationController` + `SingleTickerProviderStateMixin`) เมื่อต้องการ repeat/reverse/gesture control — พิสูจน์แล้วด้านบนด้วยเทคนิค `pump(Duration)` เดียวกันบน `controller.value` `dispose()` ไม่ใช่ตัวเลือก: พิสูจน์แล้วด้านบนด้วย error จริงสองแบบที่ต่างกัน — assert ของ `SingleTickerProviderStateMixin` ("was disposed with an active Ticker") และถ้าพลาดจับตัวนั้นด้วย การเช็ค "animation is still running" ของ `TestWidgetsFlutterBinding` เอง `Hero` throw assertion จริงที่เจาะจงเมื่อ tag ซ้ำกันภายใน subtree ของ route เดียว พิสูจน์แล้วด้านบน และบินได้อย่างสะอาด พิสูจน์แล้วด้านบน เมื่อ tag ตรงกันแบบหนึ่งต่อหนึ่งจริง ๆ `AnimatedSwitcher` cross-fade ก็ต่อเมื่อ identity ของ child (type + key) เปลี่ยนจริง ๆ เท่านั้น — พิสูจน์แล้วด้านบน ไม่มี key บน child ประเภทเดียวกันหมายถึง**ไม่มี**animation เลย ไม่ใช่แค่จางลง `TickerMode(enabled: false)` ปิดเสียง ticker ของ subtree โดยไม่แตะ state ของ controller เลย พิสูจน์แล้วด้านบน — เป็นกลไกที่ Flutter เองใช้หยุด animation นอกจอ
 </Callout>
+
+## Reading AI-generated code
+
+โค้ด animation ที่ AI generate มักทำ happy path (ตัว animation เอง) ได้ถูกต้อง แต่พลาดสองเรื่องที่สำคัญแค่ตอนที่ widget ออกจาก tree หรือข้อมูลเปลี่ยนรูปร่างเท่านั้น: การ dispose และ key
+
+```dart
+// AI-generated: "pulse this icon while the upload is in progress"
+class UploadIndicator extends StatefulWidget {
+  const UploadIndicator({super.key});
+  @override
+  State<UploadIndicator> createState() => _UploadIndicatorState();
+}
+
+class _UploadIndicatorState extends State<UploadIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 800),
+  )..repeat(reverse: true);
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: Tween(begin: 0.9, end: 1.1).animate(_controller),
+      child: const Icon(Icons.cloud_upload),
+    );
+  }
+}
+```
+
+ก่อนจะเชื่อโค้ด animation ที่ generate มาแบบนี้ ให้เช็ค:
+
+- ไม่มี `dispose()` override — พิสูจน์แล้วด้านบนว่า `AnimationController` ที่สร้างผ่าน `SingleTickerProviderStateMixin` ที่ไม่เคยถูก dispose จะ throw error จริงที่เจาะจงทันทีที่ `State` ของมันถูกลบขณะ ticker ยังทำงานอยู่ (และถ้าพลาดจับตัวนั้นด้วย จะมี error จริงตัวที่สองตอนจบ test/จบ app lifecycle สำหรับ ticker ที่ยัง schedule อยู่)
+- `AnimatedSwitcher`/`ListView`/widget ใด ๆ ที่พึ่ง child identity ถูกป้อน child ที่ไม่มี key หรือ key เดิมไม่ว่าข้อมูลข้างใต้จะเปลี่ยนแค่ไหน — พิสูจน์แล้วด้านบนว่ามันข้าม animation ไปแบบเงียบ ๆ (หรือใน list ทำให้ state ของ item ผิดตัวย้ายไป) แทนที่จะ throw อะไรเลย
+- `Hero` widget สองตัวที่ถูกสร้างพร้อม tag ที่แชร์กันแบบ hardcode (pattern ที่ AI ทำบ่อยตอน generate list ของ card ที่แต่ละใบควรบินไปหน้ารายละเอียด) — พิสูจน์แล้วด้านบนว่ามัน throw assertion จริงที่เจาะจงทันทีที่ route transition เกิดขึ้นจริง ไม่ใช่ตอน build
+- `..repeat(reverse: true)` (หรือ animation ที่ไม่มีวันจบใด ๆ) ที่ไม่มี `TickerMode`/การรับรู้ visibility — พิสูจน์แล้วด้านบนว่า `TickerMode(enabled: false)` คือกลไกสำหรับ pause อัตโนมัติเมื่อ widget อยู่นอกจอ ถ้าไม่มีมัน controller ที่ repeat ไม่รู้จบจะเดินต่อไปเรื่อย ๆ (และกินงบเฟรม) แม้ widget ของมันจะมองไม่เห็นก็ตาม
+
+<SpotTheBug code={`class NotificationBadge extends StatefulWidget {
+  const NotificationBadge({super.key, required this.count});
+  final int count;
+
+  @override
+  State<NotificationBadge> createState() => _NotificationBadgeState();
+}
+
+class _NotificationBadgeState extends State<NotificationBadge> {
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      child: Text(
+        widget.count.toString(),
+        style: Theme.of(context).textTheme.labelLarge,
+      ),
+    );
+  }
+}`}>
+พิสูจน์แล้วด้านบนด้วย pattern เดียวกันเป๊ะ: ไม่มี `key` บน `Text` ข้างใน `AnimatedSwitcher` เลย ดังนั้นเมื่อ `widget.count` เปลี่ยน (1, 2, 3, …) `Text` ใหม่ทุกตัวมี `runtimeType` เดียวกันและไม่มี key เหมือนตัวเก่า — `AnimatedSwitcher` มองว่า "child เดิม" อัปเดตมันตรง ๆ และตัวเลข badge เปลี่ยนโดย**ไม่มี**animation cross-fade เลย ทำลายจุดประสงค์ทั้งหมดของการห่อด้วย `AnimatedSwitcher` วิธีแก้คือ key ที่เปลี่ยนตามข้อมูล: `Text(widget.count.toString(), key: ValueKey(widget.count), ...)`
+</SpotTheBug>
+
+## Mental Model
+
+primitive ของ animation ทุกตัวในบทนี้ตอบคำถามเดียวกันในชั้นที่ต่างกัน: **อะไรผลิตค่าถัดไป และใครรับผิดชอบหยุดมัน?** animation แบบ implicit (`TweenAnimationBuilder`) ถือ `AnimationController` ที่ซ่อนอยู่ของมันเองและ dispose มันให้คุณ — นั่นคือข้อแลกเปลี่ยนทั้งหมดที่เกิดขึ้นเมื่อคุณเลือก implicit แทน explicit `AnimationController` แบบ explicit ส่งความรับผิดชอบนั้นให้คุณโดยตรง และ — พิสูจน์แล้วด้านบนสองครั้ง ด้วย error จริงสองแบบที่ต่างกัน — framework ของ Flutter เช็คจริงจังว่าคุณทำตามนั้นหรือไม่ ทั้งตอนที่ `State` ของคุณถูก dispose และอีกครั้งตอนจบ test/app lifecycle ถ้าการเช็คแรกจับไม่ได้ `Hero` กับ `AnimatedSwitcher` จริง ๆ แล้วเป็นคำถามเรื่อง "identity" เดียวกันแค่มองจากมุมที่ต่างไปโดยสิ้นเชิง: ไม่ใช่ "คุณเก็บกวาด ticker หรือเปล่า" แต่คือ "framework เห็นด้วยกับคุณไหมว่า widget ไหนคือ widget ไหน" — tag ของ `Hero` กับ `Key` ทั้งคู่โดยพื้นฐานแล้วคือคำตอบของ "นี่คือสิ่งเดิมจากก่อนหน้านี้ หรือเป็นสิ่งใหม่?"
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| Implicit (`TweenAnimationBuilder`/`AnimatedFoo`) | ไม่มี controller ไม่มี `dispose()` ให้ลืม — พิสูจน์แล้วด้านบนว่า ramp ทดสอบได้เหมือนกันผ่าน `pump(Duration)` | animate เฉพาะตอนตอบสนอง rebuild จริงที่มีเป้าหมายใหม่เท่านั้น; ไม่มี repeat/reverse/manual control |
+| Explicit (`AnimationController`) | ควบคุมได้เต็มที่ — repeat, reverse, ขับด้วย gesture, sync หลาย animation | พิสูจน์แล้วด้านบน: error การรั่วจริงที่เจาะจงถ้าลืม `dispose()` — สองรอบด้วยถ้าพลาดการเช็คแรก |
+| `Hero` | shared-element transition แทบไม่ต้องเขียนโค้ดเลย — พิสูจน์แล้วด้านบนว่าทำงานสะอาดเมื่อ tag ตรงกันแบบหนึ่งต่อหนึ่ง | พิสูจน์แล้วด้านบน: assertion จริงที่เจาะจงทันทีที่ Hero สองตัวบน route เดียวแชร์ tag กัน |
+| `AnimatedSwitcher` + key | cross-fade อัตโนมัติเมื่อ child เปลี่ยนจริง ๆ | พิสูจน์แล้วด้านบน: ไม่ทำอะไรเลยแบบเงียบ ๆ ถ้า identity ของ child (type+key) ไม่ได้เปลี่ยนจริง |
+| `TickerMode(enabled: false)` | หยุด ticker ทั้ง subtree โดยไม่แตะ state ของ controller — พิสูจน์แล้วด้านบน | แค่ปิดเสียงเท่านั้น; controller ที่กำลัง `repeat()` ยังคงอยู่และ resume ทันทีเมื่อเปิดกลับมา — ไม่เหมือนกับการ dispose |
+
+## Common Misconceptions
+
+- **"การลืม dispose `AnimationController` เป็นการรั่วแบบนุ่ม ๆ สังเกตยาก"** พิสูจน์แล้วด้านบนว่าไม่จริง: มัน throw `FlutterError` จริงที่เจาะจง (`"was disposed with an active Ticker"`) ทันทีที่ widget ถูกลบขณะ ticker ยังทำงานอยู่ — ใน debug/test build นี่คือความดังไม่ใช่ความเงียบ
+- **"`AnimatedSwitcher` animate ทุกครั้งที่ค่าของ property `child` ดูเปลี่ยนไป"** พิสูจน์แล้วด้านบนว่าไม่จริง: มัน animate แค่ตอนที่ *identity* ของ child (type + key) เปลี่ยนเท่านั้น — `Text` สองตัวที่มีข้อความต่างกันแต่ไม่มี key และ type เดียวกันคือ identity เดียวกันในสายตามัน และมันแสดง animation เป็นศูนย์
+- **"Hero widget สองตัวแชร์ tag กันได้ ตราบใดที่ทั้งคู่ไม่ได้แสดงพร้อมกัน"** พิสูจน์แล้วด้านบนว่าไม่จริง: assertion เกิดจากแค่มี Hero สองตัวที่ tag เดียวกันอยู่ใน subtree ของ route เดียวระหว่าง flight ไม่ว่าตัวไหนจะแสดงอยู่ชั่วขณะก็ตาม
+- **"`TickerMode(enabled: false)` เทียบเท่ากับการเรียก `.stop()` บน controller ทุกตัวข้างใน"** พิสูจน์แล้วด้านบนว่าไม่จริง: state ของ controller เอง (`.value` ว่ามัน `forward()` อยู่หรือไม่) ไม่เปลี่ยนแปลงเลย — มีแค่ frame scheduling เท่านั้นที่ถูกปิดเสียง การเปิด `TickerMode` กลับมาจะ resume ต่อจากจุดเดิมพอดี ซึ่ง `.stop()` ทำแบบนั้นไม่ได้
 
 export const quizAnim = [
   {
     q: 'implicit animation คืออะไร?',
     options: [
-      'อันที่คุณขับ tick ต่อ tick ด้วย controller',
-      'อันที่คุณเปลี่ยนค่าเป้าหมายแล้ว Flutter animate ไปหาค่าใหม่ให้อัตโนมัติ (เช่น AnimatedContainer)',
+      'อันที่คุณขับทีละ tick ด้วย controller',
+      'อันที่คุณเปลี่ยนค่าเป้าหมายแล้ว Flutter animate ไปหามันให้อัตโนมัติ (เช่น TweenAnimationBuilder/AnimatedContainer)',
       'animation ที่มองไม่เห็น',
-      'animation ที่รันเฉพาะใน release mode',
+      'animation ที่รันแค่ใน release mode เท่านั้น',
     ],
     answer: 1,
   },
   {
-    q: 'AnimationController ต้องมีอะไรจึงจะ tick ได้?',
+    q: 'พิสูจน์แล้วด้านบนด้วย tester.pump(Duration), .value ของ AnimationController ทำอะไรตลอด duration ของมันกับ Curves.linear?',
     options: [
-      'การเชื่อมต่อ network',
-      'vsync (ticker provider เช่นผ่าน SingleTickerProviderStateMixin)',
-      'RepaintBoundary',
-      'isolate ตัวที่สอง',
+      'มันกระโดดจาก 0 ไป 1 ตรง ๆ ไม่มีค่ากลางทาง',
+      'มันเดินเชิงเส้นจาก 0.00 ตอนเริ่มถึง 1.00 ตอนจบ assert ได้จริงที่จุดกลางทางใด ๆ (เช่น 0.50 ที่จุดครึ่งทาง)',
+      'มันค้างที่ 0 จนกว่า dispose() จะถูกเรียก',
+      'อ่านค่าได้แค่หลังเรียก .stop() เท่านั้น',
     ],
     answer: 1,
+    explain: 'test จริง assert controller.value ที่ 0ms (0.00), 500ms (0.50) และ 1000ms (1.00) ใน animation แบบ linear curve 1000ms — ramp ที่พิสูจน์ได้จริง',
   },
   {
-    q: 'จะเกิดอะไรถ้าลืม dispose AnimationController?',
+    q: 'พิสูจน์แล้วด้านบนด้วย FlutterError จริง เกิดอะไรขึ้นเมื่อ AnimationController ที่สร้างผ่าน SingleTickerProviderStateMixin ไม่เคยถูก dispose?',
     options: [
-      'ไม่มีอะไร',
-      'leak และ tick ต่อไปเรื่อย ๆ สิ้นเปลืองทรัพยากร',
-      'แอปจะ build ไม่ผ่าน',
-      'dispose ตัวเองอัตโนมัติเสมอ',
+      'ไม่มีอะไรที่สังเกตได้ — เป็นแค่ความกังวลเรื่อง memory เชิงทฤษฎี',
+      'FlutterError จริงถูก throw ทันทีที่ State ถูกลบขณะ ticker ยังทำงานอยู่: "...was disposed with an active Ticker" — และถ้าพลาดจับตัวนั้นด้วย TestWidgetsFlutterBinding จะยก error "animation is still running" แยกต่างหากตอนจบ test',
+      'controller dispose ตัวเองอัตโนมัติหลังจบหนึ่งรอบ animation',
+      'มันพังแค่ใน profile mode เท่านั้น',
     ],
     answer: 1,
+    explain: 'ข้อความ error จริงทั้งสองแบบถูก quote ไว้ในบทเรียน จับได้ผ่าน tester.takeException() และจาก raw SCHEDULER LIBRARY output ตามลำดับ — เป็นการเช็คจริงสองแบบที่ต่างกัน ไม่ใช่แบบเดียว',
   },
   {
-    q: 'ควรเลือก explicit animation เหนือ implicit เมื่อไร?',
+    q: 'พิสูจน์แล้วด้านบนด้วย assertion จริง เกิดอะไรขึ้นเมื่อ Hero widget สองตัวบน route ปลายทางเดียวกันแชร์ tag?',
     options: [
-      'เสมอ — implicit ถูก deprecated แล้ว',
-      'เมื่อต้อง repeat, reverse, chain หลายค่า หรือควบคุมด้วย gesture',
-      'เฉพาะกับสี',
-      'ไม่เคย',
+      'ตัวที่สองถูกเพิกเฉยแบบเงียบ ๆ',
+      'FlutterError จริงถูก throw ระหว่าง flight: "There are multiple heroes that share the same tag within a subtree"',
+      'ทั้งคู่ animate อย่างอิสระโดยไม่มีความขัดแย้ง',
+      'มันพังแค่บน iOS ไม่ใช่ Android',
     ],
     answer: 1,
+    explain: 'ข้อความที่จับได้จริงระบุ tag ที่มีปัญหา (\'logo\') และอธิบายกฎ: Hero แต่ละตัวใน subtree ของ PageRoute ต้องมี tag ที่ไม่ซ้ำและไม่ใช่ null',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบนด้วย widget test สองตัว อะไรที่ตัดสินจริง ๆ ว่า AnimatedSwitcher จะ animate การเปลี่ยน child หรือไม่?',
+    options: [
+      'ข้อความ/ค่าที่แสดงดูต่างไปในสายตามนุษย์หรือไม่',
+      'identity ของ child (runtimeType + Key) เปลี่ยนหรือไม่ — พิสูจน์แล้วด้านบนว่า type เดียวกันไม่มี key ให้ animation เป็นศูนย์ แม้ข้อความที่เห็นจะเปลี่ยนไปแล้ว',
+      'parameter duration เพียงอย่างเดียว',
+      'AnimatedSwitcher animate ทุก rebuild เสมอ',
+    ],
+    answer: 1,
+    explain: 'เวอร์ชันที่มี key แสดงข้อความเก่าและใหม่พร้อมกันระหว่าง transition (cross-fade จริง) ส่วนเวอร์ชันไม่มี key แสดงข้อความใหม่ทันทีโดยไม่มีข้อความเก่าปรากฏเลย พิสูจน์ว่าไม่มี animation เกิดขึ้น',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบน TickerMode(enabled: false) เปลี่ยนอะไรจริง ๆ เกี่ยวกับ controller ข้างใน?',
+    options: [
+      'มันเรียก dispose() บน controller ทุกตัวใน subtree',
+      'มันปิดเสียงแค่ frame scheduling เท่านั้น — ค่า value และ state forward()/repeat() ของ controller เองไม่เปลี่ยน พิสูจน์แล้วด้านบนโดย controller.value ค้างที่ 0.00 ตลอด 500ms ของเวลาที่ pump',
+      'มัน reset ค่า value ของ controller ทุกตัวกลับเป็น 0',
+      'มันไม่มีผลที่สังเกตได้ใน test เลย',
+    ],
+    answer: 1,
+    explain: 'controller กำลัง forward() อยู่แล้ว (ตามที่ ExplicitPulse ทำเสมอ) แต่ค่า value ของมันไม่เดินหน้าเกิน 0.00 เลยขณะห่อด้วย TickerMode(enabled: false) — พิสูจน์ว่ามีแค่การ tick เท่านั้นที่ถูกปิดเสียง',
   },
 ];
 

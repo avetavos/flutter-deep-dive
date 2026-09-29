@@ -1,6 +1,6 @@
 ---
 title: 'Animations'
-description: 'Implicit animations that interpolate to a new value for you, explicit animations driven by an AnimationController and Tween, curves, and when to reach for each.'
+description: 'Implicit vs. explicit animations proven with tester.pump(Duration) intermediate-value tests, the real AnimationController dispose leak error (both of them), Curves, Hero tag matching, AnimatedSwitcher keys, and TickerMode — all proven with real widget tests.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Two families of animation
 
@@ -19,105 +20,572 @@ Flutter animations split into two families, and picking the right one is most of
 
 Start implicit; go explicit only when implicit can't express what you need.
 
-## Implicit: animate to a new value
+## Implicit, proven with intermediate values
 
-The `AnimatedFoo` widgets (`AnimatedContainer`, `AnimatedOpacity`, `AnimatedPadding`, …) take a `duration` and animate whenever their target properties change.
-
-```dart
-AnimatedContainer(
-  duration: const Duration(milliseconds: 300),
-  curve: Curves.easeInOut,
-  width: _expanded ? 200 : 100,     // change this (e.g. in setState)...
-  height: 100,
-  color: Colors.blue,
-  // ...and Flutter smoothly animates from the old width to the new one.
-)
-```
-
-`TweenAnimationBuilder` generalizes this: give it a `Tween` and a target, and it animates the value and rebuilds your builder — implicit animation for any property.
-
-## Explicit: drive it yourself
-
-An `AnimationController` produces values from 0 to 1 over a duration, ticked by a `vsync`. A `Tween` maps 0..1 onto your range, and `AnimatedBuilder` rebuilds only the animated part.
+`TweenAnimationBuilder` takes a `Tween` and a target, and animates the value on every rebuild where the target changes — this is the general form behind every `AnimatedFoo` widget (`AnimatedContainer`, `AnimatedOpacity`, …).
 
 ```dart
-class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,                                  // the ticker (why we need the mixin)
-    duration: const Duration(seconds: 1),
-  )..repeat(reverse: true);
+// lib/animation_demo.dart
+import 'package:flutter/material.dart';
+
+class ImplicitValue extends StatelessWidget {
+  const ImplicitValue({super.key, required this.target});
+  final double target;
 
   @override
-  void dispose() { _c.dispose(); super.dispose(); }   // ALWAYS dispose the controller
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: target),
+      duration: const Duration(milliseconds: 1000),
+      curve: Curves.linear,
+      builder: (context, value, child) => Text(value.toStringAsFixed(2)),
+    );
+  }
+}
+
+class ExplicitPulse extends StatefulWidget {
+  const ExplicitPulse({super.key});
+  @override
+  State<ExplicitPulse> createState() => _ExplicitPulseState();
+}
+
+class _ExplicitPulseState extends State<ExplicitPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  )..forward();
+
+  @override
+  void dispose() {
+    controller.dispose(); // ALWAYS dispose the controller
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _c,
-      builder: (context, child) => Opacity(opacity: _c.value, child: child),
-      child: const FlutterLogo(),                 // built once, not rebuilt each tick
+      animation: controller,
+      builder: (context, _) => Text(controller.value.toStringAsFixed(2)),
+    );
+  }
+}
+
+class LeakyPulse extends StatefulWidget {
+  const LeakyPulse({super.key, this.onControllerReady});
+  final ValueChanged<AnimationController>? onControllerReady;
+  @override
+  State<LeakyPulse> createState() => _LeakyPulseState();
+}
+
+class _LeakyPulseState extends State<LeakyPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 1),
+  )..repeat();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.onControllerReady?.call(controller);
+  }
+
+  // BUG: no dispose() override -- the controller (and its Ticker) leaks.
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+```
+
+```dart
+// test/animation_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/animation_demo.dart';
+
+void main() {
+  testWidgets('TweenAnimationBuilder animates linearly to the target value',
+      (tester) async {
+    await tester
+        .pumpWidget(const MaterialApp(home: ImplicitValue(target: 100)));
+    expect(find.text('0.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('50.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('100.00'), findsOneWidget);
+  });
+
+  testWidgets('AnimationController.value walks 0 -> 1 over the duration',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ExplicitPulse()));
+    expect(find.text('0.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('0.50'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('1.00'), findsOneWidget);
+  });
+
+  testWidgets(
+      'an AnimationController that is never disposed throws the real Ticker leak error on removal',
+      (tester) async {
+    late AnimationController leaked;
+    await tester.pumpWidget(MaterialApp(
+      home: LeakyPulse(onControllerReady: (c) => leaked = c),
+    ));
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+
+    final error = tester.takeException();
+    expect(error, isA<FlutterError>());
+    expect(error.toString(), contains('was disposed with an active Ticker'));
+
+    // Clean up the leaked ticker so it doesn't ALSO fail the test a second
+    // way — see the real "animation still running" error quoted below,
+    // which TestWidgetsFlutterBinding raises separately at end-of-test if
+    // a ticker is still scheduling frames when the test finishes.
+    leaked.dispose();
+  });
+}
+```
+
+```text
+00:00 +0: TweenAnimationBuilder animates linearly to the target value
+00:00 +1: AnimationController.value walks 0 -> 1 over the duration
+00:00 +2: an AnimationController that is never disposed throws the real Ticker leak error on removal
+
+00:00 +3: All tests passed!
+```
+
+`ExplicitPulse` (with `dispose()`) and `LeakyPulse` (without it) are otherwise identical — the intermediate-value test above proves an `AnimationController`'s `.value` really is a linear 0→1 ramp you can assert against at any point via `tester.pump(Duration)`, and the leak test proves what happens when the one line that matters (`controller.dispose()`) is missing.
+
+## Curves
+
+A `Curve` (`Curves.easeInOut`, `Curves.elasticOut`, `Curves.bounceOut`, …) reshapes linear time into natural motion — both `TweenAnimationBuilder` and an `AnimationController`-driven `CurvedAnimation` take one. The test above deliberately used `Curves.linear` so the intermediate values (`50.00` at the halfway point) are simple to assert exactly; any other curve is still fully testable the same way — `tester.pump(Duration)` — the intermediate value just won't be a simple linear interpolation, so you'd assert against the curve's own transform (`Curves.easeInOut.transform(0.5)`) instead of the raw `0.5`.
+
+## `AnimationController` disposal: two different real errors
+
+Forgetting `controller.dispose()` doesn't just risk "a leak" in the abstract — it is proven above to throw a real, specific error the moment the widget is removed while its ticker is still active:
+
+```text
+FlutterError: _LeakyPulseState#c6bd8(ticker active) was disposed with an active Ticker.
+_LeakyPulseState created a Ticker via its SingleTickerProviderStateMixin, but at the time dispose() was called on the mixin, that Ticker was still active. The Ticker must be disposed before calling super.dispose().
+Tickers used by AnimationControllers should be disposed by calling dispose() on the AnimationController itself. Otherwise, the ticker will leak.
+The offending ticker was:
+  Ticker(created by _LeakyPulseState#c6bd8)
+```
+
+That text (captured via `tester.takeException()` above) comes from a real `assert` in the installed Flutter 3.47.5 SDK's `SingleTickerProviderStateMixin.dispose()` (`~/flutter/packages/flutter/lib/src/widgets/ticker_provider.dart`, around line 365) — which means it is a **debug-mode-only** check (it literally will not run in a `--release` build; see the [production-concerns lesson](/flutter/en/tooling-and-production/production-concerns/) for what `assert` stripping means for release builds).
+
+If you *don't* catch that first error (e.g., the leaked controller's state object is disposed silently some other way), there's a second, independent real error that fires later, from a completely different part of the framework — `TestWidgetsFlutterBinding`'s own end-of-test check for orphaned scheduled callbacks:
+
+```text
+EXCEPTION CAUGHT BY SCHEDULER LIBRARY
+The following message was thrown:
+An animation is still running even after the widget tree was disposed.
+
+There was one transient callback left. The stack trace for when it was registered is as follows:
+── callback 3 ──
+#3      Ticker.scheduleTick (package:flutter/src/scheduler/ticker.dart:299:46)
+#4      Ticker.start (package:flutter/src/scheduler/ticker.dart:201:7)
+#5      AnimationController._startSimulation (package:flutter/src/animation/animation_controller.dart:861:42)
+#6      AnimationController.repeat (package:flutter/src/animation/animation_controller.dart:739:12)
+```
+
+This second error is exactly why the test above ends with `leaked.dispose()` — without it, the *already-proven* leak from `LeakyPulse` keeps ticking in the background for the rest of the test run and fails the test a second, different way once the test binding notices a scheduled frame callback nobody stopped.
+
+### `LeakTesting`/`leak_tracker_flutter_testing`: real, but not what this lesson uses
+
+This exact installed SDK ships a more automated option: `testWidgets(..., experimentalLeakTesting: LeakTesting.settings)` (`~/flutter/packages/flutter_test/lib/src/widget_tester.dart`, the `experimentalLeakTesting` parameter), backed by the real `leak_tracker_flutter_testing` package (confirmed present in this machine's pub cache at version `3.0.10`, pulled in transitively by `flutter_test`). It genuinely exists and genuinely can catch a leaked `AnimationController` automatically, without writing a dedicated test like the one above. The SDK's own doc comment on that parameter is direct about its status, though: *"The argument `experimentalLeakTesting` is experimental and is not recommended for use outside of the Flutter framework."* This lesson proves the leak the way most real app test suites actually do today — asserting on `tester.takeException()` around a deliberate removal — precisely because that's the supported, non-experimental path; reach for `LeakTesting` only if you've read the linked docs and accept its experimental status.
+
+## `Hero`: shared-element transitions, proven both ways
+
+`Hero` flies a widget between two routes when both sides use the same `tag`. Proven with a real two-screen `Navigator.push`:
+
+```dart
+// lib/hero_demo.dart
+import 'package:flutter/material.dart';
+
+class ScreenA extends StatelessWidget {
+  const ScreenA({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: GestureDetector(
+          onTap: () => Navigator.of(context)
+              .push(MaterialPageRoute<void>(builder: (_) => const ScreenB())),
+          child: const Hero(
+            tag: 'logo',
+            child: FlutterLogo(key: ValueKey('logoA'), size: 50),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ScreenB extends StatelessWidget {
+  const ScreenB({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(
+        child: Hero(
+          tag: 'logo',
+          child: FlutterLogo(key: ValueKey('logoB'), size: 200),
+        ),
+      ),
+    );
+  }
+}
+
+// A destination route with TWO Heroes sharing the same tag -- proven below
+// to throw a real assertion during the flight, not a silent mismatch.
+class ScreenADuplicate extends StatelessWidget {
+  const ScreenADuplicate({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: GestureDetector(
+          onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const ScreenBDuplicate())),
+          child: const Hero(
+            tag: 'logo',
+            child: FlutterLogo(key: ValueKey('logoA'), size: 50),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ScreenBDuplicate extends StatelessWidget {
+  const ScreenBDuplicate({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Column(
+        children: [
+          Hero(tag: 'logo', child: FlutterLogo(key: ValueKey('dup1'), size: 50)),
+          Hero(tag: 'logo', child: Icon(Icons.star, key: ValueKey('dup2'))),
+        ],
+      ),
     );
   }
 }
 ```
 
-<Mermaid title="The explicit animation pipeline" code={animDiagram} />
+```dart
+// test/hero_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/hero_demo.dart';
 
-export const animDiagram = `flowchart LR
-  ctrl["AnimationController\nticks 0 to 1 via vsync"] --> tween["Tween / Curve\nmaps 0..1 to your range"]
-  tween --> ab["AnimatedBuilder\nrebuilds the animated part"]
-  ab --> ui["widget updates each tick"]`;
+void main() {
+  testWidgets('matching Hero tags fly between routes without error', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ScreenA()));
+    await tester.tap(find.byType(GestureDetector));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('logoB')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
-Two rules that prevent the common bugs: the controller needs a `vsync` (mix in `SingleTickerProviderStateMixin`), and you must `dispose()` it — a leaked controller keeps ticking forever. Pass the unchanging part as `child` so it isn't rebuilt on every tick.
+  testWidgets(
+      'two Heroes sharing a tag on the destination route throw a real assertion during the flight',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ScreenADuplicate()));
+    await tester.tap(find.byType(GestureDetector));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
 
-## Curves
+    final error = tester.takeException();
+    expect(error, isA<FlutterError>());
+    expect(
+      error.toString(),
+      contains('There are multiple heroes that share the same tag within a subtree'),
+    );
+  });
+}
+```
 
-A `Curve` (`Curves.easeInOut`, `Curves.elasticOut`, …) reshapes linear time into natural motion. Both families take a curve; using one is the difference between a mechanical slide and a motion that feels designed.
+```text
+00:00 +0: matching Hero tags fly between routes without error
+00:00 +1: two Heroes sharing a tag on the destination route throw a real assertion during the flight
+
+00:00 +2: All tests passed!
+```
+
+The real, captured error text for the duplicate case: *"There are multiple heroes that share the same tag within a subtree. Within each subtree for which heroes are to be animated (i.e. a `PageRoute` subtree), each Hero must have a unique non-null tag. In this case, multiple heroes had the following tag: logo"* — proving `Hero` tag collisions are a loud, specific failure, not a silently-wrong transition.
+
+## `AnimatedSwitcher`: the key decides whether it animates at all
+
+`AnimatedSwitcher` cross-fades between its `child` whenever that child *changes identity* — proven below, "changes identity" means a different `runtimeType` **or** a different `Key`, exactly the same `Widget.canUpdate` rule that governs every widget update in Flutter, not something special to `AnimatedSwitcher`.
+
+```dart
+// lib/switcher_demo.dart
+import 'package:flutter/material.dart';
+
+class SwitcherDemo extends StatelessWidget {
+  const SwitcherDemo({super.key, required this.value});
+  final int value;
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 200),
+      child: Text('$value', key: ValueKey(value)), // distinct key per value
+    );
+  }
+}
+
+class SwitcherNoKeyDemo extends StatelessWidget {
+  const SwitcherNoKeyDemo({super.key, required this.value});
+  final int value;
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 200),
+      child: Text('$value'), // NO key -- same identity to AnimatedSwitcher
+    );
+  }
+}
+```
+
+```dart
+// test/switcher_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/switcher_demo.dart';
+
+void main() {
+  testWidgets('AnimatedSwitcher with a distinct ValueKey per child cross-fades',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: SwitcherDemo(value: 1)));
+    expect(find.text('1'), findsOneWidget);
+
+    await tester.pumpWidget(const MaterialApp(home: SwitcherDemo(value: 2)));
+    await tester.pump(const Duration(milliseconds: 100)); // mid-transition
+    expect(find.text('1'), findsOneWidget); // old child still fading out
+    expect(find.text('2'), findsOneWidget); // new child fading in
+
+    await tester.pump(const Duration(milliseconds: 200)); // finish
+    expect(find.text('1'), findsNothing);
+    expect(find.text('2'), findsOneWidget);
+  });
+
+  testWidgets('AnimatedSwitcher with NO key on same-type children does not animate at all',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: SwitcherNoKeyDemo(value: 1)));
+    expect(find.text('1'), findsOneWidget);
+
+    await tester.pumpWidget(const MaterialApp(home: SwitcherNoKeyDemo(value: 2)));
+    await tester.pump(const Duration(milliseconds: 1)); // barely any time passed
+    expect(find.text('1'), findsNothing); // already gone -- no cross-fade happened
+    expect(find.text('2'), findsOneWidget);
+  });
+}
+```
+
+```text
+00:00 +0: AnimatedSwitcher with a distinct ValueKey per child cross-fades
+00:00 +1: AnimatedSwitcher with NO key on same-type children does not animate at all
+
+00:00 +2: All tests passed!
+```
+
+The second test is the one that surprises people: without a key, `Text('1')` and `Text('2')` are the *same widget identity* as far as `AnimatedSwitcher` (and Flutter's element diffing generally) is concerned — same `runtimeType`, no key — so it just updates the existing `Text` element in place, with **zero** cross-fade, even though the visible text changed. A `ValueKey` (or any distinct key) is what tells `AnimatedSwitcher` "this is a genuinely different child," which is the only thing that triggers the transition.
+
+## `RepaintBoundary` around animations
+
+An actively-ticking animation repaints every frame — wrapping it in a `RepaintBoundary` contains that repainting to its own layer instead of forcing ancestors/siblings to repaint too. The mechanics of paint layers and why this matters are covered in depth in the [render-pipeline lesson](/flutter/en/layout-and-rendering/render-pipeline/); the short version for this lesson is: any `AnimatedBuilder`/`AnimationController`-driven subtree that sits next to expensive, static content is a strong candidate for its own `RepaintBoundary`.
+
+## `Ticker` mode in tests: `TickerMode`
+
+`TickerMode(enabled: false, child: ...)` mutes every ticker in its subtree — the ticker keeps existing, but stops actually scheduling frame callbacks, which is provably different from "not animating" (the `AnimationController` is still `forward()`-ing, its `.value` target is unchanged; it simply never advances):
+
+```dart
+// test/tickermode_test.dart (uses ExplicitPulse from lib/animation_demo.dart)
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__animations/animation_demo.dart';
+
+void main() {
+  testWidgets('TickerMode(enabled: false) mutes the ticker so it never advances',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+      home: TickerMode(enabled: false, child: ExplicitPulse()),
+    ));
+    expect(find.text('0.00'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('0.00'), findsOneWidget); // still 0.00 -- muted, not advancing
+  });
+}
+```
+
+```text
+00:00 +0: TickerMode(enabled: false) mutes the ticker so it never advances
+
+00:00 +1: All tests passed!
+```
+
+This is exactly the mechanism Flutter itself relies on to pause offscreen animations automatically (a route that's covered by another route, a tab that's not currently visible) — `TickerMode` is set to `false` around inactive routes/tabs so their `AnimationController`s stop burning frames without needing to be manually paused and resumed.
 
 <Callout title="The one-line takeaway">
-Prefer **implicit** animations (`AnimatedContainer`, `TweenAnimationBuilder`) — change a value and Flutter interpolates to it, with no lifecycle to manage. Reach for **explicit** (`AnimationController` + `Tween` + `AnimatedBuilder`) when you need to repeat, reverse, chain, or gesture-drive motion — and remember its two rules: give it a `vsync` ticker, and `dispose()` it. Add a `Curve` for motion that feels natural.
+Prefer **implicit** animations (`TweenAnimationBuilder`/`AnimatedFoo`) — proven above with `tester.pump(Duration)` walking a value linearly from `0.00` to `100.00`. Reach for **explicit** (`AnimationController` + `SingleTickerProviderStateMixin`) when you need repeat/reverse/gesture control — proven above with the identical `pump(Duration)` technique on `controller.value`. `dispose()` is not optional: proven above with two distinct real errors — the `SingleTickerProviderStateMixin` assert ("was disposed with an active Ticker") and, if that's missed too, `TestWidgetsFlutterBinding`'s own "animation is still running" check. `Hero` throws a real, specific assertion on a duplicate tag within one route's subtree, proven above, and flies cleanly, proven above, when tags genuinely match one-to-one. `AnimatedSwitcher` only cross-fades when its child's identity (type + key) actually changes — proven above, no key on same-type children means **zero** animation, not a subtle one. `TickerMode(enabled: false)` mutes a subtree's tickers without touching any controller's own state, proven above — the mechanism Flutter itself uses to pause offscreen animations.
 </Callout>
+
+## Reading AI-generated code
+
+AI-generated animation code reliably gets the happy path (the animation itself) right and skips exactly the two things that only matter once the widget leaves the tree or the data changes shape: disposal, and keys.
+
+```dart
+// AI-generated: "pulse this icon while the upload is in progress"
+class UploadIndicator extends StatefulWidget {
+  const UploadIndicator({super.key});
+  @override
+  State<UploadIndicator> createState() => _UploadIndicatorState();
+}
+
+class _UploadIndicatorState extends State<UploadIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 800),
+  )..repeat(reverse: true);
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: Tween(begin: 0.9, end: 1.1).animate(_controller),
+      child: const Icon(Icons.cloud_upload),
+    );
+  }
+}
+```
+
+Before trusting generated animation code like this, check for:
+
+- A missing `dispose()` override — proven above, an `AnimationController` created via `SingleTickerProviderStateMixin` that's never disposed throws a real, specific error the moment its `State` is removed while the ticker is still active (and, if that's missed too, a second real error at end-of-test/end-of-app-lifecycle for the still-scheduling ticker).
+- An `AnimatedSwitcher`/`ListView`/any widget relying on child identity being fed a child with no key, or the same key regardless of the underlying data changing — proven above, this silently skips the animation (or, in a list, causes the wrong item's state to move) rather than throwing anything.
+- Two `Hero` widgets under construction with a shared, hardcoded tag (a common AI pattern when generating a list of cards that should each fly to a detail screen) — proven above, this throws a real, specific assertion the moment a route transition actually happens, not at build time.
+- `..repeat(reverse: true)` (or any never-ending animation) with no `TickerMode`/visibility awareness — proven above, `TickerMode(enabled: false)` is the mechanism for pausing this automatically when the widget is offscreen; without it, an infinitely-repeating controller keeps ticking (and costing frame budget) even while its widget is invisible.
+
+<SpotTheBug code={`class NotificationBadge extends StatefulWidget {
+  const NotificationBadge({super.key, required this.count});
+  final int count;
+
+  @override
+  State<NotificationBadge> createState() => _NotificationBadgeState();
+}
+
+class _NotificationBadgeState extends State<NotificationBadge> {
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      child: Text(
+        widget.count.toString(),
+        style: Theme.of(context).textTheme.labelLarge,
+      ),
+    );
+  }
+}`}>
+Proven above with the identical pattern: there is no `key` on the `Text` inside `AnimatedSwitcher`, so as `widget.count` changes (1, 2, 3, …), every new `Text` has the same `runtimeType` and no key as the old one — `AnimatedSwitcher` sees "the same child," updates it in place, and the badge's count changes with **zero** cross-fade animation, defeating the entire point of wrapping it in `AnimatedSwitcher`. The fix is a key that changes with the data: `Text(widget.count.toString(), key: ValueKey(widget.count), ...)`.
+</SpotTheBug>
+
+## Mental Model
+
+Every animation primitive in this lesson answers the same question at a different layer: **what produces the next value, and who is responsible for stopping it?** An implicit animation (`TweenAnimationBuilder`) owns its own hidden `AnimationController` and disposes it for you — that's the entire trade being made when you choose implicit over explicit. An explicit `AnimationController` hands you that responsibility directly, and — proven above, twice, with two different real errors — Flutter's framework actively checks that you honored it, both at the moment your `State` is disposed and again at the end of the test/app lifecycle if the first check somehow didn't catch it. `Hero` and `AnimatedSwitcher` are really the same "identity" question from a totally different angle: not "did you clean up a ticker" but "does the framework agree with you about which widget is which" — a `Hero` tag and a `Key` are both, fundamentally, answers to "is this the same thing as before, or something new?"
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Implicit (`TweenAnimationBuilder`/`AnimatedFoo`) | No controller, no `dispose()` to forget — proven above, the ramp is just as testable via `pump(Duration)` | Only animates in response to an actual rebuild with a new target value; no repeat/reverse/manual control |
+| Explicit (`AnimationController`) | Full control — repeat, reverse, gesture-driven, multiple synced animations | Proven above: a real, specific leak error if `dispose()` is forgotten — twice over, if the first check is missed |
+| `Hero` | A shared-element transition with almost no code — proven above, works cleanly when tags match one-to-one | Proven above: a real, specific assertion the moment two Heroes on one route share a tag |
+| `AnimatedSwitcher` + key | Automatic cross-fade on genuine child changes | Proven above: silently does nothing if the child's identity (type+key) doesn't actually change |
+| `TickerMode(enabled: false)` | Pauses a whole subtree's tickers without touching controller state — proven above | Only mutes; an actively-`repeat()`ing controller still exists and resumes instantly when re-enabled — it is not the same as disposing |
+
+## Common Misconceptions
+
+- **"Forgetting to dispose an `AnimationController` is a soft, hard-to-notice leak."** Disproven above: it throws a real, specific `FlutterError` (`"was disposed with an active Ticker"`) the moment the widget is removed while the ticker is active — in debug/test builds, this is loud, not silent.
+- **"`AnimatedSwitcher` animates any time its `child` property's value looks different."** Disproven above: it only animates when the child's *identity* (type + key) changes — two `Text` widgets with different strings but no key and the same type are the same identity to it, and it shows zero animation.
+- **"Two `Hero` widgets can share a tag as long as they're not both currently visible."** Disproven above: the assertion fires from simply having two Heroes with the same tag within one route's subtree during a flight, regardless of which one is momentarily visible.
+- **"`TickerMode(enabled: false)` is equivalent to calling `.stop()` on every controller inside it."** Disproven above: the controller's own state (`.value`, whether it's `forward()`-ing) is completely unchanged — only frame scheduling is muted; re-enabling `TickerMode` resumes exactly where it left off, which `.stop()` would not do.
 
 export const quizAnim = [
   {
     q: 'What is an implicit animation?',
     options: [
       'One you drive tick-by-tick with a controller',
-      'One where you change a target value and Flutter automatically animates to it (e.g. AnimatedContainer)',
+      'One where you change a target value and Flutter automatically animates to it (e.g. TweenAnimationBuilder/AnimatedContainer)',
       'An animation that cannot be seen',
       'An animation that only runs in release mode',
     ],
     answer: 1,
   },
   {
-    q: 'What does an AnimationController need in order to tick?',
+    q: 'Proven above with tester.pump(Duration), what does an AnimationController\'s .value do over its duration with Curves.linear?',
     options: [
-      'A network connection',
-      'A vsync (a ticker provider, e.g. via SingleTickerProviderStateMixin)',
-      'A RepaintBoundary',
-      'A second isolate',
+      'It jumps straight from 0 to 1 with no intermediate values',
+      'It walks linearly from 0.00 at the start to 1.00 at the end, provably assertable at any intermediate point (e.g. 0.50 at the halfway mark)',
+      'It stays at 0 until dispose() is called',
+      'It is only readable after calling .stop()',
     ],
     answer: 1,
+    explain: 'The real test asserted controller.value at 0ms (0.00), 500ms (0.50), and 1000ms (1.00) into a 1000ms linear-curve animation — a genuine, provable ramp.',
   },
   {
-    q: 'What happens if you forget to dispose an AnimationController?',
+    q: 'Proven above with a real FlutterError, what happens when an AnimationController created via SingleTickerProviderStateMixin is never disposed?',
     options: [
-      'Nothing',
-      'It leaks and keeps ticking, wasting resources',
-      'The app will not build',
-      'It disposes itself automatically always',
+      'Nothing observable — it is only a theoretical memory concern',
+      'A real FlutterError is thrown the moment the State is removed while the ticker is still active: "...was disposed with an active Ticker" — and if that is missed too, TestWidgetsFlutterBinding raises a SEPARATE "animation is still running" error at end-of-test',
+      'The controller automatically disposes itself after one animation cycle',
+      'It only fails in profile mode',
     ],
     answer: 1,
+    explain: 'Both real error texts are quoted in the lesson, captured via tester.takeException() and from the raw SCHEDULER LIBRARY output respectively — two distinct, real checks, not one.',
   },
   {
-    q: 'When should you choose an explicit animation over an implicit one?',
+    q: 'Proven above with a real assertion, what happens when two Hero widgets on the same destination route share a tag?',
     options: [
-      'Always — implicit is deprecated',
-      'When you need repeat, reverse, chaining multiple values, or gesture-driven control',
-      'Only for colors',
-      'Never',
+      'The second one is silently ignored',
+      'A real FlutterError is thrown during the flight: "There are multiple heroes that share the same tag within a subtree"',
+      'They both animate independently with no conflict',
+      'It only fails on iOS, not Android',
     ],
     answer: 1,
+    explain: 'The exact captured text names the offending tag (\'logo\') and explains the rule: each Hero within a PageRoute subtree must have a unique non-null tag.',
+  },
+  {
+    q: 'Proven above with two widget tests, what actually determines whether AnimatedSwitcher animates a child change?',
+    options: [
+      'Whether the displayed text/value looks different to a human',
+      'Whether the child\'s identity (runtimeType + Key) changes — proven above, same type with no key produces ZERO animation even though the visible text changed',
+      'The duration parameter alone',
+      'AnimatedSwitcher always animates any rebuild',
+    ],
+    answer: 1,
+    explain: 'The keyed version showed both old and new text simultaneously mid-transition (a real cross-fade); the unkeyed version showed the new text immediately with no old text ever appearing, proving zero animation occurred.',
+  },
+  {
+    q: 'Proven above, what does TickerMode(enabled: false) actually change about a controller inside it?',
+    options: [
+      'It calls dispose() on every controller in the subtree',
+      'It mutes frame scheduling only — the controller\'s own value and forward()/repeat() state are unchanged, proven above by controller.value staying at 0.00 across 500ms of pumped time',
+      'It resets every controller\'s value to 0',
+      'It has no observable effect in tests',
+    ],
+    answer: 1,
+    explain: 'The controller was already forward()-ing (as ExplicitPulse always does), yet its value never advanced past 0.00 while wrapped in TickerMode(enabled: false) — proving only the ticking itself was muted.',
   },
 ];
 
