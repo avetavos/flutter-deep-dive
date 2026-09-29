@@ -1,0 +1,255 @@
+---
+title: Verification tools
+description: 'What flutter analyze, analysis_options.yaml strict modes, flutter_lints/riverpod_lint/custom_lint, dart fix --dry-run, flutter test (--coverage, golden tests), flutter build web --wasm, DevTools, DartPad, and this course''s own harness each actually prove — with real output.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+None of the tools below overlap perfectly, and none is close to complete on its own — the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**'s "Caught by" line for each of its 28 entries names exactly which one (if any) of the tools below would have caught it, and most of those 28 name none of them at the point the bug is introduced. Every output below is real, freshly captured for this module against a throwaway scratch project on this Mac (Flutter 3.47.5, Dart 3.13.4), never the course's own shared probe.
+
+## `flutter analyze` — proves types and syntax, never runtime behavior
+
+This is the cheapest, fastest gate in this whole ladder, and it is important to be precise about what it actually rules out. A `ConsumerWidget` with no `ProviderScope` above it, a `ListView` about to overflow its height constraint, and a `compute()` closure about to fail at runtime all analyze perfectly cleanly:
+
+```text
+$ flutter analyze lib/proof/a1_provider_scope.dart lib/proof/c1_unbounded_listview.dart
+No issues found!
+```
+
+`flutter analyze` is a real, useful, zero-cost gate for a genuinely different class of bug (a typo'd parameter name, a wrong argument type, an undefined method) than almost everything runtime-shaped in this module's catalog — see entries 5, 18, 19, 24, 25, 27, and 28 for the diagnostics it DOES catch.
+
+## `analysis_options.yaml` strict modes — real, current gaps in what's enabled by default
+
+Two separate findings, both proven fresh for this module:
+
+**`flutter_lints` 6.0.0 does not ship the general `prefer_const_constructors` rule** — confirmed by reading the package's own `flutter.yaml` rule list directly (it has `prefer_const_constructors_in_immutables` only) and by a real before/after `flutter analyze` run:
+
+```text
+$ flutter analyze lib/proof/h1_prefer_const.dart   # flutter_lints 6 alone
+No issues found!
+
+$ flutter analyze lib/proof/h1_prefer_const.dart   # same file, prefer_const_constructors: true added
+info • Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to
+the constructor invocation • prefer_const_constructors
+```
+
+`very_good_analysis` 11.0.0, by contrast, DOES include `prefer_const_constructors` — confirmed by reading its own shipped `analysis_options.11.0.0.yaml` rule list directly, line 131.
+
+**The three `language:` strict-mode flags** — `strict-casts`, `strict-inference`, `strict-raw-types` — are analyzer options, not lint rules, off by default, and are already proven in full with real diagnostics in **[Project and Tooling](/flutter/en/tooling-and-production/project-and-tooling/)**; this module does not re-prove them, only cross-references them as part of the same ladder.
+
+## `flutter_lints` / `riverpod_lint` / `custom_lint` — a real, current version-resolution finding
+
+This is worth stating precisely, because it directly contradicts the common assumption that `riverpod_lint` still runs on top of `custom_lint`: **as of this course's own dependency check (2026-09-29), the latest `riverpod_lint` (3.1.9) no longer depends on `custom_lint` at all.** Reading its own `pubspec.yaml` confirms this — its dependencies are `analysis_server_plugin`, `analyzer`, and `analyzer_plugin`, with no `custom_lint`/`custom_lint_builder` anywhere. `riverpod_lint` migrated to Dart's native analyzer-plugin system somewhere around 3.1.0.
+
+Trying to install `custom_lint` and `riverpod_lint` together, at their latest versions, fails to resolve at all:
+
+```text
+$ flutter pub get   # custom_lint: ^0.8.1, riverpod_lint: ^3.1.9
+Because riverpod_lint >=3.1.4-dev.1 depends on analyzer_plugin ^0.14.0 and custom_lint >=0.7.4
+depends on analyzer_plugin ^0.13.0, riverpod_lint >=3.1.4-dev.1 is incompatible with custom_lint
+>=0.7.4.
+```
+
+Pinning an OLDER `riverpod_lint` (3.1.0) to dodge that conflict resolves — but only by also pinning `riverpod`/`flutter_riverpod` down to 3.1.0, nowhere near this course's target 3.4.3:
+
+```text
+$ flutter pub get   # custom_lint: ^0.8.1, riverpod_lint: 3.1.0
++ riverpod 3.1.0 (3.4.3 available)
++ riverpod_lint 3.1.0 (3.1.9 available)
+Changed 58 dependencies!
+```
+
+**The real, current, correct setup does not use `custom_lint` for `riverpod_lint` at all.** `riverpod_lint`'s own README documents the native plugin mechanism directly:
+
+```yaml
+# analysis_options.yaml
+analyzer:
+  plugins:
+    - riverpod_lint
+
+plugins:
+  riverpod_lint: 3.1.9
+```
+
+Set up this way (no `custom_lint` dependency needed anywhere), `dart analyze` produces a REAL `riverpod_lint` finding — captured fresh for this module, on a `ConsumerWidget` with no `ProviderScope`:
+
+```text
+$ dart analyze
+warning - lib/main.dart:4:3 - Flutter applications using Riverpod must contain a ProviderScope at
+the root of their widget tree. - missing_provider_scope
+```
+
+<Callout title="custom_lint is not obsolete in general — just not for riverpod_lint any more">
+`custom_lint` still exists and still works for OTHER plugins that haven't migrated to the native analyzer-plugin system. The specific, current finding here is narrower: `riverpod_lint` 3.1.0+ does not need it, and trying to force the old `custom_lint`-based setup for `riverpod_lint` at its latest version is what actually fails to resolve.
+</Callout>
+
+## `dart fix --dry-run` — shows what's mechanically fixable, without applying it
+
+Real output for the `cacheExtent` deprecation from the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**'s entry 24:
+
+```text
+$ dart fix --dry-run lib/proof/g3_cache_extent.dart
+Computing fixes in g3_cache_extent.dart (dry run)...
+
+1 proposed fix in 1 file.
+
+g3_cache_extent.dart
+  deprecated_member_use - 1 fix
+
+To fix an individual diagnostic, run one of:
+  dart fix --apply --code=deprecated_member_use lib/proof/g3_cache_extent.dart
+```
+
+Worth noting precisely: `dart fix` flags that a `deprecated_member_use` diagnostic HAS a proposed fix — it does not by itself tell a reader whether that mechanical fix (a straight rename) is actually correct. Entry 24 in the catalog is exactly this case: `cacheExtent: 500` → `scrollCacheExtent: 500` mechanically "fixes" the deprecation warning but produces a NEW, different error (`ScrollCacheExtent` is a sealed class, not a `double`) — `dart fix --apply` alone does not know that, and a reviewer still has to check.
+
+## `flutter test` — proves behavior, including `--coverage` and golden tests
+
+Every dual-assert and fail-then-pass test in the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)** is a `flutter test` proof. Two further modes worth knowing:
+
+**`--coverage`** produces a real `coverage/lcov.info`, line-by-line:
+
+```text
+$ flutter test --coverage test/proof/a4_late_uninitialized_test.dart
+00:00 +2: All tests passed!
+
+$ cat coverage/lcov.info
+SF:lib/proof/a4_late_uninitialized.dart
+DA:6,2
+LF:1
+LH:1
+end_of_record
+```
+
+`DA:6,2` means line 6 was hit twice across the test run — real, per-line execution counts, not an estimate.
+
+**Golden tests** compare a widget's actual rendered pixels against a saved reference PNG. Generating and then genuinely breaking one, fresh for this module:
+
+```text
+$ flutter test --update-goldens test/proof/golden_demo_test.dart
+✓ golden: a simple badge matches the reference PNG
+00:00 +1: All tests passed!
+
+$ # change the badge's color, then re-run WITHOUT --update-goldens:
+$ flutter test test/proof/golden_demo_test.dart
+Golden "badge.png": Pixel test failed, 0.83%, 4000px diff detected.
+Failure feedback can be found at .../test/proof/failures
+```
+
+A golden test catches ANY visual regression — including ones that no assertion would ever think to check for — but is inherently brittle across different rendering environments (font hinting, OS-level anti-aliasing); this course's own harness does not generate or check golden files for lesson fences, for exactly that portability reason.
+
+## `flutter build web --wasm` — a real portability gate
+
+Proven fresh for this module: the exact `dart:io`/`Platform.isIOS` snippet from the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**'s entry 19 compiles cleanly under BOTH the default JS target and `--wasm`:
+
+```text
+$ flutter build web --release
+✓ Built build/web
+
+$ flutter build web --wasm --release
+┌─ New feature ──────────────────────────────────────────────────────────────┐
+│   WebAssembly compilation is new. Understand the details before deploying  │
+│   to production. See https://flutter.dev/to/wasm for more information.    │
+└──────────────────────────────────────────────────────────────────────────┘
+✓ Built build/web
+```
+
+Both builds succeed with zero warning about `dart:io` — `--wasm` is a portability gate for a DIFFERENT compile target, not a stricter analyzer; it does not catch runtime-only bugs any more than the default web build does.
+
+## DevTools — documented, not run (no device in this environment)
+
+Per this module's hard constraint (no emulator/device exists in this environment), DevTools' widget inspector, layout explorer, and performance/memory views are not screenshotted here. What DevTools would add on top of everything above, per its own documentation: a live widget-tree inspector (would show a missing `ProviderScope`'s actual absence in the tree, not just the resulting crash text), a layout explorer that visualizes constraints directly (would show entry 9's unbounded height visually, before it throws), and a memory view that would show entry 22's leaked `Ticker` accumulating over time, not just the one-time dispose-time assertion this catalog captures.
+
+## DartPad — embedded elsewhere in this course, not duplicated here
+
+This course's `DartPad.astro` component (embedded in `dart-language-tour` and `widgets-and-the-tree`) is maintained separately from this module. Most of this catalog's snippets need packages outside DartPad's whitelist (`flutter_riverpod`, `go_router`) or a full `flutter test` run DartPad cannot perform, so this lesson does not attempt its own embed.
+
+{/* DartPad slot: verification */}
+
+## This course's own harness: `tools/verify-snippets.mjs`
+
+Every fence in this module that declares a real path on its first line (`// lib/ai-bug-catalog/<name>.dart`, `// test/ai-bug-catalog/<name>_test.dart`) is collected and checked by this repository's own harness — read `tools/verify-snippets.mjs`'s header comment (its first ~150 lines) before trusting any description of it secondhand, including this one. Real, freshly run against this exact module's catalog:
+
+```text
+$ npm run -s verify
+reading-flutter: 91 / 1 / 6 / 19   # collected / skipped-no-path / expect-error / tests
+
+$ npm run -s verify -- --test reading-flutter/ai-bug-catalog
+reading-flutter/ai-bug-catalog: 16/16 passed
+```
+
+A fence whose first line contains `@expect-error` (entries 5, 14, 27, and 28's buggy snippets in the catalog) is deliberately NOT collected — the harness skips it entirely, and the lesson prose carries the real, separately-captured output instead, exactly like every other module in this course.
+
+**Honest, stated limits of this harness, read directly from its own header:** it has **no `--build` mode** — `flutter build web`/`apk` per lesson was assessed as too slow for routine verification, and this is a documented, accepted gap, not an oversight (this lesson's own `flutter build web --release`/`--wasm` proofs for entries 19 and 26 were run by hand in a scratch project for exactly that reason, not through the harness). Codegen output (`build_runner`, `riverpod_generator`, `.g.dart` files) is not generated by the harness either — a lesson that needs generated code ships the `.g.dart` content as its own real fence and says in prose that it is generated; this module's catalog has no codegen-dependent entries, so this limit does not apply here directly.
+
+## Mental Model
+
+<Mermaid title="Static tools prove things from source alone; dynamic tools need a real run" code={verificationToolsDiagram} />
+
+export const verificationToolsDiagram = `flowchart TD
+  subgraph Static["Static (no run needed)"]
+    Analyze["flutter analyze<br/>types/syntax only, never runtime behavior"]
+    Fix["dart fix --dry-run<br/>mechanically fixable, not necessarily CORRECTLY fixed"]
+    Lint["riverpod_lint (native plugin)<br/>missing_provider_scope and more"]
+  end
+  subgraph Dynamic["Needs a real run"]
+    Test["flutter test<br/>proves behavior; --coverage counts real executions"]
+    Golden["flutter test --update-goldens<br/>catches ANY visual regression, brittle across environments"]
+    Build["flutter build web / --wasm<br/>proves it COMPILES, never that it's safe to RUN"]
+  end
+  subgraph NotRun["Documented, not run here"]
+    DevTools["DevTools<br/>no device in this environment"]
+    DartPad["DartPad<br/>most snippets need packages outside its whitelist"]
+  end
+  subgraph Harness["This course's own harness"]
+    Verify["npm run verify / --test<br/>collects real path-commented fences only"]
+  end
+`;
+
+<Callout title="The one-line takeaway">
+Every tool on this page is a filter, not a verdict — even run together, they leave most of the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**'s 28 patterns uncaught until a real dispose, a real reorder, a real navigation, a real platform run, or a real release build passes. Run `flutter analyze`/`dart fix --dry-run` first (fast, no run needed), then `flutter test` (including `--coverage`/goldens where they apply) and a real `flutter build web --wasm`, then still work through the **[Review Checklist](/flutter/en/reading-flutter/review-checklist/)** by eye for everything only a second event can surface.
+</Callout>
+
+export const quizVerificationTools = [
+  {
+    q: "```text\n$ flutter pub get   # custom_lint: ^0.8.1, riverpod_lint: ^3.1.9\nBecause riverpod_lint >=3.1.4-dev.1 depends on analyzer_plugin ^0.14.0 and custom_lint >=0.7.4\ndepends on analyzer_plugin ^0.13.0, riverpod_lint >=3.1.4-dev.1 is incompatible with custom_lint\n>=0.7.4.\n```\nGiven this real, current pub resolution failure, what is the actual correct way to run riverpod_lint today, per its own README?",
+    options: [
+      "Downgrade flutter_riverpod until an old riverpod_lint/custom_lint combo resolves",
+      "Do not use custom_lint at all -- riverpod_lint 3.1.0+ migrated to Dart's native analyzer-plugin system, configured directly via `analyzer: plugins:` and a top-level `plugins:` block in analysis_options.yaml, with no custom_lint dependency anywhere",
+      "custom_lint is required and this is simply a known, unfixable bug",
+      "Only run riverpod_lint in CI, never locally",
+    ],
+    answer: 1,
+    explain: "Proven directly: setting up analysis_options.yaml per riverpod_lint's own README (analyzer: plugins: - riverpod_lint, plus a top-level plugins: riverpod_lint: 3.1.9 block) produces a real missing_provider_scope finding via plain `dart analyze` -- no custom_lint package installed anywhere.",
+  },
+  {
+    q: "Why does this lesson say `dart fix --dry-run` reporting a fix for `deprecated_member_use` is not the same as that fix being CORRECT?",
+    options: [
+      "dart fix never actually works",
+      "dart fix flags that a diagnostic HAS a mechanical fix available -- it doesn't verify the fix is semantically right. The AI Bug Catalog's entry 24 is exactly this: renaming cacheExtent to scrollCacheExtent mechanically clears the deprecation warning but trades it for a real argument_type_not_assignable error, because scrollCacheExtent takes a new sealed class, not a plain double",
+      "dart fix only works on test files",
+      "This only applies to deprecated_member_use, no other diagnostic",
+    ],
+    answer: 1,
+    explain: "Proven directly in the AI Bug Catalog's entry 24: `scrollCacheExtent: 500` (the naive rename) produces `error - The argument type 'int' can't be assigned to the parameter type 'ScrollCacheExtent?'` -- a mechanical rename alone does not produce clean code here.",
+  },
+  {
+    q: "Why does this lesson say `flutter build web --wasm` succeeding proves compilation, never runtime safety, using entry 19's dart:io example specifically?",
+    options: [
+      "--wasm always fails on dart:io usage, so this is a trick question",
+      "The exact Platform.isIOS-touching snippet from entry 19 compiled cleanly under BOTH the default JS target and --wasm, with zero warning about dart:io in either -- the real UnsupportedError only throws when Platform.isIOS actually EXECUTES in a browser, which neither build step does",
+      "--wasm is strictly a linter, not a compiler",
+      "This only matters for iOS-specific code, not Android checks",
+    ],
+    answer: 1,
+    explain: "Proven directly: both `flutter build web --release` and `flutter build web --wasm --release` built the exact same BuggyPlatformBadge snippet successfully, fresh for this module -- confirming --wasm is a portability gate for the compile target, not a stricter runtime-behavior check.",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/verification-tools" questions={quizVerificationTools} />
+
+<ProgressTracker client:visible id="reading-flutter/verification-tools" />

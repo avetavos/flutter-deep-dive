@@ -1,0 +1,255 @@
+---
+title: Verification tools
+description: 'flutter analyze, โหมดเข้มของ analysis_options.yaml, flutter_lints/riverpod_lint/custom_lint, dart fix --dry-run, flutter test (--coverage, golden test), flutter build web --wasm, DevTools, DartPad, และ harness ของคอร์สนี้เอง แต่ละตัวพิสูจน์อะไรได้จริง — พร้อมผลลัพธ์จริง'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ไม่มีเครื่องมือด้านล่างตัวไหนที่ทับซ้อนกันสมบูรณ์ และไม่มีตัวไหนที่ใกล้สมบูรณ์ด้วยตัวเองเลย — บรรทัด "จับได้โดย" ของแต่ละ entry ทั้ง 28 ตัวใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** เอ่ยชื่อเครื่องมือด้านล่างตัวใดตัวหนึ่งเจาะจง (ถ้ามี) ที่จะจับมันได้ และ entry ส่วนใหญ่ในจำนวน 28 ตัวนั้นไม่เอ่ยชื่อเครื่องมือตัวไหนเลย ณ จุดที่บั๊กถูกใส่เข้าไป ผลลัพธ์ทุกอย่างด้านล่างเป็นของจริง จับสดสำหรับโมดูลนี้กับโปรเจกต์ scratch แบบทิ้งขว้างบน Mac เครื่องนี้ (Flutter 3.47.5, Dart 3.13.4) ไม่ใช่ probe ที่ใช้ร่วมกันของคอร์ส
+
+## `flutter analyze` — พิสูจน์ type และ syntax ไม่เคยพิสูจน์พฤติกรรมตอน runtime
+
+นี่คือ gate ที่ถูกที่สุดและเร็วที่สุดในบันไดทั้งหมดนี้ และสำคัญที่ต้องแม่นยำว่ามันตัดอะไรออกไปได้จริง ๆ `ConsumerWidget` ที่ไม่มี `ProviderScope` อยู่เหนือมัน, `ListView` ที่กำลังจะ overflow constraint ความสูงของมัน, และ closure ของ `compute()` ที่กำลังจะพังตอน runtime ล้วน analyze ผ่านสะอาดสมบูรณ์:
+
+```text
+$ flutter analyze lib/proof/a1_provider_scope.dart lib/proof/c1_unbounded_listview.dart
+No issues found!
+```
+
+`flutter analyze` เป็น gate จริง มีประโยชน์ ไม่มีต้นทุน สำหรับบั๊กคนละประเภทจริง ๆ (ชื่อ parameter สะกดผิด, argument type ผิด, method ที่ไม่มีอยู่จริง) เทียบกับสิ่งที่มีรูปร่างเป็น runtime แทบทั้งหมดใน catalog ของโมดูลนี้ — ดู entry 5, 18, 19, 24, 25, 27, และ 28 สำหรับ diagnostic ที่มันจับได้จริง
+
+## โหมดเข้มของ `analysis_options.yaml` — ช่องว่างจริงและเป็นปัจจุบันในสิ่งที่เปิดใช้งานโดย default
+
+สองข้อค้นพบแยกกัน ทั้งคู่พิสูจน์สดสำหรับโมดูลนี้:
+
+**`flutter_lints` 6.0.0 ไม่มี rule `prefer_const_constructors` แบบทั่วไป** — ยืนยันจากการอ่าน rule list ของ `flutter.yaml` ในแพ็กเกจเองตรง ๆ (มีแค่ `prefer_const_constructors_in_immutables`) และจากการรัน `flutter analyze` ก่อน/หลังจริง:
+
+```text
+$ flutter analyze lib/proof/h1_prefer_const.dart   # flutter_lints 6 alone
+No issues found!
+
+$ flutter analyze lib/proof/h1_prefer_const.dart   # same file, prefer_const_constructors: true added
+info • Use 'const' with the constructor to improve performance. Try adding the 'const' keyword to
+the constructor invocation • prefer_const_constructors
+```
+
+`very_good_analysis` 11.0.0 ในทางตรงกันข้าม มี `prefer_const_constructors` อยู่ — ยืนยันจากการอ่าน rule list ของ `analysis_options.11.0.0.yaml` ที่ shipped จริงตรง ๆ บรรทัด 131
+
+**flag โหมดเข้มสามตัวของ `language:`** — `strict-casts`, `strict-inference`, `strict-raw-types` — เป็น option ของ analyzer ไม่ใช่ lint rule ปิดอยู่โดย default และพิสูจน์ครบแล้วพร้อม diagnostic จริงใน **[Project and Tooling](/flutter/th/tooling-and-production/project-and-tooling/)** โมดูลนี้ไม่ได้พิสูจน์ซ้ำ แค่อ้างอิงไขว้เป็นส่วนหนึ่งของบันไดเดียวกัน
+
+## `flutter_lints` / `riverpod_lint` / `custom_lint` — ข้อค้นพบเรื่อง version resolution จริงและเป็นปัจจุบัน
+
+เรื่องนี้คุ้มค่าที่จะพูดให้แม่นยำ เพราะมันขัดแย้งตรง ๆ กับสมมติฐานทั่วไปที่ว่า `riverpod_lint` ยังรันอยู่บน `custom_lint`: **ณ วันที่คอร์สนี้เช็ค dependency เอง (2026-09-29) `riverpod_lint` เวอร์ชันล่าสุด (3.1.9) ไม่ได้พึ่ง `custom_lint` เลยแม้แต่น้อย** การอ่าน `pubspec.yaml` ของมันเองยืนยันเรื่องนี้ — dependency ของมันคือ `analysis_server_plugin`, `analyzer`, และ `analyzer_plugin` ไม่มี `custom_lint`/`custom_lint_builder` อยู่ที่ไหนเลย `riverpod_lint` ย้ายไปใช้ native analyzer-plugin system ของ Dart ราว ๆ เวอร์ชัน 3.1.0
+
+การพยายามติดตั้ง `custom_lint` และ `riverpod_lint` ด้วยกัน ที่เวอร์ชันล่าสุดของทั้งคู่ resolve ไม่ผ่านเลย:
+
+```text
+$ flutter pub get   # custom_lint: ^0.8.1, riverpod_lint: ^3.1.9
+Because riverpod_lint >=3.1.4-dev.1 depends on analyzer_plugin ^0.14.0 and custom_lint >=0.7.4
+depends on analyzer_plugin ^0.13.0, riverpod_lint >=3.1.4-dev.1 is incompatible with custom_lint
+>=0.7.4.
+```
+
+การ pin `riverpod_lint` เวอร์ชันเก่ากว่า (3.1.0) เพื่อหลบความขัดแย้งนั้น resolve ได้จริง — แต่ต้อง pin `riverpod`/`flutter_riverpod` ลงไปที่ 3.1.0 ด้วย ห่างไกลจากเป้าหมาย 3.4.3 ของคอร์สนี้มาก:
+
+```text
+$ flutter pub get   # custom_lint: ^0.8.1, riverpod_lint: 3.1.0
++ riverpod 3.1.0 (3.4.3 available)
++ riverpod_lint 3.1.0 (3.1.9 available)
+Changed 58 dependencies!
+```
+
+**วิธีตั้งค่าที่ถูกต้องและเป็นปัจจุบันจริง ๆ ไม่ใช้ `custom_lint` กับ `riverpod_lint` เลย** README ของ `riverpod_lint` เองอธิบาย native plugin mechanism ตรง ๆ:
+
+```yaml
+# analysis_options.yaml
+analyzer:
+  plugins:
+    - riverpod_lint
+
+plugins:
+  riverpod_lint: 3.1.9
+```
+
+ตั้งค่าแบบนี้ (ไม่ต้องมี dependency ของ `custom_lint` ที่ไหนเลย) `dart analyze` สร้างผลลัพธ์จริงของ `riverpod_lint` — จับสดสำหรับโมดูลนี้ บน `ConsumerWidget` ที่ไม่มี `ProviderScope`:
+
+```text
+$ dart analyze
+warning - lib/main.dart:4:3 - Flutter applications using Riverpod must contain a ProviderScope at
+the root of their widget tree. - missing_provider_scope
+```
+
+<Callout title="custom_lint ไม่ได้ล้าสมัยโดยทั่วไป -- แค่ไม่จำเป็นสำหรับ riverpod_lint อีกต่อไป">
+`custom_lint` ยังมีอยู่และยังทำงานได้สำหรับ plugin อื่น ๆ ที่ยังไม่ได้ย้ายไปใช้ native analyzer-plugin system ข้อค้นพบเฉพาะเจาะจงและเป็นปัจจุบันตรงนี้แคบกว่านั้น: `riverpod_lint` 3.1.0 ขึ้นไปไม่ต้องการมัน และการพยายามบังคับใช้การตั้งค่าแบบ `custom_lint` เก่าสำหรับ `riverpod_lint` เวอร์ชันล่าสุด คือสิ่งที่ resolve ไม่ผ่านจริง ๆ
+</Callout>
+
+## `dart fix --dry-run` — แสดงสิ่งที่แก้ได้ด้วยเครื่องจักร โดยไม่ apply จริง
+
+ผลลัพธ์จริงสำหรับการ deprecate ของ `cacheExtent` จาก entry 24 ของ **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)**:
+
+```text
+$ dart fix --dry-run lib/proof/g3_cache_extent.dart
+Computing fixes in g3_cache_extent.dart (dry run)...
+
+1 proposed fix in 1 file.
+
+g3_cache_extent.dart
+  deprecated_member_use - 1 fix
+
+To fix an individual diagnostic, run one of:
+  dart fix --apply --code=deprecated_member_use lib/proof/g3_cache_extent.dart
+```
+
+คุ้มค่าที่จะสังเกตให้แม่นยำ: `dart fix` แจ้งว่า diagnostic `deprecated_member_use` มีทางแก้ที่เสนอไว้ — มันไม่ได้บอกผู้อ่านเองว่าทางแก้เชิงกลไกนั้น (การเปลี่ยนชื่อตรง ๆ) ถูกต้องจริงหรือไม่ entry 24 ใน catalog คือกรณีนี้เป๊ะ: `cacheExtent: 500` → `scrollCacheExtent: 500` "แก้" คำเตือน deprecation ด้วยกลไก แต่สร้าง error ใหม่ที่ต่างออกไป (`ScrollCacheExtent` เป็น sealed class ไม่ใช่ `double`) — `dart fix --apply` เพียงลำพังไม่รู้เรื่องนั้น reviewer ยังต้องตรวจสอบเอง
+
+## `flutter test` — พิสูจน์พฤติกรรม รวมถึง `--coverage` และ golden test
+
+ทุก dual-assert test และ fail-then-pass test ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** คือการพิสูจน์ด้วย `flutter test` มีอีกสองโหมดที่ควรรู้:
+
+**`--coverage`** สร้าง `coverage/lcov.info` จริง เป็นรายบรรทัด:
+
+```text
+$ flutter test --coverage test/proof/a4_late_uninitialized_test.dart
+00:00 +2: All tests passed!
+
+$ cat coverage/lcov.info
+SF:lib/proof/a4_late_uninitialized.dart
+DA:6,2
+LF:1
+LH:1
+end_of_record
+```
+
+`DA:6,2` หมายความว่าบรรทัด 6 ถูกเรียกใช้สองครั้งตลอดการรัน test — จำนวนการรันจริงต่อบรรทัด ไม่ใช่การประมาณ
+
+**Golden test** เปรียบเทียบ pixel ที่ render จริงของ widget กับไฟล์ PNG อ้างอิงที่บันทึกไว้ สร้างแล้วทำให้มันพังจริง ๆ จับสดสำหรับโมดูลนี้:
+
+```text
+$ flutter test --update-goldens test/proof/golden_demo_test.dart
+✓ golden: a simple badge matches the reference PNG
+00:00 +1: All tests passed!
+
+$ # change the badge's color, then re-run WITHOUT --update-goldens:
+$ flutter test test/proof/golden_demo_test.dart
+Golden "badge.png": Pixel test failed, 0.83%, 4000px diff detected.
+Failure feedback can be found at .../test/proof/failures
+```
+
+golden test จับ visual regression ได้*ทุก*แบบ — รวมถึงแบบที่ assertion ไหนก็ไม่มีวันคิดจะเช็ค — แต่เปราะบางโดยธรรมชาติข้าม rendering environment ที่ต่างกัน (font hinting, anti-aliasing ระดับ OS) harness ของคอร์สนี้เองไม่สร้างหรือเช็คไฟล์ golden สำหรับ fence ของบทเรียน ด้วยเหตุผลเรื่อง portability นี้เป๊ะ
+
+## `flutter build web --wasm` — portability gate จริง
+
+พิสูจน์สดสำหรับโมดูลนี้: snippet `dart:io`/`Platform.isIOS` เป๊ะจาก entry 19 ของ **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** compile ผ่านสะอาดภายใต้ทั้งเป้าหมาย JS แบบ default และ `--wasm`:
+
+```text
+$ flutter build web --release
+✓ Built build/web
+
+$ flutter build web --wasm --release
+┌─ New feature ──────────────────────────────────────────────────────────────┐
+│   WebAssembly compilation is new. Understand the details before deploying  │
+│   to production. See https://flutter.dev/to/wasm for more information.    │
+└──────────────────────────────────────────────────────────────────────────┘
+✓ Built build/web
+```
+
+ทั้งสอง build สำเร็จโดยไม่มี warning เรื่อง `dart:io` เลยสักคำ — `--wasm` เป็น portability gate สำหรับ compile target ที่*ต่างออกไป* ไม่ใช่ analyzer ที่เข้มขึ้น มันไม่จับบั๊กที่มีอยู่แค่ตอน runtime ได้มากไปกว่า web build แบบ default เลย
+
+## DevTools — เขียนเป็นเอกสาร ไม่ได้รัน (ไม่มี device ใน environment นี้)
+
+ตามข้อจำกัดหลักของโมดูลนี้ (ไม่มี emulator/device อยู่ใน environment นี้) widget inspector, layout explorer, และหน้าจอ performance/memory ของ DevTools ไม่ได้ถูก screenshot ที่นี่ สิ่งที่ DevTools จะเพิ่มเติมจากทุกอย่างข้างบน ตาม docs ของมันเอง: widget-tree inspector แบบสด (จะแสดงการขาด `ProviderScope` จริง ๆ ในต้นไม้ ไม่ใช่แค่ข้อความ crash ที่ตามมา), layout explorer ที่แสดง constraint โดยตรงเป็นภาพ (จะแสดงความสูงไม่มีขอบเขตของ entry 9 เป็นภาพก่อนที่มัน throw), และ memory view ที่จะแสดง `Ticker` ที่รั่วของ entry 22 สะสมไปตามเวลา ไม่ใช่แค่ assertion ตอน dispose ครั้งเดียวที่ catalog นี้จับไว้
+
+## DartPad — ฝังไว้ที่อื่นในคอร์สนี้ ไม่ซ้ำที่นี่
+
+component `DartPad.astro` ของคอร์สนี้ (ฝังไว้ใน `dart-language-tour` และ `widgets-and-the-tree`) ดูแลแยกต่างหากจากโมดูลนี้ snippet ส่วนใหญ่ใน catalog นี้ต้องการ package นอก whitelist ของ DartPad (`flutter_riverpod`, `go_router`) หรือการรัน `flutter test` เต็มรูปแบบที่ DartPad ทำไม่ได้ บทนี้จึงไม่พยายามฝัง DartPad ของตัวเอง
+
+{/* DartPad slot: verification */}
+
+## harness ของคอร์สนี้เอง: `tools/verify-snippets.mjs`
+
+ทุก fence ในโมดูลนี้ที่ประกาศ path จริงในบรรทัดแรก (`// lib/ai-bug-catalog/<name>.dart`, `// test/ai-bug-catalog/<name>_test.dart`) ถูกเก็บรวบรวมและตรวจสอบโดย harness ของ repo นี้เอง — อ่าน comment ส่วนหัวของ `tools/verify-snippets.mjs` (ราว 150 บรรทัดแรก) ก่อนที่จะเชื่อคำอธิบายใดก็ตามเกี่ยวกับมันแบบมือสอง รวมถึงคำอธิบายนี้ด้วย ผลลัพธ์จริง รันสดกับ catalog ของโมดูลนี้เป๊ะ:
+
+```text
+$ npm run -s verify
+reading-flutter: 91 / 1 / 6 / 19   # collected / skipped-no-path / expect-error / tests
+
+$ npm run -s verify -- --test reading-flutter/ai-bug-catalog
+reading-flutter/ai-bug-catalog: 16/16 passed
+```
+
+fence ที่บรรทัดแรกมี `@expect-error` (buggy snippet ของ entry 5, 14, 27, และ 28 ใน catalog) จงใจไม่ถูกเก็บรวบรวม — harness ข้ามมันไปทั้งหมด และเนื้อหาบทเรียนพกพาผลลัพธ์จริงที่จับแยกต่างหากมาแทน เหมือนกับทุกโมดูลอื่นในคอร์สนี้เป๊ะ
+
+**ข้อจำกัดที่ระบุไว้ตรง ๆ ของ harness นี้ อ่านจาก header ของมันเอง:** มัน**ไม่มีโหมด `--build`** — `flutter build web`/`apk` ต่อบทเรียนถูกประเมินว่าช้าเกินไปสำหรับการตรวจสอบตามปกติ และนี่เป็นช่องว่างที่บันทึกไว้และยอมรับแล้ว ไม่ใช่การมองข้าม (การพิสูจน์ `flutter build web --release`/`--wasm` ของบทนี้เองสำหรับ entry 19 และ 26 รันด้วยมือในโปรเจกต์ scratch ด้วยเหตุผลนี้เป๊ะ ไม่ได้รันผ่าน harness) output ของ codegen (`build_runner`, `riverpod_generator`, ไฟล์ `.g.dart`) ก็ไม่ถูกสร้างโดย harness เช่นกัน — บทเรียนที่ต้องการ generated code จะ ship เนื้อหา `.g.dart` เป็น fence จริงของตัวเองและบอกไว้ในเนื้อหาว่ามันถูก generate มา catalog ของโมดูลนี้ไม่มี entry ที่พึ่ง codegen เลย ข้อจำกัดนี้จึงไม่กระทบที่นี่โดยตรง
+
+## Mental Model
+
+<Mermaid title="เครื่องมือ static พิสูจน์จาก source อย่างเดียว; เครื่องมือ dynamic ต้องการการรันจริง" code={verificationToolsDiagram} />
+
+export const verificationToolsDiagram = `flowchart TD
+  subgraph Static["Static (no run needed)"]
+    Analyze["flutter analyze<br/>types/syntax only, never runtime behavior"]
+    Fix["dart fix --dry-run<br/>mechanically fixable, not necessarily CORRECTLY fixed"]
+    Lint["riverpod_lint (native plugin)<br/>missing_provider_scope and more"]
+  end
+  subgraph Dynamic["Needs a real run"]
+    Test["flutter test<br/>proves behavior; --coverage counts real executions"]
+    Golden["flutter test --update-goldens<br/>catches ANY visual regression, brittle across environments"]
+    Build["flutter build web / --wasm<br/>proves it COMPILES, never that it's safe to RUN"]
+  end
+  subgraph NotRun["Documented, not run here"]
+    DevTools["DevTools<br/>no device in this environment"]
+    DartPad["DartPad<br/>most snippets need packages outside its whitelist"]
+  end
+  subgraph Harness["This course's own harness"]
+    Verify["npm run verify / --test<br/>collects real path-commented fences only"]
+  end
+`;
+
+<Callout title="สรุปในบรรทัดเดียว">
+ทุกเครื่องมือในหน้านี้คือตัวกรอง ไม่ใช่คำตัดสิน — แม้รันด้วยกันทั้งหมด พวกมันยังปล่อยให้ 28 pattern ส่วนใหญ่ของ **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** ไม่ถูกจับจนกว่าจะมีการ dispose จริง, การเรียงใหม่จริง, การ navigate จริง, การรันบน platform จริง, หรือ release build จริงผ่านไป รัน `flutter analyze`/`dart fix --dry-run` ก่อน (เร็ว ไม่ต้องรัน) แล้วตามด้วย `flutter test` (รวม `--coverage`/golden ตรงที่ใช้ได้) และ `flutter build web --wasm` จริง แล้วยังต้องไล่ **[Review Checklist](/flutter/th/reading-flutter/review-checklist/)** ด้วยตาสำหรับทุกอย่างที่มีแค่เหตุการณ์ที่สองเท่านั้นที่เผยออกมาได้
+</Callout>
+
+export const quizVerificationTools = [
+  {
+    q: "```text\n$ flutter pub get   # custom_lint: ^0.8.1, riverpod_lint: ^3.1.9\nBecause riverpod_lint >=3.1.4-dev.1 depends on analyzer_plugin ^0.14.0 and custom_lint >=0.7.4\ndepends on analyzer_plugin ^0.13.0, riverpod_lint >=3.1.4-dev.1 is incompatible with custom_lint\n>=0.7.4.\n```\nจากความล้มเหลวในการ resolve ของ pub จริงและเป็นปัจจุบันนี้ วิธีที่ถูกต้องจริง ๆ ในการรัน riverpod_lint วันนี้ ตาม README ของมันเองคืออะไร?",
+    options: [
+      "downgrade flutter_riverpod จนกว่า riverpod_lint/custom_lint คู่เก่าจะ resolve ได้",
+      "อย่าใช้ custom_lint เลย -- riverpod_lint 3.1.0 ขึ้นไปย้ายไปใช้ native analyzer-plugin system ของ Dart แล้ว ตั้งค่าโดยตรงผ่าน `analyzer: plugins:` และ block `plugins:` ระดับบนสุดใน analysis_options.yaml โดยไม่มี dependency ของ custom_lint ที่ไหนเลย",
+      "custom_lint จำเป็นและนี่เป็นบั๊กที่รู้จักแล้วและแก้ไม่ได้",
+      "รัน riverpod_lint แค่ใน CI เท่านั้น อย่ารันบนเครื่องตัวเอง",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ: การตั้งค่า analysis_options.yaml ตาม README ของ riverpod_lint เอง (analyzer: plugins: - riverpod_lint บวก block plugins: riverpod_lint: 3.1.9 ระดับบนสุด) สร้างผลลัพธ์จริงของ missing_provider_scope ผ่าน `dart analyze` ธรรมดา -- ไม่มีแพ็กเกจ custom_lint ติดตั้งอยู่ที่ไหนเลย",
+  },
+  {
+    q: "ทำไมบทนี้ถึงบอกว่าการที่ `dart fix --dry-run` รายงานทางแก้สำหรับ `deprecated_member_use` ไม่ใช่เรื่องเดียวกับทางแก้นั้นถูกต้อง?",
+    options: [
+      "dart fix ไม่เคยทำงานจริงเลย",
+      "dart fix แจ้งแค่ว่า diagnostic มีทางแก้เชิงกลไกให้ -- มันไม่ยืนยันว่าทางแก้นั้นถูกต้องเชิง semantic entry 24 ของ AI Bug Catalog คือกรณีนี้เป๊ะ: การเปลี่ยนชื่อ cacheExtent เป็น scrollCacheExtent ล้าง deprecation warning ด้วยกลไก แต่แลกมาด้วย error จริง argument_type_not_assignable เพราะ scrollCacheExtent รับ sealed class ใหม่ ไม่ใช่ double ธรรมดา",
+      "dart fix ทำงานแค่กับไฟล์ test เท่านั้น",
+      "เรื่องนี้ใช้ได้แค่กับ deprecated_member_use เท่านั้น ไม่มี diagnostic อื่น",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ ใน entry 24 ของ AI Bug Catalog: `scrollCacheExtent: 500` (การเปลี่ยนชื่อแบบไร้เดียงสา) สร้าง `error - The argument type 'int' can't be assigned to the parameter type 'ScrollCacheExtent?'` -- การเปลี่ยนชื่อเชิงกลไกอย่างเดียวไม่สร้างโค้ดที่สะอาดในกรณีนี้",
+  },
+  {
+    q: "ทำไมบทนี้ถึงบอกว่าการที่ `flutter build web --wasm` สำเร็จพิสูจน์แค่การ compile ไม่เคยพิสูจน์ความปลอดภัยตอน runtime โดยใช้ตัวอย่าง dart:io ของ entry 19 โดยเฉพาะ?",
+    options: [
+      "--wasm ล้มเหลวเสมอเมื่อใช้ dart:io ดังนั้นนี่เป็นคำถามหลอก",
+      "snippet ที่แตะ Platform.isIOS เป๊ะจาก entry 19 compile ผ่านสะอาดภายใต้ทั้งเป้าหมาย JS แบบ default และ --wasm โดยไม่มี warning เรื่อง dart:io เลยในทั้งสองกรณี -- UnsupportedError จริงจะ throw ก็ต่อเมื่อ Platform.isIOS รันจริงในเบราว์เซอร์เท่านั้น ซึ่งทั้งสองขั้นตอน build ไม่ได้ทำ",
+      "--wasm เป็นแค่ linter ล้วน ๆ ไม่ใช่ compiler",
+      "เรื่องนี้สำคัญแค่กับโค้ดเฉพาะ iOS เท่านั้น ไม่เกี่ยวกับการเช็ค Android",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ: ทั้ง `flutter build web --release` และ `flutter build web --wasm --release` build snippet BuggyPlatformBadge ตัวเดียวกันเป๊ะสำเร็จ จับสดสำหรับโมดูลนี้ -- ยืนยันว่า --wasm เป็น portability gate สำหรับ compile target ไม่ใช่การเช็คพฤติกรรม runtime ที่เข้มขึ้น",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/verification-tools" questions={quizVerificationTools} />
+
+<ProgressTracker client:visible id="reading-flutter/verification-tools" />
