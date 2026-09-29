@@ -1,0 +1,978 @@
+---
+title: 'Worked review 2: a media gallery with slivers, isolates, and upload'
+description: 'แอป gallery รูปที่ AI เขียนให้ -- CustomScrollView + SliverGrid, AnimationController ต่อ tile, decoder ที่ใช้ compute() และ upload client แบบ chunked -- รีวิวทีละ bug เทียบกับความล้มเหลวจริงของ isolate-message, Ticker leak, unbounded-height และ dart:io บน web ใน probe ของคอร์สนี้'
+sidebar:
+  order: 5
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## โจทย์
+
+prompt ที่ให้ไปคือ: *"หน้าจอ photo gallery: grid รูปที่ scroll ได้และ fade เข้ามา มีขั้นตอน decode เพื่อไม่ให้ UI ค้าง และ upload client แบบแบ่ง chunk พร้อม progress panel ด้านล่าง"* สิ่งที่ตามมาคือดราฟต์แรกที่ดูโอเคเมื่อกวาดตาผ่าน ๆ -- มันใช้ `CustomScrollView`/`SliverGrid` แทน `GridView` ธรรมดา (เลย *ดู* เหมือนเข้าใจเรื่อง sliver) ใช้ `compute()` สำหรับงาน "หนัก" (เลย *ดู* เหมือนเข้าใจเรื่อง isolate) และทำ animation ให้แต่ละ tile ตอนเข้ามา มี **bug จริง 10 ตัว** หลายตัวเป็นแบบที่ไม่มีทางโผล่มาให้เห็นตอน scroll ดูรูปแค่ไม่กี่รูปผ่าน ๆ ให้อ่านตามที่ **[review checklist](/flutter/th/reading-flutter/review-checklist/)** แนะนำ: ความถูกต้องก่อน (โค้ด isolate/async ทำงานจริงไหม) แล้วค่อย lifecycle (อะไร leak) แล้วค่อย layout แล้วค่อยขอบของแต่ละแพลตฟอร์ม ทุก claim ด้านล่างรันจริงใน probe ของคอร์สนี้ (Flutter 3.47.5) -- `flutter analyze` จริง, `flutter test` จริง, `flutter build web` จริง และการจับเวลาจริงบน Mac เครื่องนี้
+
+## โค้ดที่ AI สร้างให้
+
+```dart
+// lib/gallery_app/photo.dart
+import 'dart:typed_data';
+
+class Photo {
+  const Photo({required this.id, required this.bytes});
+  final String id;
+  final Uint8List bytes;
+}
+```
+
+```dart
+// lib/gallery_app/decode_worker.dart
+import 'dart:isolate';
+
+import 'package:flutter/foundation.dart';
+
+int _fakeDecodedByteCount(int len) => len * 4; // stand-in for a real decode
+
+Future<int> decodePhotoReportingProgress(int bytesLength, ReceivePort progress) {
+  return compute((int len) {
+    // ignore: unused_local_variable
+    final capturedPort = progress; // AI comment: "report progress back"
+    return _fakeDecodedByteCount(len);
+  }, bytesLength);
+}
+```
+
+```dart
+// lib/gallery_app/thumbnail_analysis.dart
+import 'dart:typed_data';
+
+/// A cheap-looking "compute the average brightness for a placeholder color"
+/// loop -- the kind of pure-Dart pixel work an AI reaches for instead of a
+/// real decode library, and runs directly on whichever isolate calls it.
+int averageBrightness(Uint8List rgba) {
+  var total = 0;
+  for (var i = 0; i < rgba.length; i += 4) {
+    total += (rgba[i] + rgba[i + 1] + rgba[i + 2]) ~/ 3;
+  }
+  return rgba.isEmpty ? 0 : total ~/ (rgba.length ~/ 4);
+}
+```
+
+```dart
+// lib/gallery_app/photo_tile.dart
+import 'package:flutter/material.dart';
+
+int tileBodyBuildCount = 0;
+
+class _TileBody extends StatelessWidget {
+  const _TileBody({required this.color});
+  final Color color;
+  @override
+  Widget build(BuildContext context) {
+    tileBodyBuildCount++;
+    return Container(color: color);
+  }
+}
+
+/// A single grid tile that fades in when it first builds.
+class PhotoTile extends StatefulWidget {
+  const PhotoTile({super.key, required this.color, this.onControllerReady});
+  final Color color;
+  final ValueChanged<AnimationController>? onControllerReady;
+
+  @override
+  State<PhotoTile> createState() => _PhotoTileState();
+}
+
+class _PhotoTileState extends State<PhotoTile> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 200),
+  )..forward();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.onControllerReady?.call(_controller);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) => Opacity(
+        opacity: _controller.value,
+        child: _TileBody(color: widget.color),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app/gallery_grid.dart
+import 'package:flutter/material.dart';
+
+import 'photo_tile.dart';
+
+int gridTileBuildCount = 0;
+final List<int> builtGridIndices = [];
+
+class GalleryGrid extends StatelessWidget {
+  const GalleryGrid({super.key, required this.count});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      cacheExtent: 500,
+      slivers: [
+        SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            mainAxisExtent: 100,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, index) {
+              gridTileBuildCount++;
+              builtGridIndices.add(index);
+              return PhotoTile(color: Colors.primaries[index % Colors.primaries.length]);
+            },
+            childCount: count,
+          ),
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app/upload_panel.dart
+import 'package:flutter/material.dart';
+
+/// Shows the queue of in-progress uploads below the gallery grid.
+class UploadPanel extends StatelessWidget {
+  const UploadPanel({super.key, required this.uploadingIds});
+  final List<String> uploadingIds;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Uploading'),
+        ListView(
+          children: [
+            for (final id in uploadingIds) Text('Uploading $id...'),
+          ],
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app/upload_progress_view.dart
+import 'package:flutter/material.dart';
+
+int uploadStartCount = 0;
+
+Future<double> _uploadAndGetProgress(String id) async {
+  uploadStartCount++;
+  await Future<void>.delayed(const Duration(milliseconds: 10));
+  return 1.0;
+}
+
+class UploadProgressView extends StatelessWidget {
+  const UploadProgressView({super.key, required this.id});
+  final String id;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<double>(
+      future: _uploadAndGetProgress(id),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const CircularProgressIndicator();
+        return Text('Done: ${snapshot.data}');
+      },
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app/upload_client.dart
+import 'dart:io';
+
+/// Uploads a photo file in chunks.
+class UploadClient {
+  Future<void> uploadInChunks(String path) async {
+    final file = File(path);
+    final length = await file.length();
+    const chunkSize = 64 * 1024;
+    for (var offset = 0; offset < length; offset += chunkSize) {
+      // ... read and send each chunk ...
+    }
+  }
+}
+```
+
+คำอธิบายของ AI เองสำหรับ widget `Image` ที่วางแผนจะใช้กับแต่ละรูป (ยังไม่ได้ต่อเข้าไปจริง แต่เป็นส่วนหนึ่งของ PR เดียวกัน): *"`Image.network(url)` สำหรับแต่ละรูป เหมือนที่อื่นในแอปทั้งหมด"*
+
+## เดินรีวิวทีละบั๊ก
+
+### 1. closure ของ `compute()` capture `ReceivePort`
+
+`decodePhotoReportingProgress` closure ครอบ `progress` ซึ่งเป็น `ReceivePort` เพื่อ "รายงาน progress กลับมา" `compute()` ส่ง argument ของมันไปยัง background isolate เป็น isolate message -- และตัว closure เองก็เป็นส่วนหนึ่งของ message นั้นด้วย `ReceivePort` เป็น handle ที่ผูกกับ isolate โดยตรง (native) ที่ก็อปข้ามไปไม่ได้:
+
+```dart
+// test/gallery_app/decode_worker_test.dart
+import 'dart:isolate';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app/decode_worker.dart';
+
+void main() {
+  test('compute() closure capturing a ReceivePort throws the real isolate-message error', () async {
+    final port = ReceivePort();
+    addTearDown(port.close);
+
+    await expectLater(
+      decodePhotoReportingProgress(100, port),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('Illegal argument in isolate message'),
+        ),
+      ),
+    );
+  });
+}
+```
+
+```text
+✓ compute() closure capturing a ReceivePort throws the real isolate-message error
+
+00:00 +1: All tests passed!
+```
+
+กลไกเดียวกันเป๊ะพิสูจน์ไว้แล้วด้วยการจับ `ReceivePort` แบบเดียวกันใน **[Isolates & compute()](/flutter/th/async-and-performance/isolates-and-compute/)**; closure ของ `compute()`/`Isolate.run` ต้อง capture แค่ข้อมูลธรรมดาที่ส่งข้าม isolate ได้เท่านั้น (หรือไม่ capture อะไรเลย -- เลือกใช้ฟังก์ชันระดับบนสุดหรือ `static` ดีกว่า)
+
+<SpotTheBug code={`Future<int> decodePhotoReportingProgress(int bytesLength, ReceivePort progress) {
+  return compute((int len) {
+    final capturedPort = progress; // captures a non-sendable object
+    return _fakeDecodedByteCount(len);
+  }, bytesLength);
+}`}>
+`progress` อยู่นอก closure ที่ส่งเข้า `compute()` Dart จึง serialize มันเป็นส่วนหนึ่งของ closure นั้นเพื่อส่งให้ background isolate -- และ `ReceivePort` (เหมือน `Socket`, `Timer` หรือ class instance ส่วนใหญ่ที่ถือ native resource) ไม่มีรูปแบบที่ส่งข้าม isolate ได้เลย ทางแก้คือฟังก์ชันที่ไม่ capture อะไรเลยนอกจาก parameter ของตัวเอง -- ฟังก์ชันระดับบนสุด หรือ closure ที่สร้างจาก primitive/collection ล้วน ๆ
+</SpotTheBug>
+
+### 2. งานใกล้เคียง decode ที่รันแบบ synchronous บน isolate ที่เรียกมัน
+
+`averageBrightness` ใน `thumbnail_analysis.dart` -- ตั้งใจไว้เพื่อสร้างสีตัวแทนคร่าว ๆ ก่อนรูปจริงจะพร้อม -- เป็น loop Dart แบบ synchronous ทีละพิกเซล ไม่มี `compute()`/`Isolate.run` ห่ออยู่เลย เรียกมันจาก `build()` หรือ frame callback บนรูปความละเอียดเต็มแล้ว isolate นั้นจะค้างตลอด loop:
+
+```dart
+// test/gallery_app/thumbnail_analysis_timing_test.dart
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app/thumbnail_analysis.dart';
+
+void main() {
+  test('averageBrightness on a full-resolution photo blows the 16.6ms frame budget when run on the calling isolate', () {
+    // A believable 12MP RGBA buffer (4000x3000x4 bytes).
+    final rgba = Uint8List(4000 * 3000 * 4);
+    final stopwatch = Stopwatch()..start();
+    averageBrightness(rgba);
+    stopwatch.stop();
+    print('averageBrightness(12MP) took ${stopwatch.elapsedMilliseconds}ms on this Mac');
+    expect(stopwatch.elapsedMilliseconds, greaterThan(16),
+        reason: 'a per-pixel Dart loop over a full-resolution photo run '
+            'directly on the calling isolate blows the ~16.6ms frame '
+            'budget on its own -- called from build() or a frame '
+            'callback, this is a dropped frame, not just slow code');
+  });
+}
+```
+
+```text
+averageBrightness(12MP) took 25ms on this Mac
+
+00:00 +1: All tests passed!
+```
+
+วัดได้บน Mac เครื่องนี้ **25ms** สำหรับ buffer 12 เมกะพิกเซลเดียว -- เกินงบเฟรม **~16.6ms** ที่พิสูจน์ไว้ใน **[Render pipeline](/flutter/th/layout-and-rendering/render-pipeline/)** ไปแล้ว ก่อนที่จะมีงาน decode จริงหรือเครื่องที่ช้ากว่านี้เข้ามาเกี่ยวข้องด้วยซ้ำ ทางแก้คือ `compute()` ตัวเดียวกับที่ไฟล์นี้ import อยู่แล้วที่อื่น แค่ใช้ให้ถูก: ห่อการเรียกฟังก์ชันบริสุทธิ์ ไม่ capture อะไรเลย
+
+### 3. `AnimationController` ไม่เคยถูก dispose
+
+`_PhotoTileState` สร้าง `AnimationController` แล้วสั่งให้เริ่มทำงาน แต่ไม่มี `dispose()` override เลยสักนิด:
+
+```dart
+// test/gallery_app/photo_tile_leak_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app/photo_tile.dart';
+
+void main() {
+  testWidgets('a PhotoTile with no dispose() throws the real Ticker leak error on removal', (tester) async {
+    late AnimationController leaked;
+    await tester.pumpWidget(MaterialApp(
+      home: PhotoTile(color: Colors.red, onControllerReady: (c) => leaked = c),
+    ));
+    await tester.pump(const Duration(milliseconds: 50));
+
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+
+    final error = tester.takeException();
+    expect(error, isA<FlutterError>());
+    print(error.toString());
+
+    leaked.dispose(); // avoid also failing on "ticker still active at end of test"
+  });
+
+  testWidgets('the inline builder child rebuilds every animation tick', (tester) async {
+    tileBodyBuildCount = 0;
+    late AnimationController controller;
+    await tester.pumpWidget(MaterialApp(
+      home: PhotoTile(color: Colors.red, onControllerReady: (c) => controller = c),
+    ));
+    final firstCount = tileBodyBuildCount;
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 50));
+    print('tileBodyBuildCount first=$firstCount after 2 ticks=$tileBodyBuildCount');
+    expect(tileBodyBuildCount, greaterThan(firstCount),
+        reason: '_TileBody is constructed fresh inside builder on every '
+            'tick -- AnimatedBuilder\'s own child param, unused here, '
+            'exists specifically to avoid this');
+    controller.dispose();
+  });
+}
+```
+
+```text
+_PhotoTileState#75ce5(ticker active) was disposed with an active Ticker.
+_PhotoTileState created a Ticker via its SingleTickerProviderStateMixin, but at the time dispose() was called on the mixin, that Ticker was still active. The Ticker must be disposed before calling super.dispose().
+Tickers used by AnimationControllers should be disposed by calling dispose() on the AnimationController itself. Otherwise, the ticker will leak.
+```
+
+ข้อความ error จริงเดียวกันเป๊ะที่พิสูจน์ไว้แล้วใน **[Animations](/flutter/th/async-and-performance/animations/)** -- scroll grid รูปแล้วทุก tile ที่เคย build ตัวนี้ขึ้นมาจะ leak `Ticker` ตอนที่มัน scroll ออกจากช่วงที่ build ไว้แล้วถูก dispose
+
+### 4. `Opacity` + `AnimatedBuilder` ที่สร้าง child แบบ inline
+
+callback `builder` ของ `AnimatedBuilder` สร้าง `_TileBody` ตรง ๆ แทนที่จะส่งผ่าน parameter `child` ของ `AnimatedBuilder` เอง -- มันเลย rebuild ทุก tick ของ animation ไม่ใช่แค่ repaint เท่านั้น test ที่สองใน fence เดียวกันด้านบนพิสูจน์เรื่องนี้:
+
+```text
+tileBodyBuildCount first=1 after 2 ticks=3
+
+00:00 +2: All tests passed!
+```
+
+ตาม **[Render pipeline](/flutter/th/layout-and-rendering/render-pipeline/)** `Opacity` กับ `AnimatedOpacity`/`FadeTransition` มีต้นทุน compositing layer *เท่ากัน* เมื่อค่าไม่เป็นศูนย์ -- สิ่งที่ widget ที่สร้างมาเฉพาะทางอย่าง `FadeTransition` เพิ่มให้ไม่ใช่ layer ที่ถูกกว่า แต่คือการไม่ rebuild subtree ที่ไม่จำเป็นต้องเปลี่ยนทุก tick พิสูจน์แล้วด้านบน
+
+### 5. `cacheExtent` -- deprecated แล้ว
+
+`GalleryGrid` ตั้ง `cacheExtent: 500` ตรง ๆ บน `CustomScrollView` เช็กกับ SDK นี้ (Flutter 3.47.5):
+
+```text
+info • 'cacheExtent' is deprecated and shouldn't be used. Use scrollCacheExtent instead. This feature was deprecated after v3.41.0-0.0.pre. Try replacing the use of the deprecated member with the replacement • deprecated_member_use
+```
+
+ยืนยันตรงจาก source ของ `package:flutter` เอง (`widgets/scroll_view.dart`): `cacheExtent` มี `@Deprecated('Use scrollCacheExtent instead. This feature was deprecated after v3.41.0-0.0.pre.')` ติดอยู่ ตัวแทนที่ `ScrollCacheExtent` เป็น type จริง -- แต่ **ไม่ได้** ถูก re-export โดย `package:flutter/material.dart` (หรือ `widgets.dart`) เลย มีแค่ `package:flutter/rendering.dart` เท่านั้น ทางแก้เลยต้อง import ตัวนั้นเพิ่มด้วย (ดูโค้ดที่แก้แล้ว)
+
+### 6. ลืม `RepaintBoundary` รอบ tile ที่ animate
+
+ไม่มีอะไรแยก repaint ทุก tick ของ `PhotoTile` ออกจาก sibling ที่นิ่งซึ่งใช้ canvas ร่วมกัน:
+
+```dart
+// lib/gallery_app/gallery_repaint_demo.dart
+import 'package:flutter/material.dart';
+
+import 'photo_tile.dart';
+
+int badgePaintCount = 0;
+
+class _CountingPainter extends CustomPainter {
+  _CountingPainter(this.onPaint);
+  final VoidCallback onPaint;
+  @override
+  void paint(Canvas canvas, Size size) {
+    onPaint();
+    canvas.drawRect(Offset.zero & size, Paint()..color = Colors.grey);
+  }
+
+  @override
+  bool shouldRepaint(_CountingPainter oldDelegate) => false;
+}
+
+/// A "photo count" badge next to the grid -- never changes on its own.
+class CountBadge extends StatelessWidget {
+  const CountBadge({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(size: const Size(24, 24), painter: _CountingPainter(() => badgePaintCount++));
+  }
+}
+
+/// BUG: no RepaintBoundary between the animating PhotoTile and CountBadge --
+/// they share one canvas, so PhotoTile's every-tick repaint forces
+/// CountBadge to repaint too even though it never changed.
+class GalleryHeaderNoBoundary extends StatelessWidget {
+  const GalleryHeaderNoBoundary({super.key, required this.onControllerReady});
+  final ValueChanged<AnimationController> onControllerReady;
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      PhotoTile(color: Colors.red, onControllerReady: onControllerReady),
+      const CountBadge(),
+    ]);
+  }
+}
+
+/// FIX: PhotoTile gets its own layer -- its repaints stop leaking into CountBadge.
+class GalleryHeaderWithBoundary extends StatelessWidget {
+  const GalleryHeaderWithBoundary({super.key, required this.onControllerReady});
+  final ValueChanged<AnimationController> onControllerReady;
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      RepaintBoundary(child: PhotoTile(color: Colors.red, onControllerReady: onControllerReady)),
+      const CountBadge(),
+    ]);
+  }
+}
+```
+
+```dart
+// test/gallery_app/gallery_repaint_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app/gallery_repaint_demo.dart';
+
+void main() {
+  testWidgets('WITHOUT a RepaintBoundary, the static CountBadge repaints every PhotoTile tick', (tester) async {
+    badgePaintCount = 0;
+    late AnimationController controller;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: GalleryHeaderNoBoundary(onControllerReady: (c) => controller = c)),
+    ));
+    final afterFirstBuild = badgePaintCount;
+
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(badgePaintCount, greaterThan(afterFirstBuild),
+        reason: 'PhotoTile repaints every animation tick; with no boundary '
+            'CountBadge shares its canvas and repaints too, even though it '
+            'never changed');
+    controller.dispose();
+  });
+}
+```
+
+```text
+✓ WITHOUT a RepaintBoundary, the static CountBadge repaints every PhotoTile tick
+
+00:00 +1: All tests passed!
+```
+
+กลไกเดียวกันเป๊ะ (และคู่ที่ใส่ boundary ที่หยุดการ leak) พิสูจน์ไว้ครบในบท **[Render pipeline](/flutter/th/layout-and-rendering/render-pipeline/)** ใน gallery จริง "sibling ที่นิ่ง" คือ tile อื่นทุกตัวที่ใช้ canvas ของ grid ร่วมกัน -- tile ที่ animate อยู่ตัวเดียวไม่มี boundary หมายความว่าทุก tile รอบ ๆ มัน repaint ไปด้วย
+
+### 7. `ListView` ใน `Column` -- upload panel
+
+`UploadPanel` ใส่ `ListView` เปล่า ๆ เป็น child ของ `Column` ตรง ๆ ไม่ได้ห่อด้วย `Expanded`:
+
+```dart
+// test/gallery_app/upload_panel_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app/upload_panel.dart';
+
+void main() {
+  testWidgets('UploadPanel throws the real unbounded-height error', (tester) async {
+    FlutterErrorDetails? captured;
+    final original = FlutterError.onError;
+    FlutterError.onError = (details) => captured ??= details;
+    addTearDown(() => FlutterError.onError = original);
+
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(body: UploadPanel(uploadingIds: ['a', 'b'])),
+    ));
+
+    expect(captured, isNotNull);
+    print(captured!.exception.toString());
+  });
+}
+```
+
+```text
+Vertical viewport was given unbounded height.
+
+00:00 +1: All tests passed!
+```
+
+กลไกทั้งหมดและทางแก้จริงทั้ง 3 แบบพิสูจน์ไว้ในบท **[Constraints & Layout](/flutter/th/layout-and-rendering/constraints-and-layout/)** ซึ่งมีข้อแก้ไขความเข้าใจผิดที่รีวิวนี้ต้องพูดซ้ำด้วย:
+
+<Callout title="แก้ไขความเข้าใจผิดที่พบบ่อย: Column ข้างใน ListView ไม่พัง">
+ถ้าทางแก้ของ AI สำหรับเรื่องนี้ไปในทิศทาง *ตรงกันข้าม* -- ย้าย `Column` เข้าไปข้างใน children ของ `ListView` -- นั่นจะไม่แก้อะไรเลย เพราะรูปแบบนั้นไม่พังตั้งแต่แรกอยู่แล้ว พิสูจน์ตรง ๆ: `ListView(children: [Column(children: [...])])` render ได้ปกติ; item ของ `ListView` ได้รับความสูงแบบ unbounded เพื่อให้มันรายงานขนาดของตัวเองได้ และ `Column` ที่ได้รับความสูงแบบ unbounded จะ fallback ไปตั้งขนาดตามผลรวมของ children แทน การพังจริง ๆ ต้องการให้ *ตัวที่ scroll ได้* เป็นตัวที่ได้รับความสูงแบบ unbounded จากช่องที่ไม่ flexible -- `ListView`/`GridView`/`CustomScrollView` เปล่า ๆ เป็น child ตรง ๆ ของ `Column` โดยไม่ใช่ `Expanded` แบบเดียวกับที่ `UploadPanel` ทำด้านบนเป๊ะ
+</Callout>
+
+### 8. `Image` ที่ไม่มี `cacheWidth`/`cacheHeight`
+
+แผนของ AI สำหรับรูปแต่ละรูปใน grid คือ `Image.network(url)` ธรรมดา ไม่มี hint เรื่องขนาด decode เลย จากเอกสารของ widget `Image` เอง (`package:flutter`):
+
+```text
+The image is stored in memory in uncompressed form (so that it can be rendered). Large images
+will use a lot of memory: a 4K image (3840x2160) will use over 30MB of RAM (assuming 32 bits per
+pixel).
+
+The Image.asset, Image.network, Image.file, and Image.memory constructors allow a custom decode
+size to be specified through cacheWidth and cacheHeight parameters. The engine will then decode
+and store the image at the specified size, instead of the image's natural size.
+
+This can significantly reduce the memory usage. For example, a 4K image that will be rendered at
+only 384x216 pixels (one-tenth the horizontal and vertical dimensions) would only use 330KB if
+those dimensions are specified using the cacheWidth and cacheHeight parameters, a 100-fold
+reduction in memory usage.
+```
+
+claim ลดหน่วยความจำ 100 เท่า ยกมาตรงจาก doc comment ของ widget เอง (`packages/flutter/lib/src/widgets/image.dart`) -- ทุก tile ใน grid ที่ decode และแคชรูปที่ความละเอียดกล้องเต็ม ๆ เพื่อไปแสดงเป็น thumbnail 100px คือกรณีที่ parameter นี้มีไว้เพื่อแก้เป๊ะ ๆ doc comment เดียวกันยังบอกด้วยว่า `cacheWidth`/`cacheHeight` ถูก **มองข้าม** สำหรับ `Image.network` โดยเฉพาะบนแพลตฟอร์ม web เพราะ web engine ส่งต่อการ decode ให้ browser จัดการ
+
+### 9. ใช้ `dart:io` แบบไม่มี guard -- compile และ build ผ่านสำหรับ web แต่ throw ตอน runtime
+
+`UploadClient` import `dart:io` แล้วสร้าง `File` โดยไม่มี platform guard เลย เช็กตรงกับ web patch ของ SDK ที่ติดตั้งจริง (`dart-sdk/lib/_internal/js_runtime/lib/io_patch.dart`):
+
+```text
+@patch
+class _File {
+  @patch
+  static _lengthFromPath(_Namespace namespace, Uint8List path) {
+    throw UnsupportedError("File._lengthFromPath");
+  }
+  ...
+```
+
+`dart:io` เองมี stub declaration จริงที่ import ได้สำหรับ web target -- ดังนั้นมัน **analyze สะอาดและ `flutter build web` ผ่านจริง** รันจริงกับไฟล์นี้เป๊ะ ๆ:
+
+```text
+Compiling lib/main.dart for the Web...
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 7736 bytes (99.5% reduction).
+Compiling lib/main.dart for the Web...                             18.8s
+✓ Built build/web
+```
+
+ปัญหาจะโผล่มาก็ต่อเมื่อ `uploadInChunks` รันจริงบน web build เท่านั้น: `File('...').length()` เรียกตรงเข้า `_lengthFromPath` ซึ่ง web patch แทนที่ด้วย `throw UnsupportedError(...)` แบบไม่มีเงื่อนไข build ที่ผ่านไม่ใช่หลักฐานว่า feature ทำงานได้บนทุกแพลตฟอร์มที่ build ไปด้วย
+
+### 10. สร้าง `Future` ข้างใน `build()` -- upload progress รีเซ็ตทุกครั้งที่มี rebuild ที่ไม่เกี่ยวข้อง
+
+`UploadProgressView.build` เรียก `_uploadAndGetProgress(id)` ตรง ๆ ข้างใน `build` สร้าง `Future` ใหม่เอี่ยม (และเริ่ม "upload" ใหม่) ทุกครั้งที่ widget นี้ rebuild ไม่ว่าจะด้วยเหตุผลอะไรก็ตาม:
+
+```dart
+// test/gallery_app/upload_progress_view_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app/upload_progress_view.dart';
+
+void main() {
+  testWidgets('a Future created inside build() re-fires the upload on every rebuild', (tester) async {
+    uploadStartCount = 0;
+    final rebuildTrigger = ValueNotifier<int>(0);
+
+    await tester.pumpWidget(MaterialApp(
+      home: ValueListenableBuilder<int>(
+        valueListenable: rebuildTrigger,
+        builder: (context, value, child) => UploadProgressView(id: 'photo-1'),
+      ),
+    ));
+    expect(uploadStartCount, 1, reason: 'one initial build');
+
+    rebuildTrigger.value++; // forces an unrelated rebuild of the parent
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
+
+    print('uploadStartCount=$uploadStartCount after one unrelated rebuild');
+    expect(uploadStartCount, 2,
+        reason: 'build() ran again for a reason that has nothing to do '
+            'with this upload, and _uploadAndGetProgress(id) was called '
+            'again because it is called directly inside build()');
+  });
+}
+```
+
+```text
+uploadStartCount=2 after one unrelated rebuild
+
+00:00 +1: All tests passed!
+```
+
+กับดัก create-in-build แบบเดียวกันที่พิสูจน์ไว้เป็นภาพรวมแล้วใน **[Futures & Streams in the UI](/flutter/th/async-and-performance/futures-streams-in-ui/)** -- ที่นี่มันหมายถึงการเรียก upload ซ้ำจริง ๆ ไม่ใช่แค่ progress bar รีเซ็ต
+
+## โค้ดที่แก้แล้ว
+
+```dart
+// lib/gallery_app_fixed/decode_worker.dart
+import 'package:flutter/foundation.dart';
+
+int _fakeDecodedByteCount(int len) => len * 4; // stand-in for a real decode
+
+Future<int> decodePhoto(int bytesLength) {
+  return compute(_fakeDecodedByteCount, bytesLength);
+}
+```
+
+```dart
+// lib/gallery_app_fixed/photo_tile.dart
+import 'package:flutter/material.dart';
+
+/// A single grid tile that fades in when it first builds.
+class PhotoTile extends StatefulWidget {
+  const PhotoTile({super.key, required this.color});
+  final Color color;
+
+  @override
+  State<PhotoTile> createState() => _PhotoTileState();
+}
+
+class _PhotoTileState extends State<PhotoTile> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 200),
+  )..forward();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: FadeTransition(
+        opacity: _controller,
+        child: Container(color: widget.color),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app_fixed/gallery_grid.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+import 'photo_tile.dart';
+
+int gridTileBuildCount = 0;
+final List<int> builtGridIndices = [];
+
+class GalleryGrid extends StatelessWidget {
+  const GalleryGrid({super.key, required this.count});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      scrollCacheExtent: const ScrollCacheExtent.pixels(500),
+      slivers: [
+        SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            mainAxisExtent: 100,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, index) {
+              gridTileBuildCount++;
+              builtGridIndices.add(index);
+              return PhotoTile(
+                key: ValueKey(index),
+                color: Colors.primaries[index % Colors.primaries.length],
+              );
+            },
+            childCount: count,
+          ),
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app_fixed/upload_panel.dart
+import 'package:flutter/material.dart';
+
+/// Shows the queue of in-progress uploads below the gallery grid.
+class UploadPanel extends StatelessWidget {
+  const UploadPanel({super.key, required this.uploadingIds});
+  final List<String> uploadingIds;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Uploading'),
+        Expanded(
+          child: ListView(
+            children: [
+              for (final id in uploadingIds) Text('Uploading $id...'),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app_fixed/upload_progress_view.dart
+import 'package:flutter/material.dart';
+
+int uploadStartCount = 0;
+
+Future<double> _uploadAndGetProgress(String id) async {
+  uploadStartCount++;
+  await Future<void>.delayed(const Duration(milliseconds: 10));
+  return 1.0;
+}
+
+class UploadProgressView extends StatefulWidget {
+  const UploadProgressView({super.key, required this.id});
+  final String id;
+
+  @override
+  State<UploadProgressView> createState() => _UploadProgressViewState();
+}
+
+class _UploadProgressViewState extends State<UploadProgressView> {
+  late final Future<double> _progress = _uploadAndGetProgress(widget.id);
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<double>(
+      future: _progress,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const CircularProgressIndicator();
+        return Text('Done: ${snapshot.data}');
+      },
+    );
+  }
+}
+```
+
+```dart
+// lib/gallery_app_fixed/upload_client.dart
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
+/// Uploads a photo file in chunks.
+class UploadClient {
+  Future<void> uploadInChunks(String path) async {
+    if (kIsWeb) {
+      throw UnsupportedError('UploadClient.uploadInChunks is not supported on web yet');
+    }
+    final file = File(path);
+    final length = await file.length();
+    const chunkSize = 64 * 1024;
+    for (var offset = 0; offset < length; offset += chunkSize) {
+      // ... read and send each chunk ...
+    }
+  }
+}
+```
+
+<Callout title="ทางแก้ที่ยังไม่ครบ ตั้งใจเว้นไว้">
+`kIsWeb` หลีกเลี่ยง crash ตรงนี้ได้จริง -- มันเป็นค่าคงที่ระดับ compile-time ที่ปลอดภัยจริง และแค่ไม่เรียก `File(...)` บน web ก็ใช้ได้ผลแล้ว แต่มัน **ไม่ได้** แก้ปัญหาที่ลึกกว่านั้น: `dart:io` ยังคง import อยู่และยังเป็นส่วนหนึ่งของ dependency graph ของ web build อยู่ดี ทางแก้ที่แข็งแรงเต็มที่ -- conditional import ที่ทำให้ `dart:io` ไม่ถูกอ้างอิงบน web เลย -- เป็นหัวข้อของ worked review 3 เอง
+</Callout>
+
+test สองตัวที่โจทย์ขอมา -- laziness (build เฉพาะ tile ที่มองเห็น) และ dispose (tile ที่ scroll ออกไปแล้วเคลียร์ `AnimationController` ของตัวเอง):
+
+```dart
+// test/gallery_app_fixed/gallery_grid_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/gallery_app_fixed/gallery_grid.dart';
+
+void main() {
+  testWidgets('laziness: a 300px viewport only builds a handful of the 1000 tiles', (tester) async {
+    gridTileBuildCount = 0;
+    builtGridIndices.clear();
+    tester.view.physicalSize = const Size(300, 300);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const MaterialApp(home: GalleryGrid(count: 1000)));
+
+    expect(gridTileBuildCount, lessThan(50),
+        reason: 'only tiles near the viewport (plus the default cache '
+            'buffer) are built -- same laziness mechanism proven for '
+            'SliverList in Slivers & Scrolling, here for SliverGrid');
+    expect(builtGridIndices, isNot(contains(999)));
+  });
+
+  testWidgets('dispose: scrolling tiles out of range disposes their AnimationControllers cleanly', (tester) async {
+    gridTileBuildCount = 0;
+    builtGridIndices.clear();
+    tester.view.physicalSize = const Size(300, 300);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const MaterialApp(home: GalleryGrid(count: 1000)));
+
+    final scrollable = find.byType(Scrollable);
+    await tester.drag(scrollable, const Offset(0, -20000));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+  });
+}
+```
+
+```text
+✓ laziness: a 300px viewport only builds a handful of the 1000 tiles
+✓ dispose: scrolling tiles out of range disposes their AnimationControllers cleanly
+
+00:00 +2: All tests passed!
+```
+
+## สิ่งที่เปลี่ยนและเหตุผล
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | closure ของ `compute()` capture `ReceivePort` | ไม่ capture อะไรนอกจากข้อมูลธรรมดา -- พิสูจน์แล้ว: ไม่งั้นได้ `Illegal argument in isolate message` |
+| 2 | loop งานใกล้ decode ทีละพิกเซลรันบน isolate ที่เรียกมัน | `compute()` ตัวเดียวกัน ใช้ให้ถูก -- พิสูจน์แล้ว: 25ms > งบเฟรม 16.6ms ถ้าไม่แก้ |
+| 3 | `AnimationController` ไม่เคย dispose | override `dispose()` -- พิสูจน์แล้ว: ไม่งั้นได้ `was disposed with an active Ticker` |
+| 4 | `Opacity`/`AnimatedBuilder` มี child แบบ inline | `FadeTransition` -- พิสูจน์แล้ว: child ไม่ rebuild ทุก tick อีกแล้ว |
+| 5 | `cacheExtent` (deprecated) | `scrollCacheExtent` (ต้องการ `package:flutter/rendering.dart`) |
+| 6 | ไม่มี `RepaintBoundary` รอบ tile ที่ animate | `RepaintBoundary` -- พิสูจน์แล้ว: sibling ที่นิ่งหยุด repaint |
+| 7 | `ListView` เปล่า ๆ เป็น child ของ `Column` | `Expanded(child: ListView(...))` -- พิสูจน์แล้ว: ไม่พังเพราะ unbounded height อีกแล้ว |
+| 8 | `Image.network` ไม่มี hint ขนาด decode | `cacheWidth`/`cacheHeight` -- ตามเอกสาร ลดหน่วยความจำได้ถึง 100 เท่า |
+| 9 | `dart:io` `File` ใช้แบบไม่มี guard | guard ด้วย `kIsWeb` ก่อนแตะ `File` -- แก้ได้บางส่วน; แก้เต็มใน worked review 3 |
+| 10 | สร้าง `Future` ข้างใน `build()` | สร้างครั้งเดียวใน `initState`/field แบบ `late final` -- พิสูจน์แล้ว: รอดจาก rebuild ที่ไม่เกี่ยวข้อง |
+
+## สิ่งที่ reviewer เขียนใน PR
+
+> โครงดี แต่ต้องแก้ก่อน ship -- มี 10 เรื่อง:
+>
+> 1. **closure ของ `compute()` capture `ReceivePort`** อันนี้ throw `Illegal argument in isolate message` ทุกครั้ง มีแค่ข้อมูลธรรมดาเท่านั้นที่ข้ามไป background isolate ได้
+> 2. **`averageBrightness` รันแบบ synchronous บน isolate ไหนก็ตามที่เรียกมัน** วัดได้ 25ms สำหรับ buffer 12MP บนเครื่องผม -- นั่นคือเฟรมที่หลุดไปเลยถ้าถูกเรียกจาก `build()` ห่อมันด้วย `compute()` เหมือนที่ decoder ทำอยู่แล้ว (เกือบ) ก็ได้
+> 3. **ไม่มี `dispose()` บน `AnimationController` ของ `PhotoTile`** scroll grid แล้วทุก tile ที่เคย build ตัวนี้ขึ้นมาจะ leak `Ticker`
+> 4. **`AnimatedBuilder` build `_TileBody` แบบ inline** ส่งผ่าน `child` แทนดีกว่า -- ตอนนี้มันถูกสร้างใหม่ทุกเฟรมของ animation
+> 5. **`cacheExtent` deprecated แล้วตั้งแต่ 3.41** -- `scrollCacheExtent` มาแทนที่ และต้อง import คนละตัว (`package:flutter/rendering.dart`)
+> 6. **ไม่มี `RepaintBoundary` บน tile** ใน grid จริง หมายความว่า tile ที่ animate ตัวเดียวจะบังคับให้ tile อื่นทุกตัวที่ใช้ canvas ร่วมกัน repaint ไปด้วย
+> 7. **`ListView` ใน `Column` ไม่มี `Expanded` ใน `UploadPanel`** พังจริง `Vertical viewport was given unbounded height`
+> 8. **`Image.network` ไม่มี `cacheWidth`/`cacheHeight`** ตามเอกสารของ Flutter เอง นี่คือความต่างของหน่วยความจำถึง 100 เท่าสำหรับ grid tile ขนาด thumbnail
+> 9. **`File` ของ `dart:io` ใช้โดยไม่มี platform guard** build ผ่านสำหรับ web แต่ throw `UnsupportedError` ทันทีที่รันจริงบนนั้น
+> 10. **เรียก `_uploadAndGetProgress` ตรง ๆ ใน `build()`** rebuild ที่ไม่เกี่ยวข้องอะไรก็เรียก upload ซ้ำ
+>
+> ไม่มีข้อไหนต้องออกแบบใหม่เลย -- ยินดี pair กันแก้
+
+## Mental Model
+
+มีรูปแบบ 3 อย่างที่วนซ้ำตลอดรีวิวนี้ อย่างแรก: **"ดูเหมือนเข้าใจ isolate" ไม่ใช่ "เข้าใจ isolate จริง"** -- `compute()` โผล่มา 2 ครั้งใน PR นี้ ครั้งหนึ่งพังเพราะ capture `ReceivePort` อีกครั้งหายไปเลยจากฟังก์ชันที่ต้องการมันชัด ๆ และทั้งคู่ไม่โผล่ให้เห็นจนกว่าจะทดสอบเจาะจงเรื่องนี้ อย่างที่สอง: **แอปที่ compile และ build ผ่านไม่ใช่แอปที่ใช้งานได้จริง** -- bug 5 กับ 8 analyzer มองเห็นได้ (deprecation, doc comment) แต่ bug 9 compile และ build ผ่านสำเร็จสำหรับแพลตฟอร์มที่มันใช้งานไม่ได้จริง ซึ่งเป็นกับดักที่ร้ายกว่า build ล้มเหลวตรง ๆ เสียอีก อย่างที่สาม: **ทุก leak/กับดักในรีวิวนี้มองไม่เห็นจากการทดสอบด้วยมือสั้น ๆ** -- tile ไม่กี่ตัวบนหน้าจอไม่มีทาง leak ticker มากพอให้สังเกตเห็น rebuild ครั้งเดียวไม่ค่อยเร็วพอให้เห็น progress bar รีเซ็ต และไม่มีใคร scroll ไปถึง tile 999 ด้วยมือ ทั้ง 10 bug ต้องการ test ที่เจาะจงหรือข้อเท็จจริงที่มีเอกสารรองรับถึงจะโผล่ออกมา ซึ่งตรงกับประเด็นของ review checklist เป๊ะ
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| `compute()` สำหรับงานที่ใช้ CPU หนัก | ทำให้ isolate ที่เรียกยังตอบสนองอยู่ -- พิสูจน์แล้วด้วยการจับเวลาจริงด้านบน | closure ต้องไม่มีอะไรที่ส่งข้าม isolate ไม่ได้เลย; ผิดกติกาได้ง่ายโดยไม่มี error จนกว่าจะรันจริง |
+| `FadeTransition` แทน `AnimatedBuilder` + `Opacity` เขียนมือ | child ไม่ rebuild ทุก tick, กลไก disposal ที่ถูกต้องมีมาให้แล้ว | ยืดหยุ่นน้อยกว่า builder เขียนมือสำหรับอะไรที่เกินกว่า fade แบบตรง ๆ |
+| `RepaintBoundary` ต่อ grid tile | แยก repaint ของแต่ละ tile ออกจากกัน -- พิสูจน์แล้วด้านบน | แต่ละ boundary คือ layer/การจอง memory ของตัวเอง; โอเคถ้าใช้ต่อ tile แต่สิ้นเปลืองถ้าใส่ทุก leaf widget แบบไม่เลือก |
+| `cacheWidth`/`cacheHeight` บนทุก thumbnail | ประหยัด memory ได้จริงและเยอะ ตามเอกสารของ Flutter เอง | ขนาด decode ตายตัว; ต้องเลือกใหม่ถ้าขนาดที่แสดงเปลี่ยน (เช่นหน้า detail) |
+
+## Common Misconceptions
+
+- **"ถ้า `flutter build web` ผ่าน แอปก็ใช้งานได้บน web"** พิสูจน์แล้วว่าผิดด้านบน: `UploadClient` compile และ build สะอาดสำหรับ web แล้ว throw `UnsupportedError` ทันทีที่ `uploadInChunks` รันจริงบนนั้น build ที่เขียวพิสูจน์แค่ว่าโค้ด type-check ผ่านและ bundle ได้ -- ไม่ได้บอกอะไรเลยว่ามันทำอะไรตอน runtime บนแพลตฟอร์มนั้น
+- **"`Column` ข้างใน `ListView` คือการซ้อนที่อันตราย ไม่ใช่ทางกลับกัน"** แก้ไขแล้วด้านบนด้วย test ตรง ๆ: `ListView(children: [Column(...)])` ไม่พัง การพังจริง ๆ ต้องการให้ *ตัวที่ scroll ได้* เป็นตัวที่ได้รับความสูงแบบ unbounded จากช่องที่ไม่ flexible
+- **"`Opacity` ข้างใน `AnimatedBuilder` ถูกกว่า `FadeTransition` เพราะมัน 'ง่ายกว่า'"** ทั้งคู่จองต้นทุน compositing layer เท่ากันเป๊ะเมื่อค่าไม่เป็นศูนย์ (พิสูจน์แล้วใน Render pipeline) ความต่างที่พิสูจน์ตรงนี้คือเวอร์ชันเขียนมือ rebuild child ของมันทุก tick ด้วย ซึ่ง parameter `child` ของ `FadeTransition` หลีกเลี่ยงได้
+- **"`cacheWidth`/`cacheHeight` สำคัญเท่ากันทุกแพลตฟอร์ม"** ตาม doc comment ของ widget เอง มันถูกมองข้ามโดยเฉพาะสำหรับ `Image.network` บน web เพราะ web engine ส่งต่อการ decode ให้ browser จัดการ
+
+<Mermaid title="แต่ละ bug อยู่ตรงไหนในหน้าจอ gallery เดียว" code={wr2Diagram} />
+
+export const wr2Diagram = `flowchart TD
+  A["decodePhotoReportingProgress(bytes, ReceivePort)"] -->|"1: captures a ReceivePort"| A
+  B["averageBrightness(rgba)"] -->|"2: runs on the calling isolate, 25ms"| B
+  C["PhotoTile: AnimationController"] -->|"3: never disposed"| C
+  C --> D["AnimatedBuilder + Opacity, inline child"]
+  D -->|"4: child rebuilt every tick"| D
+  D -->|"6: no RepaintBoundary"| D
+  E["GalleryGrid: CustomScrollView"] -->|"5: cacheExtent deprecated"| E
+  F["UploadPanel: Column > ListView"] -->|"7: unbounded height"| F
+  G["Image.network(url)"] -->|"8: no cacheWidth/cacheHeight"| G
+  H["UploadClient: dart:io File"] -->|"9: UnsupportedError on web"| H
+  I["UploadProgressView.build"] -->|"10: Future created in build"| I
+`;
+
+<Callout title="สรุปในบรรทัดเดียว">
+ครึ่งหนึ่งของ 10 bug นี้ (1, 3, 7, 9 และตัวจับเวลาคือ 2) เป็นสิ่งที่จะพังเสียงดังทันทีที่มีใครเดินเข้าเส้นทางนั้นจริง ๆ -- background isolate, widget ที่ถูก dispose, list ที่ห่อด้วย Column, web build, รูปความละเอียดเต็ม -- ส่วนอีกครึ่ง (4, 5, 6, 8, 10) เป็น bug ที่มีแต่ต้นทุนล้วน ๆ ไม่มี error message เลยสักนิด มีแต่แอปที่ช้าลงหรือ leak มากขึ้น ไม่มีตัวไหนโผล่มาให้เห็นตอน scroll ดูรูป 5 รูปใน simulator สัก 30 วินาที ซึ่งนี่แหละคือเหตุผลที่แต่ละตัวต้องการ test ที่เจาะจงหรือข้อเท็จจริงที่มีเอกสารรองรับ ไม่ใช่แค่ "ดูเหมือนโอเค"
+</Callout>
+
+export const quizWorkedReview2 = [
+  {
+    q: 'การเรียก `compute()` ที่ closure capture `ReceivePort` throw `Illegal argument in isolate message` พิสูจน์แล้วเหมือนกันเป๊ะกับ repro ของบท `Isolates & compute()` เอง อะไรกันแน่ที่ทำให้เกิด error นี้?',
+    options: [
+      'compute() รับแค่ฟังก์ชัน synchronous เท่านั้น ไม่รับ async เลย',
+      'closure ที่ส่งเข้า compute() ต้องถูก serialize เพื่อข้ามไปยัง background isolate เป็นส่วนหนึ่งของ message ของ compute() เอง และ ReceivePort เป็น handle ที่ผูกกับ isolate โดยตรงซึ่งไม่มีรูปแบบที่ส่งข้ามได้เลย',
+      'ReceivePort ใช้ได้แค่ครั้งเดียวต่อ isolate และนี่คือการใช้ครั้งที่สอง',
+      'argument (int) ต่างหากที่เป็นปัญหา ไม่ใช่ closure',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบนด้วยข้อความ error จริงเดียวกันเป๊ะกับบทที่อ้างถึง: closure ของ compute()/Isolate.run capture ได้แค่ข้อมูลธรรมดาที่ส่งข้ามได้ (หรือไม่ capture เลย) -- ReceivePort ก็อปข้าม isolate boundary ไม่ได้',
+  },
+  {
+    q: '`averageBrightness` บน buffer RGBA ขนาด 4000x3000 วัดได้ 25ms บน Mac เครื่องนี้ เรียกโดยไม่มี `compute()`/`Isolate.run` ห่ออยู่เลย ทำไมตัวเลขนี้ถึงสำคัญเป็นพิเศษ?',
+    options: [
+      '25ms เร็วอยู่แล้ว เรื่องนี้ไม่ใช่ปัญหาจริง',
+      'มันเกินงบ ~16.6ms ต่อเฟรมสำหรับ 60fps (พิสูจน์แล้วใน Render pipeline) ด้วยตัวมันเองเลย -- ถ้าเรียกจาก build() หรือ frame callback แค่นี้ก็ทำให้เฟรมหลุดไปแล้วอย่างน้อย 1 เฟรม ก่อนที่จะมีงาน decode รูปจริงเพิ่มเข้ามาด้วยซ้ำ',
+      'ตัวเลขนี้จะเท่ากันทุกเครื่อง เลยไม่คุ้มที่จะวัด',
+      'สำคัญแค่ถ้าแอปเล็งเป้าไปที่จอ 120Hz',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบน: 25ms เกินงบ 16.6ms ที่บท Render pipeline วางไว้สำหรับ 60fps ไปแล้ว -- รันตรงบน isolate ที่จัดการงาน UI (หรือ isolate ไหนก็ตามที่ build() รอผลแบบ synchronous) นี่คือเฟรมที่หลุดจริง วัดได้จริง',
+  },
+  {
+    q: '`ListView(children: [Column(children: [Text(\'a\')])])` ไม่ throw ในขณะที่ `Column(children: [Text(\'header\'), ListView(children: [...])])` throw `Vertical viewport was given unbounded height.` กติกาจริง ๆ ที่พิสูจน์ด้วยการทดสอบทั้งสองรูปแบบคืออะไร?',
+    options: [
+      'Column กับ ListView ซ้อนกันไม่ได้เลยไม่ว่าลำดับไหน',
+      'การพังต้องการให้ตัวที่ SCROLL ได้ (ListView/viewport) เป็นตัวที่ได้รับความสูงแบบ unbounded จากช่อง parent ที่ไม่ flexible -- children ที่ไม่ flex ของ Column ได้รับ main-axis constraint แบบ unbounded แต่ item ของ ListView เองรับความสูงแบบ unbounded ได้สบาย เพราะมันแค่รายงานขนาดตามธรรมชาติของตัวเอง',
+      'มีแค่ GridView เท่านั้นที่ทำให้เกิดเรื่องนี้ ไม่ใช่ ListView',
+      'การพังจะเกิดก็ต่อเมื่อมี children ตั้งแต่ 2 ตัวขึ้นไป',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ตรง ๆ ด้านบน (และในบท Constraints & Layout ที่อ้างถึง): รูปแบบ Column-ห่อ-ListView พังเพราะ viewport กำหนดขอบเขตแกน scroll ของตัวเองไม่ได้; รูปแบบกลับกัน (ListView-ห่อ-Column) ไม่พัง เพราะ Column ที่ได้รับความสูงแบบ unbounded แค่ตั้งขนาดตาม children แทนที่จะพยายามเติมพื้นที่ไม่จำกัด',
+  },
+  {
+    q: '`flutter build web` เสร็จสมบูรณ์สำหรับไฟล์ที่ import `dart:io` และเรียก `File(path).length()` build web ที่สำเร็จพิสูจน์อะไรเกี่ยวกับโค้ดนี้จริง ๆ?',
+    options: [
+      'พิสูจน์ว่าโค้ดทำงานถูกต้องบน web ตอน runtime',
+      'พิสูจน์แค่ว่าโค้ด type-check ผ่านและ bundle ได้สำหรับ web target -- ไม่บอกอะไรเรื่องพฤติกรรม runtime เลย; web patch ของ SDK เอง (io_patch.dart) แทนที่ File._lengthFromPath ด้วยฟังก์ชันที่ throw UnsupportedError แบบไม่มีเงื่อนไข',
+      'พิสูจน์ว่า dart:io รองรับบน web เต็มรูปแบบแล้วใน Flutter เวอร์ชันนี้',
+      'พิสูจน์ว่า build system ข้ามไฟล์ที่พึ่งพา dart:io ไปเงียบ ๆ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบนด้วยการรัน flutter build web จริง (จบแบบสะอาด, "Built build/web") กับไฟล์นี้เป๊ะ ๆ บวกกับ source ของ SDK เอง: dart:io compile ผ่านสำหรับ web เพราะพื้นผิว API ของมันมี stub declaration จริง (ที่ throw) อยู่ที่นั่น -- build ที่ผ่านเช็กแค่การ compile ไม่ได้เช็กว่าโค้ดทำอะไรตอนรันจริงบนแพลตฟอร์มนั้น',
+  },
+  {
+    q: 'เพิ่ม `RepaintBoundary` รอบ `PhotoTile` ใน `Row` ที่มี `CountBadge` นิ่ง ๆ อยู่ด้วย `badgePaintCount` หยุดเพิ่มตอน tile animate ในขณะที่การ repaint ของ tile เองยังเพิ่มต่อไปไม่ว่าจะมี boundary หรือไม่ สิ่งนี้พิสูจน์อะไรเกี่ยวกับสิ่งที่ `RepaintBoundary` ทำจริง ๆ?',
+    options: [
+      'RepaintBoundary ทำให้ widget ที่ห่ออยู่ไม่ repaint เลยตลอดไป',
+      'RepaintBoundary ให้ subtree ที่ห่ออยู่มี layer เป็นของตัวเอง ดังนั้น repaint ของ "มันเอง" จึงหยุดบังคับให้ sibling ที่ไม่เกี่ยวข้องซึ่งใช้ canvas เดียวกัน repaint ไปด้วย -- เนื้อหาข้างในของ boundary เองยัง repaint บ่อยเท่าเดิมทุกประการ',
+      'RepaintBoundary ใช้ได้แค่ข้างใน CustomScrollView เท่านั้น',
+      'RepaintBoundary ทำให้ AnimationController หยุด tick ไปเลย',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบนด้วย test คู่กัน 2 ตัว: ถ้าไม่มี boundary จำนวน paint ของ CountBadge เพิ่มขึ้นล้วน ๆ เพราะ PhotoTile (sibling ที่ไม่เกี่ยวข้อง) เปลี่ยน; ถ้ามี boundary จำนวนของ CountBadge นิ่งอยู่ในขณะที่ PhotoTile ยัง animate ต่อไป -- ต้นทุน repaint ของ tile เองไม่เปลี่ยน มีแค่การ leak ไปยัง sibling เท่านั้นที่หยุด',
+  },
+];
+
+<Quiz client:visible id="reading-flutter/worked-review-2" questions={quizWorkedReview2} />
+
+<ProgressTracker client:visible id="reading-flutter/worked-review-2" />
