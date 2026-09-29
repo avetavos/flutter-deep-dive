@@ -1,0 +1,1518 @@
+---
+title: 'Worked review 1: a todo app with Riverpod codegen and go_router'
+description: 'An AI-generated todo app -- @riverpod codegen, a StatefulShellRoute.indexedStack router, and a widget test -- reviewed bug by bug against real ProviderScope, route-ordering, autoDispose, and mounted-guard failures in this course probe.'
+sidebar:
+  order: 4
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The feature
+
+The prompt was: *"Build a small todo app: a list screen, an add-todo screen, a details screen, and a settings tab -- use Riverpod's `@riverpod` code generation for state and go_router for navigation, with a bottom nav bar that keeps each tab's own back stack."* What follows is the kind of first draft an AI assistant hands back for exactly that prompt: every file compiles (once you generate the codegen output it forgot to include, itself the first bug), the happy path genuinely works if you follow the exact sequence the AI tested, and it *looks* like idiomatic Riverpod 3 + go_router 18. Read it the way the **[review checklist](/flutter/en/reading-flutter/review-checklist/)** recommends: state ownership first (who reads/writes what, and when), then navigation structure, then lifecycle. It has **10 real bugs**; most map directly onto categories in the **[AI bug catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**. Every claim below was run for real in this course's own probe (Flutter 3.47.5 / `flutter_riverpod` 3.4.3 / `go_router` 18.0.1 / `riverpod_generator` 4.0.9) -- real `flutter analyze`, real `flutter test`, real generated `.g.dart` output, nothing pasted from memory.
+
+## The generated code
+
+```dart
+// lib/todo_app/todo.dart
+class Todo {
+  const Todo({required this.id, required this.title, this.done = false});
+  final String id;
+  final String title;
+  final bool done;
+
+  Todo copyWith({bool? done}) => Todo(id: id, title: title, done: done ?? this.done);
+}
+```
+
+```dart
+// lib/todo_app/todos_provider.dart
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+import 'todo.dart';
+
+part 'todos_provider.g.dart';
+
+@riverpod
+class TodosNotifier extends _$TodosNotifier {
+  int _nextId = 0;
+
+  @override
+  List<Todo> build() => [];
+
+  void add(String title) {
+    final todo = Todo(id: '${_nextId++}', title: title);
+    state = [...state, todo];
+  }
+
+  void toggle(String id) {
+    state = [
+      for (final todo in state)
+        if (todo.id == id) todo.copyWith(done: !todo.done) else todo,
+    ];
+  }
+}
+```
+
+```dart
+// lib/todo_app/todos_provider.g.dart
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'todos_provider.dart';
+
+// **************************************************************************
+// RiverpodGenerator
+// **************************************************************************
+
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
+
+@ProviderFor(TodosNotifier)
+final todosProvider = TodosNotifierProvider._();
+
+final class TodosNotifierProvider
+    extends $NotifierProvider<TodosNotifier, List<Todo>> {
+  TodosNotifierProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'todosProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$todosNotifierHash();
+
+  @$internal
+  @override
+  TodosNotifier create() => TodosNotifier();
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(List<Todo> value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<List<Todo>>(value),
+    );
+  }
+}
+
+String _$todosNotifierHash() => r'495844280287e0753d94c41f6279ab93507025b0';
+
+abstract class _$TodosNotifier extends $Notifier<List<Todo>> {
+  List<Todo> build();
+  @$mustCallSuper
+  @override
+  WhenComplete runBuild() {
+    final ref = this.ref as $Ref<List<Todo>, List<Todo>>;
+    final element =
+        ref.element
+            as $ClassProviderElement<
+              AnyNotifier<List<Todo>, List<Todo>>,
+              List<Todo>,
+              Object?,
+              Object?
+            >;
+    return element.handleCreate(ref, build);
+  }
+}
+```
+
+<Callout title="Real generated code, checked in">
+`riverpod_generator` names the exposed provider variable after the class name **with a trailing `Notifier` stripped**: `TodosNotifier` generates `todosProvider`, not `todosNotifierProvider`. Every file below uses the real generated name -- this is exactly the kind of detail that's easy to get wrong copying an AI's own inconsistent guess at the name.
+</Callout>
+
+```dart
+// lib/todo_app/todo_details_provider.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'todo.dart';
+import 'todos_provider.dart';
+
+final selectedTodoProvider = Provider.family<Todo?, String>((ref, id) {
+  final todos = ref.watch(todosProvider);
+  for (final todo in todos) {
+    if (todo.id == id) return todo;
+  }
+  return null;
+});
+```
+
+```dart
+// lib/todo_app/onboarding_state.dart
+import 'package:flutter/foundation.dart';
+
+class OnboardingState extends ChangeNotifier {
+  bool completed = false;
+
+  void complete() {
+    completed = true;
+    notifyListeners();
+  }
+}
+```
+
+```dart
+// lib/todo_app/onboarding_screen.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'onboarding_state.dart';
+
+class OnboardingScreen extends StatelessWidget {
+  const OnboardingScreen({super.key, required this.onboarding});
+  final OnboardingState onboarding;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ElevatedButton(
+          onPressed: () {
+            onboarding.complete();
+            context.go('/todos');
+          },
+          child: const Text('Get started'),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app/shell_scaffold.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class TodoShellScaffold extends StatelessWidget {
+  const TodoShellScaffold({super.key, required this.navigationShell});
+  final StatefulNavigationShell navigationShell;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: navigationShell,
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: navigationShell.currentIndex,
+        onDestinationSelected: (i) => navigationShell.goBranch(i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.checklist), label: 'Todos'),
+          NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app/router.dart
+import 'package:go_router/go_router.dart';
+
+import 'new_todo_screen.dart';
+import 'onboarding_screen.dart';
+import 'onboarding_state.dart';
+import 'settings_screen.dart';
+import 'shell_scaffold.dart';
+import 'todo_details_screen.dart';
+import 'todos_list_screen.dart';
+
+final onboarding = OnboardingState();
+
+final todoRouter = GoRouter(
+  initialLocation: '/onboarding',
+  redirect: (context, state) {
+    final onboardingPath = state.matchedLocation == '/onboarding';
+    if (!onboarding.completed && !onboardingPath) return '/onboarding';
+    return null;
+  },
+  routes: [
+    GoRoute(
+      path: '/onboarding',
+      builder: (context, state) => OnboardingScreen(onboarding: onboarding),
+    ),
+    StatefulShellRoute.indexedStack(
+      builder: (context, state, navigationShell) =>
+          TodoShellScaffold(navigationShell: navigationShell),
+      branches: [
+        StatefulShellBranch(routes: [
+          GoRoute(path: '/todos', builder: (context, state) => const TodosListScreen()),
+          GoRoute(
+            path: '/todos/:id',
+            builder: (context, state) =>
+                TodoDetailsScreen(id: state.pathParameters['id']!),
+          ),
+          GoRoute(path: '/todos/new', builder: (context, state) => const NewTodoScreen()),
+        ]),
+        StatefulShellBranch(routes: [
+          GoRoute(path: '/settings', builder: (context, state) => const SettingsScreen()),
+        ]),
+      ],
+    ),
+  ],
+);
+```
+
+```dart
+// lib/todo_app/todos_list_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import 'todos_provider.dart';
+
+class TodosListScreen extends ConsumerWidget {
+  const TodosListScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final todos = ref.read(todosProvider);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Todos')),
+      body: ListView(
+        children: [
+          for (final todo in todos)
+            ListTile(
+              title: Text(todo.title),
+              trailing: todo.done ? const Icon(Icons.check) : null,
+              onTap: () => context.go('/todos/${todo.id}'),
+            ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => context.push('/todos/new'),
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app/new_todo_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import 'todos_provider.dart';
+
+class NewTodoScreen extends ConsumerStatefulWidget {
+  const NewTodoScreen({super.key});
+  @override
+  ConsumerState<NewTodoScreen> createState() => _NewTodoScreenState();
+}
+
+class _NewTodoScreenState extends ConsumerState<NewTodoScreen> {
+  final _controller = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('New todo')),
+      body: Column(
+        children: [
+          TextField(controller: _controller),
+          ElevatedButton(
+            onPressed: () {
+              final notifier = ref.watch(todosProvider.notifier);
+              notifier.add(_controller.text);
+              context.pop();
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app/todo_details_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'todo_details_provider.dart';
+
+class TodoDetailsScreen extends ConsumerStatefulWidget {
+  const TodoDetailsScreen({super.key, required this.id});
+  final String id;
+
+  @override
+  ConsumerState<TodoDetailsScreen> createState() => _TodoDetailsScreenState();
+}
+
+class _TodoDetailsScreenState extends ConsumerState<TodoDetailsScreen> {
+  String? _confirmation;
+
+  Future<void> _confirmView() async {
+    final label = await Future<String>.delayed(
+      const Duration(milliseconds: 20),
+      () => 'viewed',
+    );
+    setState(() => _confirmation = label);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final todo = ref.watch(selectedTodoProvider(widget.id));
+    return Scaffold(
+      appBar: AppBar(title: Text(todo?.title ?? 'Not found')),
+      body: Column(
+        children: [
+          Text(todo?.done == true ? 'done' : 'not done'),
+          if (_confirmation != null) Text(_confirmation!),
+          ElevatedButton(onPressed: _confirmView, child: const Text('confirm view')),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app/settings_screen.dart
+import 'package:flutter/material.dart';
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: const Center(child: Text('Settings')),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app/main.dart
+import 'package:flutter/material.dart';
+
+import 'router.dart';
+
+void main() {
+  runApp(const TodoApp());
+}
+
+class TodoApp extends StatelessWidget {
+  const TodoApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(routerConfig: todoRouter);
+  }
+}
+```
+
+The AI also included a widget test -- the kind that passes locally because it only pumps the onboarding screen and never reaches a single `ConsumerWidget`:
+
+```text
+testWidgets('shows the get-started button', (tester) async {
+  await tester.pumpWidget(const TodoApp());
+  expect(find.text('Get started'), findsOneWidget);
+});
+```
+
+That test genuinely passes (`OnboardingScreen` is a plain `StatelessWidget`, no provider read at all) -- which is exactly how bug 1 below shipped unnoticed.
+
+Two more mistakes showed up in the same PR, each one a real compile error rather than a runtime surprise:
+
+```dart
+// @expect-error missing `part` directive -- extends_non_class + undefined_identifier, proven below
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class TodosNotifier extends _$TodosNotifier {
+  @override
+  List<String> build() => [];
+
+  void add(String title) => state = [...state, title];
+}
+```
+
+```dart
+// @expect-error StateNotifierProvider/StateNotifier undefined -- not exported from flutter_riverpod.dart, proven below
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+enum TodoFilter { all, active, done }
+
+class FilterNotifier extends StateNotifier<TodoFilter> {
+  FilterNotifier() : super(TodoFilter.all);
+  void set(TodoFilter f) => state = f;
+}
+
+final filterProvider =
+    StateNotifierProvider<FilterNotifier, TodoFilter>((ref) => FilterNotifier());
+```
+
+## The review walk
+
+### 1. No `ProviderScope` -- every `ConsumerWidget` throws the moment it reads a provider
+
+`main.dart` never wraps `TodoApp` in a `ProviderScope`. `OnboardingScreen` doesn't touch a provider, so the AI's own test (and a quick manual look at the first screen) never surfaces this -- the crash only fires once navigation reaches a real `ConsumerWidget`, proven here by completing onboarding and going to `/todos`:
+
+```text
+StateError: Bad state: No ProviderScope found
+```
+
+<SpotTheBug code={`void main() {
+  runApp(const TodoApp());
+}`}>
+Exactly the trap proven in **[Provider & Riverpod](/flutter/en/state-management/provider-and-riverpod/)**: every `ref.watch`/`ref.read` needs a `ProviderContainer` reachable via `ProviderScope`, and Riverpod does not create one for you. The fix is one line at the root: `runApp(const ProviderScope(child: TodoApp()))`.
+</SpotTheBug>
+
+### 2. Missing `part 'todos_provider.g.dart';` -- a real, separate compile error
+
+Not in the shipped `todos_provider.dart` above (that one has its `part` directive), but the same mistake showed up in an earlier revision of this exact class, and it's common enough to be worth isolating on its own. The real, unedited `flutter analyze` output for the snippet in the previous section:
+
+```text
+error • Classes can only extend other classes. Try specifying a different superclass, or removing the extends clause • extends_non_class
+warning • The method doesn't override an inherited method • override_on_non_overriding_member
+error • Undefined name 'state'. Try correcting the name to one that is defined, or defining the name • undefined_identifier
+error • Undefined name 'state'. Try correcting the name to one that is defined, or defining the name • undefined_identifier
+```
+
+`_$TodosNotifier` doesn't exist without the `part` directive pulling in the generated file that defines it -- the analyzer reads `extends _$TodosNotifier` as extending an undefined name, and `state` (which `_$TodosNotifier` would provide) as undefined too, twice, once per use on the same line.
+
+### 3. Route order: `/todos/:id` declared before `/todos/new`
+
+Inside the Todos branch, `router.dart` declares the parameterized details route **before** the literal `/todos/new` route. go_router matches a branch's own route list top to bottom, first match wins:
+
+```dart
+// test/todo_app/route_order_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todo_app/router.dart';
+
+void main() {
+  testWidgets('"/todos/new" is swallowed by ":id" declared first -- NewTodoScreen never builds', (tester) async {
+    onboarding.complete();
+    await tester.pumpWidget(
+      ProviderScope(child: MaterialApp.router(routerConfig: todoRouter)),
+    );
+    todoRouter.go('/todos/new');
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TextField), findsNothing,
+        reason: 'NewTodoScreen (which has a TextField) never built');
+    expect(find.text('Not found'), findsOneWidget,
+        reason: '":id" matched first with id="new" -- TodoDetailsScreen '
+            'looked up a todo with id "new", found none, and shows '
+            '"Not found" instead of the new-todo form');
+  });
+}
+```
+
+```text
+✓ "/todos/new" is swallowed by ":id" declared first -- NewTodoScreen never builds
+
+00:00 +1: All tests passed!
+```
+
+Same trap proven for a top-level pair of routes in **[Declarative routing](/flutter/en/navigation/declarative-routing/)**; it applies identically to routes declared inside one `StatefulShellBranch`'s own list.
+
+### 4. `context.go` where `push` was needed -- the back stack is gone
+
+`TodosListScreen` opens details with `context.go('/todos/${todo.id}')`. `go` sets the current location outright; it does not push on top of whatever was there:
+
+```dart
+// test/todo_app/go_vs_push_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todo_app/router.dart';
+import 'package:my_app/todo_app/todos_provider.dart';
+
+void main() {
+  testWidgets('tapping a todo uses context.go -- the Todos list is gone from the back stack', (tester) async {
+    onboarding.completed = false;
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container.listen(todosProvider, (_, _) {}); // keep alive: todosProvider is .autoDispose by default
+    container.read(todosProvider.notifier).add('Buy milk'); // id '0'
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(routerConfig: todoRouter),
+      ),
+    );
+    onboarding.complete();
+    todoRouter.go('/todos');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Buy milk'));
+    await tester.pumpAndSettle();
+    expect(find.text('not done'), findsOneWidget, reason: 'details screen opened');
+
+    expect(find.byTooltip('Back'), findsNothing,
+        reason: 'context.go() replaced the list route instead of pushing '
+            'on top of it -- the back stack lost the Todos list entirely');
+  });
+}
+```
+
+```text
+✓ tapping a todo uses context.go -- the Todos list is gone from the back stack
+
+00:00 +1: All tests passed!
+```
+
+### 5. `redirect` with no `refreshListenable` -- onboarding can complete and the app never notices
+
+`router.dart`'s top-level `redirect` checks `onboarding.completed`, but nothing tells the router to re-run `redirect` when `onboarding` itself changes -- only navigation triggers a re-evaluation:
+
+```dart
+// test/todo_app/redirect_no_refresh_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todo_app/router.dart';
+
+void main() {
+  testWidgets('redirect has no refreshListenable -- onboarding.complete() alone does not leave /onboarding', (tester) async {
+    onboarding.completed = false;
+    await tester.pumpWidget(
+      ProviderScope(child: MaterialApp.router(routerConfig: todoRouter)),
+    );
+    expect(find.text('Get started'), findsOneWidget);
+
+    onboarding.completed = true;
+    await tester.pumpAndSettle();
+
+    expect(find.text('Get started'), findsOneWidget,
+        reason: 'onboarding.completed flipped with no navigation call -- '
+            'redirect never re-ran because refreshListenable was not wired');
+  });
+}
+```
+
+```text
+✓ redirect has no refreshListenable -- onboarding.complete() alone does not leave /onboarding
+
+00:00 +1: All tests passed!
+```
+
+The button's own `onPressed` masks this completely -- it calls `onboarding.complete()` **and then** `context.go('/todos')` itself, so the happy path always works. It's any *other* path to completing onboarding (a restored session, a background auth callback) that gets stuck.
+
+### 6. `StateNotifierProvider` used without importing `package:flutter_riverpod/legacy.dart`
+
+Elsewhere in the same PR, a filter toggle was written with `StateNotifier`/`StateNotifierProvider` -- legacy Riverpod 1/2 APIs. In Riverpod 3, `flutter_riverpod/flutter_riverpod.dart` no longer exports them at all; they moved to a separate `legacy.dart` entry point, confirmed directly from the installed package:
+
+```text
+// flutter_riverpod-3.4.3/lib/legacy.dart
+export 'src/internals.dart'
+    show
+        StateNotifier,
+        StateController,
+        StateNotifierProvider,
+        StateProvider,
+        ChangeNotifierProvider,
+        ChangeNotifierProviderFamily,
+        StateNotifierProviderFamily,
+        StateProviderFamily;
+```
+
+The real, unedited `flutter analyze` output for the snippet above, importing only the main barrel:
+
+```text
+error • Classes can only extend other classes. Try specifying a different superclass, or removing the extends clause • extends_non_class
+error • Too many positional arguments: 0 expected, but 1 found. Try removing the extra arguments • extra_positional_arguments
+error • Undefined name 'state'. Try correcting the name to one that is defined, or defining the name • undefined_identifier
+error • The function 'StateNotifierProvider' isn't defined. Try importing the library that defines 'StateNotifierProvider', correcting the name to the name of an existing function, or defining a function named 'StateNotifierProvider' • undefined_function
+```
+
+Switching the import to `package:flutter_riverpod/legacy.dart` alone makes this exact snippet analyze clean -- but that's a half-fix. Per Riverpod's own [migration guide](https://riverpod.dev/docs/migration/from_state_notifier), `StateNotifier`/`StateNotifierProvider` are legacy; the real fix in an app that's already using `@riverpod` codegen everywhere else (like this one) is a `Notifier`/`@riverpod` class, not a second import unlocking a deprecated API.
+
+### 7. `ref.read` inside `build` -- the list never rebuilds
+
+`TodosListScreen.build` calls `ref.read(todosProvider)` instead of `ref.watch`. `read` does not subscribe -- the list is frozen at whatever it was on the first build:
+
+```dart
+// test/todo_app/read_in_build_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todo_app/todos_list_screen.dart';
+import 'package:my_app/todo_app/todos_provider.dart';
+
+void main() {
+  testWidgets('ref.read in TodosListScreen.build never rebuilds after add()', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: TodosListScreen()),
+      ),
+    );
+    expect(find.text('Buy milk'), findsNothing);
+
+    container.read(todosProvider.notifier).add('Buy milk');
+    await tester.pump();
+
+    expect(find.text('Buy milk'), findsNothing,
+        reason: 'ref.read() in build() does not subscribe -- the list is '
+            'stale until something else forces a rebuild');
+  });
+}
+```
+
+```text
+✓ ref.read in TodosListScreen.build never rebuilds after add()
+
+00:00 +1: All tests passed!
+```
+
+### 8. `ref.watch` inside `onPressed` -- doesn't throw, but is still wrong
+
+`NewTodoScreen`'s submit button reads `ref.watch(todosProvider.notifier)` from inside a callback instead of `ref.read`. The common assumption is that this throws immediately, the way `ref.listen` does (`ref.listen can only be used within the build method of a ConsumerWidget`, a real `assert` in `flutter_riverpod`'s own source). `watch` has **no such assertion** -- checked directly against the installed package. Proven with a build counter: tapping a button that calls `ref.watch` does not throw, and does not itself trigger a rebuild -- but it silently registers a subscription that a real `build()` pass would have cleaned up, so a later, unrelated state change causes a rebuild nothing in `build()` asked for:
+
+```dart
+// lib/wr1_examples/watch_in_callback.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+final counterProvider = NotifierProvider<CounterNotifier, int>(CounterNotifier.new);
+
+class CounterNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+  void increment() => state++;
+}
+
+int buildCount = 0;
+
+class BadWatchInCallback extends ConsumerWidget {
+  const BadWatchInCallback({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    buildCount++;
+    return ElevatedButton(
+      onPressed: () {
+        final count = ref.watch(counterProvider); // AI comment: "grab the latest count"
+        debugPrint('count: $count');
+      },
+      child: const Text('tap'),
+    );
+  }
+}
+```
+
+```dart
+// test/wr1_examples/watch_in_callback_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/wr1_examples/watch_in_callback.dart';
+
+void main() {
+  testWidgets('ref.watch in onPressed does not throw, but leaks a phantom rebuild subscription', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    buildCount = 0;
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: BadWatchInCallback()),
+      ),
+    );
+    expect(buildCount, 1, reason: 'one initial build');
+
+    await tester.tap(find.byType(ElevatedButton));
+    await tester.pump();
+    expect(tester.takeException(), isNull,
+        reason: 'ref.watch in a callback does NOT throw -- unlike ref.listen, which asserts debugDoingBuild');
+    expect(buildCount, 1, reason: 'onPressed itself does not trigger a build');
+
+    // Mutate counterProvider from OUTSIDE this widget entirely -- build()
+    // itself never calls ref.watch(counterProvider), only the callback did.
+    container.read(counterProvider.notifier).increment();
+    await tester.pump();
+
+    expect(buildCount, 2,
+        reason: 'phantom rebuild: the callback-registered subscription from '
+            'ref.watch() is still alive and fires markNeedsBuild() on every '
+            'future change, even though build() never watches it');
+  });
+}
+```
+
+```text
+✓ ref.watch in onPressed does not throw, but leaks a phantom rebuild subscription
+
+00:00 +1: All tests passed!
+```
+
+### 9. Missing `.autoDispose` on `selectedTodoProvider` -- state for every todo ever viewed is cached forever
+
+`todo_details_provider.dart` is a hand-written `Provider.family`, not generated -- so it doesn't get `@riverpod`'s `.autoDispose`-by-default behavior at all. Proven with a `ProviderObserver` watching for `didDisposeProvider`:
+
+```dart
+// test/todo_app/details_leak_test.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todo_app/todo_details_provider.dart';
+import 'package:my_app/todo_app/todos_provider.dart';
+
+base class _DisposeSpy extends ProviderObserver {
+  final disposed = <String>[];
+  @override
+  void didDisposeProvider(ProviderObserverContext context) {
+    disposed.add(context.provider.toString());
+  }
+}
+
+void main() {
+  test('selectedTodoProvider has no .autoDispose -- never disposed once its last listener leaves', () {
+    final spy = _DisposeSpy();
+    final container = ProviderContainer(observers: [spy]);
+    addTearDown(container.dispose);
+    container.read(todosProvider.notifier).add('Buy milk'); // id '0'
+
+    final sub = container.listen(selectedTodoProvider('0'), (_, _) {});
+    expect(container.read(selectedTodoProvider('0'))?.title, 'Buy milk');
+    sub.close(); // details screen popped -- last listener gone
+
+    expect(spy.disposed, isEmpty,
+        reason: 'no .autoDispose: selectedTodoProvider("0") was never '
+            'disposed after its only listener closed');
+  });
+}
+```
+
+```text
+✓ selectedTodoProvider has no .autoDispose -- never disposed once its last listener leaves
+
+00:00 +1: All tests passed!
+```
+
+A real `@riverpod` family function defaults to `.autoDispose` -- the fix isn't adding a modifier, it's generating this provider instead of hand-writing it (see the corrected code below).
+
+### 10. `setState` after an unguarded `await`, no `mounted` check
+
+`TodoDetailsScreen._confirmView` awaits a delayed result, then calls `setState` unconditionally. If the screen is removed from the tree while that `Future` is still pending (its todo deleted from another tab, the branch's stack changed), the widget is already disposed by the time it resolves. This is the exact mechanism proven end to end in the **[setState and lifecycle](/flutter/en/state-management/setstate-and-lifecycle/)** lesson's `mounted`-guard section; reproduced here for this screen's own shape:
+
+```text
+setState() called after dispose(): _TodoDetailsScreenState#4cbf7(lifecycle state: defunct, not mounted)
+This error happens if you call setState() on a State object for a widget that no longer appears in
+the widget tree (e.g., whose parent widget no longer includes the widget in its build). This error
+can occur when code calls setState() from a timer, from an animation callback, or after an
+asynchronous operation (such as an awaited network request or other Future) completes after the
+widget has been removed from the tree.
+The preferred solution is to cancel the timer or stop listening to the animation in the dispose()
+callback. Another solution is to check the "mounted" property of this object before calling
+setState() to ensure the object is still in the tree.
+This error might indicate a memory leak if setState() is being called because another object is
+retaining a reference to this State object after it has been removed from the tree. To avoid memory
+leaks, consider breaking the reference to this object during dispose().
+```
+
+## The corrected code
+
+All ten fixes together -- `ProviderScope` at the root, a real generated `@riverpod` family for `selectedTodoProvider`, routes reordered, `push` instead of `go` for details, `refreshListenable` wired to the router, `ref.watch`/`ref.read` used where each belongs, and a `mounted` guard. `todo.dart`, `todos_provider.dart` (and its generated `.g.dart`), `onboarding_state.dart`, `settings_screen.dart`, and `shell_scaffold.dart` are unchanged from the generated version -- reproduced here because this course's probe treats each app directory as its own self-contained project:
+
+```dart
+// lib/todo_app_fixed/todo.dart
+class Todo {
+  const Todo({required this.id, required this.title, this.done = false});
+  final String id;
+  final String title;
+  final bool done;
+
+  Todo copyWith({bool? done}) => Todo(id: id, title: title, done: done ?? this.done);
+}
+```
+
+```dart
+// lib/todo_app_fixed/todos_provider.dart
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+import 'todo.dart';
+
+part 'todos_provider.g.dart';
+
+@riverpod
+class TodosNotifier extends _$TodosNotifier {
+  int _nextId = 0;
+
+  @override
+  List<Todo> build() => [];
+
+  void add(String title) {
+    final todo = Todo(id: '${_nextId++}', title: title);
+    state = [...state, todo];
+  }
+
+  void toggle(String id) {
+    state = [
+      for (final todo in state)
+        if (todo.id == id) todo.copyWith(done: !todo.done) else todo,
+    ];
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/todos_provider.g.dart
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'todos_provider.dart';
+
+// **************************************************************************
+// RiverpodGenerator
+// **************************************************************************
+
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
+
+@ProviderFor(TodosNotifier)
+final todosProvider = TodosNotifierProvider._();
+
+final class TodosNotifierProvider
+    extends $NotifierProvider<TodosNotifier, List<Todo>> {
+  TodosNotifierProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'todosProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$todosNotifierHash();
+
+  @$internal
+  @override
+  TodosNotifier create() => TodosNotifier();
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(List<Todo> value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<List<Todo>>(value),
+    );
+  }
+}
+
+String _$todosNotifierHash() => r'495844280287e0753d94c41f6279ab93507025b0';
+
+abstract class _$TodosNotifier extends $Notifier<List<Todo>> {
+  List<Todo> build();
+  @$mustCallSuper
+  @override
+  WhenComplete runBuild() {
+    final ref = this.ref as $Ref<List<Todo>, List<Todo>>;
+    final element =
+        ref.element
+            as $ClassProviderElement<
+              AnyNotifier<List<Todo>, List<Todo>>,
+              List<Todo>,
+              Object?,
+              Object?
+            >;
+    return element.handleCreate(ref, build);
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/onboarding_state.dart
+import 'package:flutter/foundation.dart';
+
+class OnboardingState extends ChangeNotifier {
+  bool completed = false;
+
+  void complete() {
+    completed = true;
+    notifyListeners();
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/settings_screen.dart
+import 'package:flutter/material.dart';
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: const Center(child: Text('Settings')),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/shell_scaffold.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class TodoShellScaffold extends StatelessWidget {
+  const TodoShellScaffold({super.key, required this.navigationShell});
+  final StatefulNavigationShell navigationShell;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: navigationShell,
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: navigationShell.currentIndex,
+        onDestinationSelected: (i) => navigationShell.goBranch(i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.checklist), label: 'Todos'),
+          NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/todo_details_provider.dart
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+import 'todo.dart';
+import 'todos_provider.dart';
+
+part 'todo_details_provider.g.dart';
+
+@riverpod
+Todo? selectedTodo(Ref ref, String id) {
+  final todos = ref.watch(todosProvider);
+  for (final todo in todos) {
+    if (todo.id == id) return todo;
+  }
+  return null;
+}
+```
+
+```dart
+// lib/todo_app_fixed/todo_details_provider.g.dart
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'todo_details_provider.dart';
+
+// **************************************************************************
+// RiverpodGenerator
+// **************************************************************************
+
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
+
+@ProviderFor(selectedTodo)
+final selectedTodoProvider = SelectedTodoFamily._();
+
+final class SelectedTodoProvider
+    extends $FunctionalProvider<Todo?, Todo?, Todo?>
+    with $Provider<Todo?> {
+  SelectedTodoProvider._({
+    required SelectedTodoFamily super.from,
+    required String super.argument,
+  }) : super(
+         retry: null,
+         name: r'selectedTodoProvider',
+         isAutoDispose: true,
+         dependencies: null,
+         $allTransitiveDependencies: null,
+       );
+
+  @override
+  String debugGetCreateSourceHash() => _$selectedTodoHash();
+
+  @override
+  String toString() {
+    return r'selectedTodoProvider'
+        ''
+        '($argument)';
+  }
+
+  @$internal
+  @override
+  $ProviderElement<Todo?> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  Todo? create(Ref ref) {
+    final argument = this.argument as String;
+    return selectedTodo(ref, argument);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(Todo? value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<Todo?>(value),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is SelectedTodoProvider && other.argument == argument;
+  }
+
+  @override
+  int get hashCode {
+    return argument.hashCode;
+  }
+}
+
+String _$selectedTodoHash() => r'ea84f07b6494f7a7995f73f4e0ab6808b0a9d38d';
+
+final class SelectedTodoFamily extends $Family
+    with $FunctionalFamilyOverride<Todo?, String> {
+  SelectedTodoFamily._()
+    : super(
+        retry: null,
+        name: r'selectedTodoProvider',
+        dependencies: null,
+        $allTransitiveDependencies: null,
+        isAutoDispose: true,
+      );
+
+  SelectedTodoProvider call(String id) =>
+      SelectedTodoProvider._(argument: id, from: this);
+
+  @override
+  String toString() => r'selectedTodoProvider';
+}
+```
+
+```dart
+// lib/todo_app_fixed/todos_list_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import 'todos_provider.dart';
+
+class TodosListScreen extends ConsumerWidget {
+  const TodosListScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final todos = ref.watch(todosProvider);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Todos')),
+      body: ListView(
+        children: [
+          for (final todo in todos)
+            ListTile(
+              key: ValueKey(todo.id),
+              title: Text(todo.title),
+              trailing: todo.done ? const Icon(Icons.check) : null,
+              onTap: () => context.push('/todos/${todo.id}'),
+            ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => context.push('/todos/new'),
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/new_todo_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import 'todos_provider.dart';
+
+class NewTodoScreen extends ConsumerStatefulWidget {
+  const NewTodoScreen({super.key});
+  @override
+  ConsumerState<NewTodoScreen> createState() => _NewTodoScreenState();
+}
+
+class _NewTodoScreenState extends ConsumerState<NewTodoScreen> {
+  final _controller = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('New todo')),
+      body: Column(
+        children: [
+          TextField(controller: _controller),
+          ElevatedButton(
+            onPressed: () {
+              final notifier = ref.read(todosProvider.notifier);
+              notifier.add(_controller.text);
+              context.pop();
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/todo_details_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'todo_details_provider.dart';
+
+class TodoDetailsScreen extends ConsumerStatefulWidget {
+  const TodoDetailsScreen({super.key, required this.id});
+  final String id;
+
+  @override
+  ConsumerState<TodoDetailsScreen> createState() => _TodoDetailsScreenState();
+}
+
+class _TodoDetailsScreenState extends ConsumerState<TodoDetailsScreen> {
+  String? _confirmation;
+
+  Future<void> _confirmView() async {
+    final label = await Future<String>.delayed(
+      const Duration(milliseconds: 20),
+      () => 'viewed',
+    );
+    if (!mounted) return;
+    setState(() => _confirmation = label);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final todo = ref.watch(selectedTodoProvider(widget.id));
+    return Scaffold(
+      appBar: AppBar(title: Text(todo?.title ?? 'Not found')),
+      body: Column(
+        children: [
+          Text(todo?.done == true ? 'done' : 'not done'),
+          if (_confirmation != null) Text(_confirmation!),
+          ElevatedButton(onPressed: _confirmView, child: const Text('confirm view')),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/onboarding_screen.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'onboarding_state.dart';
+
+class OnboardingScreen extends StatelessWidget {
+  const OnboardingScreen({super.key, required this.onboarding});
+  final OnboardingState onboarding;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ElevatedButton(
+          onPressed: () {
+            onboarding.complete();
+            context.go('/todos');
+          },
+          child: const Text('Get started'),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// lib/todo_app_fixed/router.dart
+import 'package:go_router/go_router.dart';
+
+import 'new_todo_screen.dart';
+import 'onboarding_screen.dart';
+import 'onboarding_state.dart';
+import 'settings_screen.dart';
+import 'shell_scaffold.dart';
+import 'todo_details_screen.dart';
+import 'todos_list_screen.dart';
+
+final onboarding = OnboardingState();
+
+final todoRouterFixed = GoRouter(
+  initialLocation: '/onboarding',
+  refreshListenable: onboarding,
+  redirect: (context, state) {
+    final onboardingPath = state.matchedLocation == '/onboarding';
+    if (!onboarding.completed && !onboardingPath) return '/onboarding';
+    if (onboarding.completed && onboardingPath) return '/todos';
+    return null;
+  },
+  routes: [
+    GoRoute(
+      path: '/onboarding',
+      builder: (context, state) => OnboardingScreen(onboarding: onboarding),
+    ),
+    StatefulShellRoute.indexedStack(
+      builder: (context, state, navigationShell) =>
+          TodoShellScaffold(navigationShell: navigationShell),
+      branches: [
+        StatefulShellBranch(routes: [
+          GoRoute(path: '/todos', builder: (context, state) => const TodosListScreen()),
+          GoRoute(path: '/todos/new', builder: (context, state) => const NewTodoScreen()),
+          GoRoute(
+            path: '/todos/:id',
+            builder: (context, state) =>
+                TodoDetailsScreen(id: state.pathParameters['id']!),
+          ),
+        ]),
+        StatefulShellBranch(routes: [
+          GoRoute(path: '/settings', builder: (context, state) => const SettingsScreen()),
+        ]),
+      ],
+    ),
+  ],
+);
+```
+
+```dart
+// lib/todo_app_fixed/main.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'router.dart';
+
+void main() {
+  runApp(const ProviderScope(child: TodoApp()));
+}
+
+class TodoApp extends StatelessWidget {
+  const TodoApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(routerConfig: todoRouterFixed);
+  }
+}
+```
+
+The integration test the task asked for -- add a todo, open its details, switch tabs, come back with state intact:
+
+```dart
+// test/todo_app_fixed/todo_app_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todo_app_fixed/main.dart';
+import 'package:my_app/todo_app_fixed/router.dart';
+
+void main() {
+  testWidgets('add a todo, open details, switch tabs, come back with state intact', (tester) async {
+    onboarding.completed = false;
+    await tester.pumpWidget(const ProviderScope(child: TodoApp()));
+
+    await tester.tap(find.text('Get started'));
+    await tester.pumpAndSettle();
+    expect(find.text('Todos'), findsWidgets);
+
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    expect(find.text('New todo'), findsOneWidget,
+        reason: '/todos/new matched its own literal route, not :id');
+    await tester.enterText(find.byType(TextField), 'Buy milk');
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(find.text('Buy milk'), findsOneWidget,
+        reason: 'ref.watch in TodosListScreen.build picked up the new todo');
+
+    await tester.tap(find.text('Buy milk'));
+    await tester.pumpAndSettle();
+    expect(find.text('not done'), findsOneWidget);
+    expect(find.byTooltip('Back'), findsOneWidget,
+        reason: 'context.push kept /todos on the stack beneath /todos/:id');
+
+    await tester.tap(find.text('Settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('Settings'), findsWidgets);
+
+    await tester.tap(find.text('Todos'));
+    await tester.pumpAndSettle();
+    expect(find.text('Buy milk'), findsOneWidget);
+    expect(find.text('not done'), findsOneWidget);
+  });
+}
+```
+
+```text
+✓ add a todo, open details, switch tabs, come back with state intact
+
+00:01 +1: All tests passed!
+```
+
+## What changed and why
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | No `ProviderScope` at the root | `runApp(const ProviderScope(child: TodoApp()))` -- proven: `Bad state: No ProviderScope found` otherwise |
+| 2 | Missing `part 'todos_provider.g.dart';` | Real `part` directive present -- otherwise `extends_non_class` + `undefined_identifier` |
+| 3 | `/todos/:id` declared before `/todos/new` | `/todos/new` declared first -- proven: the literal route now wins |
+| 4 | `context.go` to open details | `context.push` -- proven: `/todos` stays on the back stack, a Back button appears |
+| 5 | `redirect` without `refreshListenable` | `refreshListenable: onboarding` -- proven: `onboarding.completed` flipping alone now redirects |
+| 6 | `StateNotifierProvider` without `legacy.dart`, mixed with codegen elsewhere | Removed -- migrate to `Notifier`/`@riverpod` like the rest of the app |
+| 7 | `ref.read` in `TodosListScreen.build` | `ref.watch` -- proven: the list now rebuilds after `add()` |
+| 8 | `ref.watch` inside `onPressed` | `ref.read` -- proven: no more phantom subscription/rebuild leak |
+| 9 | `selectedTodoProvider` hand-written, no `.autoDispose` | Real `@riverpod` function provider -- proven: disposed once its last listener closes |
+| 10 | `setState` after an unguarded `await` | `if (!mounted) return;` before `setState` |
+
+## What the reviewer writes in the PR
+
+> Solid structure, but this can't merge as-is -- 10 things, in the order they'd actually bite:
+>
+> 1. **No `ProviderScope`.** Your own test never reaches a `ConsumerWidget`, so it passed -- but the first real screen throws `Bad state: No ProviderScope found`. Wrap `TodoApp` in `ProviderScope` at the root.
+> 2. **A `TodosNotifier` shipped without its `part` directive** in an earlier revision -- `extends _$TodosNotifier` doesn't resolve without it. Double-check every `@riverpod` file has `part '<file>.g.dart';` right after the imports.
+> 3. **Route order.** `/todos/:id` is declared before `/todos/new` in the Todos branch -- `/todos/new` matches the id route first. Literal routes before parameterized ones, always.
+> 4. **`context.go` for details.** This drops `/todos` from the back stack -- users can't get back to the list. Use `context.push`.
+> 5. **`redirect` has no `refreshListenable`.** Fine for the button's own flow (it calls `go()` itself), but anything else that completes onboarding -- a restored session, a background callback -- leaves the user stuck on the onboarding screen forever. Wire `refreshListenable: onboarding`.
+> 6. **`StateNotifierProvider` needs `package:flutter_riverpod/legacy.dart`** in Riverpod 3 -- it's not in the main barrel anymore. But since this app already uses `@riverpod` everywhere else, just migrate this one too instead of unlocking the legacy import.
+> 7. **`ref.read` in `TodosListScreen.build`.** The list never updates after adding a todo. Should be `ref.watch`.
+> 8. **`ref.watch` inside `onPressed`.** Doesn't throw (that's `ref.listen`'s job), but it leaves a stray subscription behind that causes unrelated rebuilds later. Should be `ref.read` -- it's a one-shot action, not something to subscribe to.
+> 9. **`selectedTodoProvider` never disposes.** It's hand-written, not generated, so it skips `.autoDispose` entirely -- every todo ID ever viewed stays cached for the app's whole lifetime. Generate it with `@riverpod` instead.
+> 10. **Missing `mounted` guard** in `_confirmView`. If this screen goes away mid-await, `setState` throws `setState() called after dispose()`.
+>
+> None of these need a redesign -- happy to pair on the fixes.
+
+## Mental Model
+
+Only two of these ten bugs (2, 6) are compile errors the analyzer catches for free -- both are the same underlying mistake in two different clothes: codegen and legacy APIs both require an extra import/directive that an AI assistant, trained mostly on pre-3.0 Riverpod snippets and complete files, easily drops. The other eight all compile and run fine on the one path the AI actually exercised: a `ConsumerWidget` deep enough in the tree that a manual smoke test never reaches it, a route order that only matters once you try the literal path, a `push`-shaped bug that's invisible until you check for a Back button, a `redirect` that's masked by the one button that calls `go()` itself, `ref.watch`/`ref.read` swapped in ways that don't throw either way, a provider that's only "wrong" once you watch it for disposal, and a lifecycle guard that only matters once something actually disposes mid-await. This is the same shape as every worked review in this module: **the compiler is a floor, not a ceiling** -- it catches missing directives and undefined names, never "this technically-valid code does the wrong thing under a condition nobody happened to trigger yet."
+
+## Trade-offs
+
+| Choice | Upside | Cost |
+|---|---|---|
+| `@riverpod` codegen everywhere | Consistent `.autoDispose` defaults, less boilerplate | Every family/details-style provider needs to actually BE generated -- hand-writing one silently opts out |
+| `StatefulShellRoute.indexedStack` | Each tab keeps its own back stack and screen state | All branches stay resident in memory; state that leaks (bug 9) leaks per-branch too |
+| `redirect` + `refreshListenable` | Reacts to state changes with zero extra navigation calls | One more object (a `Listenable`) to wire and keep in sync |
+| `push` for drill-down, `go` for tab-level jumps | Predictable back stack | Easy to reach for `go` out of habit everywhere, including where `push` was meant |
+
+## Common Misconceptions
+
+- **"`ref.watch` outside `build` throws, just like `ref.listen`."** Proven above: it doesn't. `flutter_riverpod`'s own source only asserts `debugDoingBuild` inside `listen`, never inside `watch` -- `watch` silently registers a subscription that a real build pass would have cleaned up, producing a rebuild leak instead of a crash.
+- **"A hand-written `.family` provider is just as safe as a generated one."** Proven above: `@riverpod` defaults to `.autoDispose`; a hand-written `Provider.family` does not opt into anything unless you write `.autoDispose.family` yourself. Skipping codegen for "just one more provider" silently drops that default.
+- **"If the AI's own test passes, the screen it claims to test is fine."** The AI's widget test only pumped `OnboardingScreen`, which never touches a provider -- it proved nothing about bug 1, the single bug that crashes every other screen in the app.
+- **"Route order inside a `StatefulShellBranch` doesn't matter the way it does for top-level routes."** Proven above: it's the exact same first-match-wins behavior, just scoped to that branch's own route list.
+
+<Mermaid title="Where each bug sits in one user journey" code={wr1Diagram} />
+
+export const wr1Diagram = `flowchart TD
+  A["runApp(TodoApp())"] -->|"1: no ProviderScope"| A
+  A --> B["/onboarding: Get started"]
+  B --> C["redirect checks onboarding.completed"]
+  C -->|"5: no refreshListenable"| C
+  B --> D["/todos: TodosListScreen"]
+  D -->|"7: ref.read in build"| D
+  D --> E["tap a todo: context.go"]
+  E -->|"4: back stack lost"| E
+  D --> F["FAB: /todos/new"]
+  F -->|"3: :id declared first"| F
+  F --> G["NewTodoScreen: ref.watch in onPressed"]
+  G -->|"8: phantom rebuild leak"| G
+  E --> H["/todos/:id: selectedTodoProvider"]
+  H -->|"9: no autoDispose, leaks forever"| H
+  H --> I["confirm view: await then setState"]
+  I -->|"10: no mounted guard"| I
+`;
+
+<Callout title="The one-line takeaway">
+Eight of these ten bugs run without a single error anywhere in the app's own happy path -- a scope that's only missing once a `ConsumerWidget` actually builds, a route order that only matters for the literal path, a `push`/`go` swap invisible until you look for a Back button, a `redirect` masked by the one button that already calls `go()`, `watch`/`read` swapped in ways that neither throws, and a provider whose leak only shows up under disposal tracking. Only the two missing-import/directive bugs (2, 6) give the analyzer anything to catch on its own.
+</Callout>
+
+export const quizWorkedReview1 = [
+  {
+    q: 'A widget test that only pumps `OnboardingScreen` passes cleanly, yet the app crashes with `Bad state: No ProviderScope found` the moment it reaches `/todos`. What does this actually tell you about the AI-written test?',
+    options: [
+      'The ProviderScope bug is a false positive -- the app works fine',
+      'The test proves nothing about ProviderScope because OnboardingScreen never reads a provider -- a passing test only covers the code paths it actually exercises',
+      'ProviderScope is optional as long as one screen works without it',
+      'The test should be rewritten to skip StatelessWidget screens entirely',
+    ],
+    answer: 1,
+    explain: 'Proven above: OnboardingScreen is a plain StatelessWidget with no ref.watch/ref.read at all, so a test that only pumps it can never surface a missing ProviderScope -- the crash only fires once a real ConsumerWidget (TodosListScreen) tries to read a provider.',
+  },
+  {
+    q: 'Tapping a button that calls `ref.watch(counterProvider)` from inside `onPressed` does not throw, and `buildCount` stays at 1 right after the tap. But a LATER, unrelated `counterProvider.notifier.increment()` call (from outside this widget) makes `buildCount` jump to 2, even though `build()` itself never watches `counterProvider`. What does this prove?',
+    options: [
+      'ref.watch always throws when called outside build -- this is a bug in the test',
+      "ref.watch has no assertion against being called outside build (unlike ref.listen, which does); calling it registers a real subscription that a normal build pass never gets the chance to clean up, so it keeps firing markNeedsBuild() on every future change",
+      'This only happens because ProviderContainer was created manually',
+      'buildCount is unrelated to ref.watch and just increments randomly',
+    ],
+    answer: 1,
+    explain: "Proven directly: flutter_riverpod's own source asserts debugDoingBuild inside ref.listen but not inside ref.watch. The callback-registered subscription is never part of any build()'s old/new dependency diff, so it's never closed -- it just keeps triggering rebuilds forever.",
+  },
+  {
+    q: '`/todos/:id` is declared before `/todos/new` inside one `StatefulShellBranch`. Navigating to `/todos/new` shows "Not found" instead of the new-todo form. Why?',
+    options: [
+      "StatefulShellRoute branches don't support literal routes after parameterized ones",
+      'go_router matches a branch\'s own route list top to bottom, first match wins -- ":id" matched "/todos/new" with id="new" before the literal "/todos/new" route was ever considered',
+      'This is a caching bug specific to StatefulShellRoute.indexedStack',
+      "'new' is a reserved path segment in go_router and must be escaped",
+    ],
+    answer: 1,
+    explain: "Proven above: reordering the two routes (literal before parameterized) is the only change needed to make '/todos/new' build NewTodoScreen -- the ordering rule is identical to top-level routes, just scoped to the branch's own list.",
+  },
+  {
+    q: 'Opening a todo with `context.go(\'/todos/${todo.id}\')` leaves no Back button on the details screen, while the identical flow with `context.push` shows one. What is the real difference between `go` and `push` here?',
+    options: [
+      'go and push are interchangeable aliases in go_router 18',
+      "context.go() sets the router's current location outright, discarding what was there before; context.push() adds a new page on top of the existing stack, which is what a Back button needs to pop back to",
+      'go only works for top-level routes, push only works for nested ones',
+      'The Back button is unrelated to go/push and is controlled by a separate setting',
+    ],
+    answer: 1,
+    explain: 'Proven above: with go(), find.byTooltip(\'Back\') finds nothing because /todos was replaced, not stacked under /todos/:id. With push (the corrected code), the Back button is present because /todos is still on the stack beneath it.',
+  },
+  {
+    q: '`onboarding.completed = true` is set directly (simulating a restored session, no `go()`/`push()` call), then `pumpAndSettle()` runs -- and the app is STILL showing the onboarding screen. Adding `refreshListenable: onboarding` to the router fixes it. Why did `redirect` alone miss this?',
+    options: [
+      'redirect only runs once, at router construction time',
+      'redirect is a pure function of the current location -- something has to explicitly tell the router to re-evaluate it; only navigation does that by default, and refreshListenable adds "this Listenable notifying" as a second trigger',
+      "redirect can't read fields on a ChangeNotifier at all",
+      'This is a bug in GoRouter that has no fix',
+    ],
+    answer: 1,
+    explain: "Proven above: the onboarding button's own onPressed calls onboarding.complete() AND THEN context.go('/todos') itself, masking the bug on the happy path. Flipping onboarding.completed with zero navigation call is exactly what refreshListenable exists to catch -- proven fixed in the corrected router.",
+  },
+  {
+    q: '`selectedTodoProvider` is a hand-written `Provider.family<Todo?, String>`, not `@riverpod`-generated. A `ProviderObserver.didDisposeProvider` spy never fires after the provider\'s only listener closes. What does the corrected version change to fix this, and why does it work?',
+    options: [
+      'Manually calling container.dispose() after every read',
+      'Converting it to a real @riverpod function provider, which generates .autoDispose by default -- .autoDispose is NOT something you opt into for hand-written providers by accident, it only applies to codegen output unless you write .autoDispose.family yourself',
+      'Adding a Timer that clears the provider every few seconds',
+      'Switching from Provider.family to StateProvider.family',
+    ],
+    answer: 1,
+    explain: "Proven above: the hand-written Provider.family never fires didDisposeProvider after its listener closes -- it's cached forever, per id, for the process's lifetime. The corrected lib/todo_app_fixed/todo_details_provider.dart is a real @riverpod function, and riverpod_generator's own generated code shows isAutoDispose: true baked in.",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/worked-review-1" questions={quizWorkedReview1} />
+
+<ProgressTracker client:visible id="reading-flutter/worked-review-1" />
