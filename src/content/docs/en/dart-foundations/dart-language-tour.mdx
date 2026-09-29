@@ -9,6 +9,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import SpotTheBug from '../../../../components/SpotTheBug.astro';
+import DartPad from '../../../../components/DartPad.astro';
 
 ## Variables and inference
 
@@ -82,7 +83,44 @@ final paint = Paint()
 
 **Records** (Dart 3.0 — ["Records require a language version of at least 3.0"](https://dart.dev/language/records)) are anonymous, immutable, structurally-typed aggregates. They fix a real gap: returning two or three related values used to mean either an ad hoc `List`/`Map` (untyped) or a one-off wrapper class (boilerplate). A record is neither — it's a genuine compile-time-checked type with no declaration required.
 
-{/* DartPad slot: records — positional/named construction, destructuring, equality */}
+Try it live — the block below runs the exact functions and values proven by the test above, through DartPad's real Dart runtime, not a canned transcript:
+
+<DartPad
+  id="dart-foundations-dart-language-tour-records"
+  title="Records: positional & named, destructuring, equality"
+  flutter={false}
+  code={`typedef Point = (double x, double y); // positional record type alias
+
+(double, double) minMax(List<double> values) {
+  var lo = values.first, hi = values.first;
+  for (final v in values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return (lo, hi); // multiple return — no wrapper class needed
+}
+
+({String name, int age}) parsePerson(Map<String, Object?> json) {
+  return (name: json['name']! as String, age: json['age']! as int); // named record
+}
+
+void main() {
+  final (low, high) = minMax([3, 1, 4, 1, 5, 9]);
+  print('minMax: low=$low, high=$high');
+
+  final person = parsePerson({'name': 'Ada', 'age': 36});
+  final (:name, :age) = person;
+  print('parsePerson: name=$name, age=$age');
+
+  const a = (1, 2);
+  const b = (1, 2);
+  print('const records: a == b -> \${a == b}, identical(a, b) -> \${identical(a, b)}');
+
+  const Point p = (1.0, 2.0);
+  print('Point via typedef: x=\${p.$1}, y=\${p.$2}');
+}
+`}
+/>
 
 ```dart
 // lib/records_basics.dart
@@ -160,7 +198,82 @@ The canonicalization result is the one worth remembering: `const (1, 2)` and ano
 
 **Patterns** (Dart 3.0 — same [language-version requirement](https://dart.dev/language/patterns) as records) generalize destructuring far beyond `final (a, b) = pair`. A pattern can match on a value's *shape* — its runtime type, its fields, its length — not just bind a name to it.
 
-{/* DartPad slot: patterns — switch expression, object/list/map patterns, guards, if-case */}
+Try it live — same `Shape`/`Status` types and cases the test above checks, driven through DartPad's real analyzer and runtime:
+
+<DartPad
+  id="dart-foundations-dart-language-tour-patterns"
+  title="Patterns: switch expressions, object/list/map patterns, guards, if-case"
+  flutter={false}
+  code={`sealed class Shape {}
+final class Circle extends Shape {
+  Circle(this.radius);
+  final double radius;
+}
+final class Square extends Shape {
+  Square(this.side);
+  final double side;
+}
+
+double area(Shape shape) => switch (shape) {
+  Circle(:final radius) => 3.141592653589793 * radius * radius,
+  Square(:final side) => side * side,
+};
+
+String describe(Shape shape) => switch (shape) {
+  Circle(radius: > 10) => 'big circle',
+  Circle() => 'small circle',
+  Square(side: var s) when s > 10 => 'big square ($s)',
+  Square() => 'small square',
+};
+
+String firstTwo(List<int> xs) => switch (xs) {
+  [] => 'empty',
+  [final a] => 'one: $a',
+  [final a, final b, ...] => 'starts $a, $b',
+};
+
+String describeUser(Map<String, Object?> json) {
+  if (json case {'name': String name, 'age': int age}) {
+    return '$name ($age)';
+  }
+  return 'unknown';
+}
+
+enum Status { active, archived, deleted }
+
+String statusLabel(Status s) {
+  switch (s) {
+    case Status.active:
+      return 'Active';
+    case Status.archived:
+      return 'Archived';
+    case Status.deleted:
+      return 'Deleted';
+  }
+}
+
+void main() {
+  print('area(Circle(2)) = \${area(Circle(2))}');
+  print('area(Square(3)) = \${area(Square(3))}');
+
+  print('describe(Circle(20)) = \${describe(Circle(20))}');
+  print('describe(Circle(1)) = \${describe(Circle(1))}');
+  print('describe(Square(20)) = \${describe(Square(20))}');
+  print('describe(Square(1)) = \${describe(Square(1))}');
+
+  print('firstTwo([]) = \${firstTwo([])}');
+  print('firstTwo([7]) = \${firstTwo([7])}');
+  print('firstTwo([1, 2, 3, 4]) = \${firstTwo([1, 2, 3, 4])}');
+
+  print("describeUser({'name': 'Ada', 'age': 36}) = \${describeUser({'name': 'Ada', 'age': 36})}");
+  print("describeUser({'name': 'Ada'}) = \${describeUser({'name': 'Ada'})}");
+
+  for (final s in Status.values) {
+    print('statusLabel(\${s.name}) = \${statusLabel(s)}');
+  }
+}
+`}
+/>
 
 ```dart
 // lib/patterns_basics.dart

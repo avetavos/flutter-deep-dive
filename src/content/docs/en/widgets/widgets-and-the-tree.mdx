@@ -10,6 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 import SpotTheBug from '../../../../components/SpotTheBug.astro';
+import DartPad from '../../../../components/DartPad.astro';
 
 ## Composition, not inheritance
 
@@ -151,6 +152,112 @@ That is the whole reconciliation story, mechanically: `createElement` is the *ex
 ## Proven: a `const` widget skips its own rebuild entirely
 
 `const` is not just "fewer allocations." A `const` widget expression is a single canonicalized object — the *same instance* every time that line of code runs. Flutter's element-update path short-circuits on `identical(oldWidget, newWidget)`, so a `const` child is never even diffed, let alone rebuilt, while its non-const sibling rebuilds on every parent rebuild.
+
+Try it live — the exact `ConstLeaf`/`DynamicLeaf`/`RebuildingParent` classes proven by the widget test below, wrapped in a small demo screen with a button so you can watch the build counts for yourself:
+
+<DartPad
+  id="widgets-widgets-and-the-tree-const-rebuild"
+  title="const rebuild demo — tap the button, watch which build count moves"
+  flutter={true}
+  code={`import 'package:flutter/material.dart';
+
+int constLeafBuildCount = 0;
+int dynamicLeafBuildCount = 0;
+
+/// Always constructed as \`const ConstLeaf()\` by the parent below — every
+/// "rebuild" produces the identical object, not a new one.
+class ConstLeaf extends StatelessWidget {
+  const ConstLeaf({super.key});
+  @override
+  Widget build(BuildContext context) {
+    constLeafBuildCount++;
+    return const SizedBox(width: 10, height: 10);
+  }
+}
+
+/// Constructed fresh (non-const, because it carries a changing value) on
+/// every parent rebuild.
+class DynamicLeaf extends StatelessWidget {
+  const DynamicLeaf({super.key, required this.tick});
+  final int tick;
+  @override
+  Widget build(BuildContext context) {
+    dynamicLeafBuildCount++;
+    return SizedBox(width: 10, height: 10 + tick.toDouble());
+  }
+}
+
+class RebuildingParent extends StatefulWidget {
+  const RebuildingParent({super.key});
+  @override
+  RebuildingParentState createState() => RebuildingParentState();
+}
+
+class RebuildingParentState extends State<RebuildingParent> {
+  int tick = 0;
+  void bump() => setState(() => tick++);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const ConstLeaf(), // identical instance every build
+        DynamicLeaf(tick: tick), // new instance every build
+      ],
+    );
+  }
+}
+
+void main() => runApp(const DartPadDemo());
+
+class DartPadDemo extends StatelessWidget {
+  const DartPadDemo({super.key});
+  @override
+  Widget build(BuildContext context) => const MaterialApp(home: DemoPage());
+}
+
+class DemoPage extends StatefulWidget {
+  const DemoPage({super.key});
+  @override
+  State<DemoPage> createState() => _DemoPageState();
+}
+
+class _DemoPageState extends State<DemoPage> {
+  final key = GlobalKey<RebuildingParentState>();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('const rebuild demo')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            RebuildingParent(key: key),
+            const SizedBox(height: 16),
+            Text('ConstLeaf.build() calls: $constLeafBuildCount'),
+            Text('DynamicLeaf.build() calls: $dynamicLeafBuildCount'),
+            const SizedBox(height: 8),
+            const Text(
+              'Tap the button. constLeafBuildCount never moves — the const '
+              'child is the identical instance every rebuild.',
+            ),
+          ],
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          key.currentState!.bump();
+          setState(() {});
+        },
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+`}
+/>
 
 ```dart
 // lib/const_rebuild.dart

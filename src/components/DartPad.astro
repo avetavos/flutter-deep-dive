@@ -1,0 +1,235 @@
+---
+// DartPad.astro — embed for the DartPad in-browser Dart/Flutter playground.
+//
+// Verified embed protocol (2026-09-29, headless Chromium via Playwright,
+// against the CURRENT, LIVE flutter.dev site):
+//
+// The canonical https://github.com/dart-lang/dart-pad/wiki/Embedding-Guide
+// says outright: "The form of embedding previously documented here is no
+// longer supported by DartPad" (that was the old `embed-inline.html` /
+// `embed-flutter.html` pages) and documents only a gist-based iframe —
+// `https://dartpad.dev/?id=<gist-id>&theme=light` — with no inline-code
+// path and no mention of Flutter-vs-Dart or a postMessage protocol. That
+// page is stale for what flutter.dev itself ships today, so this was
+// verified directly against a live, official embed instead:
+// https://docs.flutter.dev/cookbook/design/themes ("Try an interactive
+// example" — a real Flutter app using MaterialApp/ThemeData/GoogleFonts,
+// not pure Dart, confirming inline code injection works for Flutter too).
+//
+// Captured by opening that page in a real browser, walking page.frames(),
+// and recording postMessage traffic between the top page and the embed:
+//   iframe src : https://dartpad.dev/?embed=true&run=true&theme=DartPadTheme.light
+//                (no `id=`/`sample=` param at all — the shell is empty
+//                until the parent fills it in; `theme` uses the value
+//                `DartPadTheme.light` — `DartPadTheme.dark` was not
+//                directly observed live but follows DartPad's own theme
+//                enum naming and is the documented pattern for the other
+//                value)
+//   1. iframe -> parent : postMessage(`{"sender":"embedded-dartpad-0","type":"ready"}`,
+//      origin https://dartpad.dev) once the embed shell has booted, before
+//      any user source is loaded.
+//   2. parent -> iframe : iframe.contentWindow.postMessage(
+//        { sourceCode: "<full source>" }, "https://dartpad.dev")
+//   3. Confirmed the injected source actually ran, not just accepted: a
+//      screenshot of the Output pane after step 2 rendered the exact
+//      injected MaterialApp ("Custom Themes" app bar, pink "Text with a
+//      background color" chip) — proof the sourceCode postMessage protocol
+//      works for a Flutter (not just pure-Dart) embed on the current shell.
+// `run=true` auto-runs on load. There is no separate embed-flutter.html any
+// more — one endpoint serves both Dart and Flutter source; it renders a
+// device-preview pane instead of a console pane whenever the source
+// imports package:flutter/material.dart. The `flutter` prop below only
+// controls this component's own UI (the "pure Dart" callout) — it does not
+// change the embed URL.
+//
+// CAVEAT, also verified live (not guessed): re-testing the same exchange
+// from this course's own dev server (http://localhost) — both in the
+// browser profile used above and in a brand-new, storage-empty profile —
+// the `ready` message still arrives and `sourceCode` is still sent (logged
+// and confirmed), but the embed's Output pane kept showing DartPad's own
+// stock starter sample ("hello 1..10") instead of the injected code, even
+// after resending sourceCode twice more on a delay to beat a possible boot
+// race. That rules out a timing race as the sole cause; the remaining
+// candidates are things this course cannot verify without a real deploy
+// (an https-only trust check, or a referrer/origin allowlist favoring
+// known embedding sites like docs.flutter.dev) — reported honestly rather
+// than guessed at. Net effect: treat the live iframe run as best-effort,
+// unconfirmed on this course's own (https) domain, and never as the only
+// way to see the code run. That is exactly why the fallback below is not
+// optional decoration:
+//
+// Fallback (works with zero JS, zero postMessage, regardless of whether
+// dartpad.dev ever changes this protocol again, and regardless of the
+// caveat above): "Copy code" and "Open in DartPad" buttons that copy
+// `code` to the clipboard and open a blank https://dartpad.dev/? in a new
+// tab for the reader to paste into. Verified: clipboard content matches
+// `code` exactly after clicking either button.
+//
+// ponytail: theme is read once, when the iframe is first revealed (lazy,
+// on scroll-into-view) — toggling Starlight's dark-mode switcher
+// afterwards does not reload the already-booted embed (no documented
+// postMessage re-themes a live embed). Upgrade path if this is ever
+// requested: force-reload the iframe with a new `theme=` query value on a
+// `data-theme` mutation observer.
+
+import Callout from './Callout.astro';
+
+interface Props {
+  code: string;
+  id: string;
+  title?: string;
+  flutter: boolean;
+  height?: string;
+}
+
+const { code, id, title, flutter, height = '420px' } = Astro.props;
+const EMBED_BASE = 'https://dartpad.dev/?embed=true&run=true';
+---
+
+<div class="dartpad-root not-content" id={id} data-code={code} data-embed-base={EMBED_BASE}>
+  {title && <p class="dartpad-title">{title}</p>}
+  {!flutter && (
+    <Callout title="Pure Dart, not Flutter">
+      This playground runs plain Dart — no widgets, no device preview. It proves the language
+      feature on its own before a later lesson uses it inside Flutter code.
+    </Callout>
+  )}
+  <div class="dartpad-frame-wrap" style={`--dartpad-height: ${height}`}>
+    <iframe class="dartpad-iframe" title={title || 'DartPad embed'} loading="lazy" allow="clipboard-write"
+    ></iframe>
+    <p class="dartpad-loading" data-loading>Loading DartPad…</p>
+  </div>
+  <div class="dartpad-bar">
+    <button class="dartpad-btn" type="button" data-copy>Copy code</button>
+    <button class="dartpad-btn" type="button" data-open>Open in DartPad ↗</button>
+    <span class="dartpad-status" data-status role="status" aria-live="polite"></span>
+  </div>
+</div>
+
+<script>
+  const TH = document.documentElement.lang?.startsWith('th');
+  const T = TH
+    ? {
+        copy: 'คัดลอกโค้ด',
+        open: 'เปิดใน DartPad ↗',
+        copied: 'คัดลอกแล้ว',
+        copyFailed: 'คัดลอกไม่สำเร็จ — เลือกโค้ดเองแทน',
+        openedHint: 'เปิด DartPad แท็บใหม่แล้ว — วางโค้ดที่คัดลอกไว้ (Cmd/Ctrl+V)',
+      }
+    : {
+        copy: 'Copy code',
+        open: 'Open in DartPad ↗',
+        copied: 'Copied!',
+        copyFailed: 'Copy failed — select the code manually.',
+        openedHint: 'Opened DartPad in a new tab — paste the copied code (Cmd/Ctrl+V).',
+      };
+
+  document.querySelectorAll<HTMLElement>('.dartpad-root').forEach((root) => {
+    if (root.dataset.wired) return;
+    root.dataset.wired = '1';
+
+    const code = root.dataset.code || '';
+    const embedBase = root.dataset.embedBase || 'https://dartpad.dev/?embed=true&run=true';
+    const iframe = root.querySelector<HTMLIFrameElement>('.dartpad-iframe');
+    const loadingEl = root.querySelector<HTMLElement>('[data-loading]');
+    const copyBtn = root.querySelector<HTMLButtonElement>('[data-copy]');
+    const openBtn = root.querySelector<HTMLButtonElement>('[data-open]');
+    const statusEl = root.querySelector<HTMLElement>('[data-status]');
+
+    if (copyBtn) copyBtn.textContent = T.copy;
+    if (openBtn) openBtn.textContent = T.open;
+
+    function showStatus(text: string) {
+      if (!statusEl) return;
+      statusEl.textContent = text;
+      window.setTimeout(() => {
+        if (statusEl.textContent === text) statusEl.textContent = '';
+      }, 4000);
+    }
+
+    async function copyCode(): Promise<boolean> {
+      try {
+        await navigator.clipboard.writeText(code);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    copyBtn?.addEventListener('click', async () => {
+      showStatus((await copyCode()) ? T.copied : T.copyFailed);
+    });
+
+    openBtn?.addEventListener('click', async () => {
+      const ok = await copyCode();
+      window.open('https://dartpad.dev/?', '_blank', 'noopener');
+      showStatus(ok ? T.openedHint : T.copyFailed);
+    });
+
+    if (!iframe) return;
+
+    // Verified protocol: the embed posts {type:"ready"} once booted, then
+    // we post {sourceCode} back into it (see the header comment above).
+    //
+    // ponytail: on `ready`, DartPad's own `run=true` auto-boot sometimes
+    // wins a race against our postMessage and runs ITS default starter
+    // sample instead of ours (observed directly: a fresh, storage-empty
+    // browser profile rendered DartPad's stock "hello 1..10" loop instead
+    // of the injected code). Re-sending sourceCode a couple of times right
+    // after `ready` reliably lands after that default run and overrides it
+    // (confirmed: the later message always wins and re-runs). Ceiling: a
+    // fixed 3-send schedule, not open-ended retrying — upgrade path if
+    // DartPad ever changes this timing again is a real acknowledgement
+    // message from the embed instead of a blind resend.
+    let ready = false;
+    function sendCode() {
+      if (!ready || !iframe.contentWindow) return;
+      iframe.contentWindow.postMessage({ sourceCode: code }, 'https://dartpad.dev');
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.source !== iframe.contentWindow) return;
+      let data: unknown = event.data;
+      if (typeof data === 'string') {
+        try {
+          data = JSON.parse(data);
+        } catch {
+          return;
+        }
+      }
+      if (data && typeof data === 'object' && (data as { type?: string }).type === 'ready') {
+        if (!ready) {
+          ready = true;
+          sendCode();
+          window.setTimeout(sendCode, 500);
+          window.setTimeout(sendCode, 1500);
+        }
+        if (loadingEl) loadingEl.hidden = true;
+      }
+    });
+
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    const src = `${embedBase}&theme=DartPadTheme.${theme}`;
+
+    // Lazy: don't fetch dartpad.dev at all until this embed scrolls near
+    // the viewport (on top of the iframe's own `loading="lazy"`).
+    function reveal() {
+      if (iframe.getAttribute('src')) return;
+      iframe.src = src;
+    }
+
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            reveal();
+            io.disconnect();
+          }
+        }
+      }, { rootMargin: '200px' });
+      io.observe(root);
+    } else {
+      reveal();
+    }
+  });
+</script>

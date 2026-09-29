@@ -30,6 +30,19 @@
 .nr__out { width:100%; min-height:90px; border:0; border-top:1px solid var(--sl-color-gray-5); background:#fff; }
 .nr__hint { margin:0; padding:.4rem .6rem; font-size:.78rem; opacity:.75; border-top:1px solid var(--sl-color-gray-5); }
 
+/* DartPad embed */
+.dartpad-root { margin: 1rem 0; }
+.dartpad-title { font-weight: 600; margin: 0 0 .35rem; }
+.dartpad-frame-wrap { position: relative; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; overflow: hidden; background: var(--sl-color-gray-6); }
+.dartpad-iframe { display: block; width: 100%; height: var(--dartpad-height, 420px); border: 0; }
+.dartpad-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; font-size: .85rem; opacity: .7; pointer-events: none; }
+.dartpad-loading[hidden] { display: none; }
+.dartpad-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .5rem 0 0; }
+.dartpad-btn { cursor: pointer; font-size: .78rem; border: 1px solid var(--sl-color-accent); border-radius: 4px; padding: .15rem .6rem; background: transparent; color: var(--sl-color-accent); }
+.dartpad-btn:hover { background: var(--sl-color-accent); color: #fff; }
+.dartpad-status { font-size: .78rem; opacity: .8; }
+@media (prefers-reduced-motion: reduce) { .dartpad-btn { transition: none; } }
+
 /* Mermaid */
 .mermaid-figure { margin: 1.5rem 0; }
 .mermaid { display: flex; justify-content: center; overflow-x: auto; background: transparent; border: 0; padding: 0; }
