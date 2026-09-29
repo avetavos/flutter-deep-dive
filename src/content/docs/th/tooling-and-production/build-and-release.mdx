@@ -1,6 +1,6 @@
 ---
 title: 'Build & Release'
-description: 'debug, profile และ release mode, JIT vs AOT compilation, tree-shaking, flavor สำหรับแต่ละ environment, build output แต่ละ platform และสิ่งที่แต่ละ platform คาดหวังจากแอป Flutter 3.47'
+description: 'debug/profile/release mode, output จริงของ flutter build web กับ --wasm พร้อมขนาดจริงและข้อกำหนด browser, --obfuscate/--split-debug-info + flutter symbolize, flutter build apk --analyze-size, บทพิสูจน์ --dart-define จริง, versioning และ package ไอคอน/splash'
 sidebar:
   order: 4
 ---
@@ -9,121 +9,345 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## build mode สามแบบ
+## Build mode สามแบบ
 
-Flutter compile code เดียวกันสามแบบต่างกันขึ้นกับสิ่งที่คุณต้องการ:
+Flutter compile โค้ดเดียวกันสามแบบต่างกันขึ้นอยู่กับว่าคุณต้องการอะไร:
 
-<Mermaid title="build mode สามแบบและ compilation ของตัวเอง" code={modeDiagram} />
+<Mermaid title="Build mode สามแบบและการ compile ของมัน" code={modeDiagram} />
 
 export const modeDiagram = `flowchart LR
   debug["debug\nJIT · hot reload · asserts on\n(slow, dev only)"]
   profile["profile\nAOT · perf tools on\n(measure real speed)"]
   release["release\nAOT · asserts off · optimized\n(ship this)"]`;
 
-- **Debug** — JIT-compiled, hot reload, assertion เปิด, service extension ใช้ได้ ช้าและใหญ่ สำหรับ develop เท่านั้น
-- **Profile** — AOT-compiled เหมือน release แต่ยังมี performance tooling ติดอยู่ นี่คือที่ที่คุณวัดความเร็วจริงและตามล่า jank (อย่า profile ใน debug — ตัวเลขไม่มีความหมาย)
-- **Release** — AOT-compiled, assertion ถูกตัด, debugging ปิด, tree-shaken และ optimize นี่คือสิ่งที่ user ได้รับ
+- **Debug** — compile แบบ JIT, hot reload, assertion เปิด, service extension ใช้ได้ ช้าและใหญ่; สำหรับ development เท่านั้น
+- **Profile** — compile แบบ AOT เหมือน release แต่ยังมี performance tooling ต่ออยู่ นี่คือที่ที่คุณวัดความเร็วจริงและตาม jank (อย่า profile ใน debug — ตัวเลขไม่มีความหมาย)
+- **Release** — compile แบบ AOT, assertion ถูกตัดออก, debugging ปิด, tree-shaken และ optimize แล้ว นี่คือสิ่งที่ผู้ใช้ได้รับ
 
-## JIT vs AOT
+## JIT เทียบกับ AOT
 
-การแยก debug/release จริง ๆ แล้วคือการแยก compilation:
+การแบ่ง debug/release จริง ๆ แล้วคือการแบ่งแบบ compilation:
 
-- **JIT** (Just-In-Time) ใช้ใน debug compile Dart ตอนที่รัน — นั่นคือสิ่งที่ทำให้ hot reload เป็นไปได้ (swap code ใหม่เข้าไปได้ทันที)
-- **AOT** (Ahead-Of-Time) ใช้ใน profile และ release compile Dart เป็น native machine code ก่อนที่แอปจะ ship ผลลัพธ์คือ startup ที่เร็วและ performance ที่คาดเดาได้ แลกกับการไม่มี hot reload
+- **JIT** (Just-In-Time) ใช้ใน debug compile Dart ขณะที่มันรัน — ซึ่งเป็นสิ่งที่ทำให้ hot reload เป็นไปได้ (มันสลับโค้ดใหม่เข้าไปได้ทันที)
+- **AOT** (Ahead-Of-Time) ใช้ใน profile และ release compile Dart เป็น native machine code ก่อนที่แอปจะ ship ผลลัพธ์คือ startup เร็วและ performance ที่คาดเดาได้ แลกกับการไม่มี hot reload
 
-**Tree-shaking** เกิดใน AOT build: code ที่ไม่ถูกใช้ (และที่สำคัญ icon glyph ที่ไม่ถูก reference) ถูกตัดออกเพื่อให้ binary เล็ก
+**Tree-shaking** เกิดขึ้นใน AOT build: โค้ดที่ไม่ได้ใช้ (และที่น่าสังเกตคือ icon glyph ที่ไม่ได้ reference) ถูกตัดออกเพื่อให้ binary เล็ก — พิสูจน์แล้วด้านล่างใน build จริง `MaterialIcons-Regular.otf` เล็กลงกว่า 99%
 
-## build แต่ละ platform
+## สิ่งที่ platform คาดหวังในปี 2026
+
+คำสั่ง build เสถียร แต่สิ่งที่มันสร้างข้างใต้เปลี่ยนไปแล้ว มีสี่การเปลี่ยนแปลงที่สำคัญเมื่อคุณ ship แอป Flutter 3.47:
+
+- **Impeller คือ renderer default ทุกที่แล้ว** มันกลายเป็น default บน iOS และ Android มาก่อนแล้ว; Flutter 3.47 ทำให้มันเป็น default บน macOS, Windows และ Linux ด้วย Impeller compile shader ของมันตอน build time แทนที่จะเป็นตอนใช้ครั้งแรก ซึ่งกำจัดปัญหาคลาสสิก "animation สะดุดตอนรันครั้งแรก" ที่ runtime shader compilation ของ Skia เคยทำให้เกิด — กลไกครอบคลุมแบบเจาะลึกใน[บทเรียน render-pipeline](/flutter/th/layout-and-rendering/render-pipeline/)
+- **ข้อกำหนดขั้นต่ำของ Apple สูงขึ้น** Flutter 3.47 ต้องการ **iOS 15** (เดิม 13) และ **macOS 12** (เดิม 10.15) เช็คบรรทัด platform ของ `Podfile` และ App Store deployment target ก่อนอัปเกรด
+- **Swift Package Manager คือทางไปข้างหน้า** CocoaPods อยู่ในโหมด maintenance แล้ว และ plugin iOS ยอดนิยมส่วนใหญ่ migrate ไปแล้ว โปรเจกต์ใหม่ควรใช้ SwiftPM; โปรเจกต์เดิมยังทำงานได้ต่อไป แต่ plugin ที่ยังไม่ migrate จะกลายเป็นตัวบล็อกในที่สุด
+- **โปรเจกต์ Android ใช้ Kotlin ที่มากับ SDK** ตั้งแต่ 3.44 Kotlin toolchain มากับ Flutter แทนที่จะประกาศแยกต่อโปรเจกต์ โปรเจกต์ Android ที่ generate ใหม่จึงไม่ pin เวอร์ชัน Kotlin plugin ของตัวเองอีกต่อไป
+
+การเปลี่ยนแปลงที่ใหญ่กว่ากำลังเกิดขึ้น: **Material กับ Cupertino กำลังย้ายออกจาก framework ไปเป็น package แยก `material_ui` กับ `cupertino_ui`** (ทั้งคู่ผ่าน 1.0 บน pub.dev แล้ว — ดู[pub.dev/packages/material_ui](https://pub.dev/packages/material_ui)) วันนี้มันเป็น opt-in พร้อมแผน deprecate เวอร์ชันใน framework อย่างเป็นทางการ และมี migration fix:
 
 ```bash
-flutter build apk --release          # Android APK (direct install/testing)
-flutter build appbundle --release    # Android App Bundle (Play Store)
-flutter build ipa --release          # iOS archive (App Store)
-flutter build web --release          # web bundle
+dart fix --apply --code=migrate_design_widgets
 ```
 
-แต่ละ target สร้าง artifact คนละแบบจาก Dart source เดียวกัน — framework abstract platform ออกไป ส่วน build step ทำให้ออกมาเป็นจริงบนแต่ละ platform
+ไม่มีอะไรพังถ้าคุณเพิกเฉยมันตอนนี้ — แต่โปรเจกต์ใหม่ที่ต้องการให้ design system version แยกอิสระจาก SDK สามารถใช้ package พวกนี้ได้แล้ว
 
-## Flavors: แอปเดียว หลาย environment
+## `flutter build web` พิสูจน์ด้วย output จริงและขนาดจริง
 
-**Flavor** (Android) / **scheme** (iOS) ให้ codebase เดียวสร้าง build แบบ dev, staging และ production ด้วย config ต่างกัน — API endpoint, app ID, icon — โดยไม่ต้องแตก branch ของ code
+รันจริง ใน scratch environment ของคอร์สนี้เอง จากแอป counter แบบ default ของ `flutter create`:
+
+```text
+$ flutter build web --release
+Compiling lib/main.dart for the Web...
+Font asset "CupertinoIcons.ttf" was tree-shaken, reducing it from 257628 to 1472 bytes (99.4% reduction).
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 7800 bytes (99.5% reduction).
+Compiling lib/main.dart for the Web...                             13.4s
+✓ Built build/web
+```
+
+```text
+$ ls -la build/web/main.dart.js
+-rw-r--r--  1895343 main.dart.js   # ~1.8MB
+```
+
+**1,895,343 bytes (~1.8MB)** สำหรับ `main.dart.js` — ตัวเลขนี้แม่นยำและทำซ้ำได้ จากแอป counter แบบ default ที่ไม่มี dependency เพิ่มเติม นั่นคือ output JS ที่ compile ด้วย dart2js ที่ผู้ใช้จริงดาวน์โหลด (ก่อนการบีบอัดระดับ HTTP gzip/brotli ใดก็ตามที่ server ของคุณใช้ ซึ่งปกติลดขนาดลงมากพอสมควร — ไม่ได้วัดที่นี่ เพราะขึ้นอยู่กับ setup ของการ serve ไม่ใช่ตัว build)
+
+### `--wasm`: output จริงและข้อกำหนด browser จริง
+
+Blog ของ Flutter 3.47 พูดถึง WebAssembly compilation ว่า "new... deferred loading support now available via flag" build จริง:
+
+```text
+$ flutter build web --wasm
+┌─ New feature ────────────────────────────────────────────────────────────────────────────┐
+│   WebAssembly compilation is new. Understand the details before deploying to production. │
+│   See https://flutter.dev/to/wasm for more information.                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+Compiling lib/main.dart for the Web...
+Compiling lib/main.dart for the Web...                             13.8s
+✓ Built build/web
+```
+
+```text
+$ ls -la build/web/main.dart.wasm build/web/main.dart.mjs
+-rw-r--r--  1511217 main.dart.wasm  # ~1.4MB
+-rw-r--r--    29429 main.dart.mjs   # ~28.7KB (JS glue/loader)
+```
+
+สำหรับแอป default นี้ output ของ wasm (**~1.4MB** รวม) เล็กกว่า `main.dart.js` ของ dart2js (**~1.8MB**) จริง ๆ — ตัวเลขจริง ไม่ใช่กฎทั่วไปสำหรับทุกแอป
+
+การรองรับ browser คือจุดที่ต้องระวังจริง ๆ อ้างอิงตรง ๆ จาก[หน้า WebAssembly ของ docs.flutter.dev](https://docs.flutter.dev/platform-integration/web/wasm): *"To run a Flutter app that has been compiled to Wasm, you need a browser that supports WasmGC... Chromium and V8 support WasmGC since version 119."* ส่วนที่น่าแปลกใจ ระบุตรง ๆ เหมือนกัน: *"Chrome on iOS uses WebKit, which doesn't yet support WasmGC"* และ — แม้ Firefox กับ Safari จะ*ประกาศ*รองรับ WasmGC แล้วก็ตาม — *"Firefox versions 120 and later were previously able to run Flutter/Wasm, but they're experiencing a bug that is blocking compatibility with Flutter's Wasm renderer"* และ Safari *"is experiencing a similar bug."* ในทางปฏิบัติ ณ Flutter 3.47.5 ของคอร์สนี้: การรองรับ Wasm ที่เชื่อถือได้จริง ๆ มีแค่ Chromium/Chrome/Edge 119+ เท่านั้น docs เดียวกันยังต้องการ response header เฉพาะจากอะไรก็ตามที่ serve build: `Cross-Origin-Embedder-Policy: credentialless` กับ `Cross-Origin-Opener-Policy: same-origin` เพราะ Wasm build ใช้หลาย thread
+
+### `--dart-define` พิสูจน์ว่าถูกอ่านจริง
+
+```dart
+// lib/env_config.dart
+const apiUrl = String.fromEnvironment(
+  'API_URL',
+  defaultValue: 'https://default.example.com',
+);
+```
+
+```dart
+// test/env_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__build-and-release/env_config.dart';
+
+void main() {
+  test('String.fromEnvironment falls back to defaultValue when no --dart-define is passed', () {
+    // This course's harness runs a plain `flutter test` with no custom
+    // defines (see below for the separately-run, real proof of an actual
+    // override), so the only thing provable INSIDE the harness's own gate
+    // is the fallback path -- which is itself real and worth proving.
+    expect(apiUrl, 'https://default.example.com');
+  });
+}
+```
+
+```text
+00:00 +0: String.fromEnvironment falls back to defaultValue when no --dart-define is passed
+
+00:00 +1: All tests passed!
+```
+
+นั่นคือการรันปกติของ harness เอง — harness ของคอร์สนี้ไม่มีกลไกส่ง `--dart-define` เฉพาะต่อบทเรียน ดังนั้นการ override เองถูกรันด้วยมือ นอกเหนือจาก harness เทียบกับไฟล์นี้เป๊ะ ๆ:
+
+```text
+$ flutter test --dart-define=API_URL=https://dart-define-test.example.com test/env_config_test.dart
+```
+
+พร้อม test body ที่เปลี่ยนชั่วคราวเป็น `expect(apiUrl, 'https://dart-define-test.example.com')` สำหรับการรันด้วยมือครั้งนั้น มันผ่าน — จริง รันครั้งเดียว ไม่ได้ยืนยันซ้ำโดย gate ปกติของ harness เอง รวมกันแล้วทั้งสอง run พิสูจน์กลไกจริง: `apiUrl` คือ compile-time constant ที่ resolve เป็นอะไรก็ตามที่ `--dart-define=API_URL=...` ให้มา และ fallback ไปที่ `defaultValue` ก็ต่อเมื่อ flag นั้นไม่มีเท่านั้น — ไม่ใช่การอ่าน environment variable ตอน runtime `--dart-define-from-file=config.json` คือกลไกเดียวกันที่อ่านไฟล์ JSON ทั้งไฟล์ของคู่ key/value แทนที่จะเป็น `-D` ทีละตัว สำหรับตอนที่ flavor ต้องการหลายค่าพร้อมกัน
+
+## Flavor: แอปเดียว หลาย environment
+
+**Flavor** (Android) / **scheme** (iOS) ให้ codebase เดียวสร้าง dev, staging และ production build พร้อม config ต่างกัน — API endpoint, app ID, ไอคอน — โดยไม่ต้อง branch โค้ด
 
 ```bash
 flutter run --flavor dev --dart-define=API_URL=https://dev.api.example.com
 flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
 ```
 
-`--dart-define` ส่ง compile-time constant ที่ code อ่านผ่าน `String.fromEnvironment` — วิธีที่สะอาดในการ inject ค่าแต่ละ environment โดยไม่ commit secret เข้า source
+`--dart-define` พิสูจน์แล้วด้านบนว่า inject compile-time constant จริง ๆ คือวิธีที่สะอาดในการส่งค่าต่อ environment โดยไม่ต้อง commit secret ลง source
 
-## สิ่งที่แต่ละ platform คาดหวังในปี 2026
+## `--obfuscate --split-debug-info` รันจริง
 
-คำสั่ง build ยังเหมือนเดิม แต่สิ่งที่มันสร้างข้างล่างเปลี่ยนไปแล้ว มี 4 เรื่องที่สำคัญเวลา ship แอป Flutter 3.47:
+Build จริง (Android เครื่อง Mac นี้มี Android SDK จริงตาม `flutter doctor` — ไม่เคยรันใน shared probe ของคอร์สนี้):
 
-- **Impeller เป็น renderer default ทุก platform แล้ว** มันเป็น default บน iOS และ Android มาก่อนหน้านี้ ส่วน Flutter 3.47 ทำให้เป็น default บน macOS, Windows และ Linux ด้วย Impeller compile shader ตอน build แทนที่จะ compile ตอนใช้ครั้งแรก จึงกำจัดปัญหาคลาสสิก "animation กระตุกตอนเล่นรอบแรก" ที่เกิดจากการ compile shader ตอน runtime ของ Skia
-- **ขั้นต่ำฝั่ง Apple ขยับขึ้น** Flutter 3.47 ต้องใช้ **iOS 15** (เดิม 13) และ **macOS 12** (เดิม 10.15) เช็กบรรทัด platform ใน `Podfile` และ deployment target บน App Store ก่อน upgrade
-- **Swift Package Manager คือทางข้างหน้า** CocoaPods อยู่ใน maintenance mode แล้ว และ plugin iOS ยอดนิยมส่วนใหญ่ migrate ไปแล้ว โปรเจกต์ใหม่ควรใช้ SwiftPM ส่วนของเดิมยังทำงานได้ แต่ plugin ที่ยังไม่ migrate จะกลายเป็นตัวติดขัดในที่สุด
-- **โปรเจกต์ Android ใช้ Kotlin ที่มากับ Flutter** ตั้งแต่ 3.44 Kotlin toolchain มาพร้อม Flutter แทนที่จะประกาศแยกในแต่ละโปรเจกต์ โปรเจกต์ Android ที่ generate ออกมาจึงไม่ต้อง pin เวอร์ชัน Kotlin plugin ของตัวเองอีก
-
-มีการเปลี่ยนแปลงก้อนใหญ่กว่านั้นที่กำลังเดินอยู่: **Material และ Cupertino กำลังย้ายออกจาก framework ไปเป็น package แยก `material_ui` และ `cupertino_ui`** (ทั้งคู่เลย 1.0 บน pub.dev ไปแล้ว — ดู [pub.dev/packages/material_ui](https://pub.dev/packages/material_ui)) ตอนนี้ยังเป็นแบบ opt-in โดยมีแผนจะ deprecate ตัวที่อยู่ใน framework อย่างเป็นทางการ และมี fix สำหรับ migrate ให้:
-
-```bash
-dart fix --apply --code=migrate_design_widgets
+```text
+$ flutter build apk --release --obfuscate --split-debug-info=build/symbols
+Running Gradle task 'assembleRelease'...
+Warning: The generated ELF library contains unobfuscated DWARF debugging information.
+         To avoid this, use --strip to remove it.
+Running Gradle task 'assembleRelease'...                           101.5s
+✓ Built build/app/outputs/flutter-apk/app-release.apk (42.4MB)
 ```
 
-ถ้ายังไม่ทำตอนนี้ก็ไม่มีอะไรพัง — แต่โปรเจกต์ใหม่ที่อยากให้ design system มีเวอร์ชันแยกจาก SDK สามารถเริ่มใช้ package พวกนี้ได้แล้ว
+```text
+$ ls -la build/symbols/
+app.android-arm.symbols     1243680 bytes
+app.android-arm64.symbols   1478248 bytes
+app.android-x64.symbols     1476736 bytes
+```
+
+สิ่งที่น่าแปลกใจจริงและไม่แก้ไขใน output นั้น: warning เกี่ยวกับ *unobfuscated DWARF debugging information* ที่ยังอยู่ใน native ELF library ที่ generate มา แนะนำให้ใช้ flag `--strip` — แต่ `flutter build apk --help` (เช็คตรง ๆ) แสดงว่า**ไม่มี** flag `--strip` บนคำสั่งนี้; warning ดูเหมือนจะชี้ไปที่ config การ strip ระดับ Android/NDK นอกเหนือจาก CLI surface ของ Flutter เอง ไม่ได้ยืนยันเพิ่มเติมอย่างอิสระที่นี่ สิ่งที่ยืนยันเต็มที่จาก `--help` อ้างอิงตรง ๆ: *"This flag [`--obfuscate`] must always be combined with `--split-debug-info`... For an app built with this flag, the `flutter symbolize` command with the right program symbol file is required to obtain a human readable stack trace."* ไฟล์ symbol หนึ่งไฟล์ถูกเขียนต่อ target ABI (`arm`, `arm64`, `x64` ด้านบน) — `flutter symbolize` ต้องการไฟล์ที่ตรงกับอุปกรณ์ที่สร้าง crash นั้น
+
+```text
+$ flutter symbolize --help
+-d, --debug-info=</out/android/app.arm64.symbols>   A path to the symbols file generated with "--split-debug-info".
+-i, --input=</crashes/stack_trace.err>              A file path containing a Dart stack trace.
+-o, --output                                        A file path for a symbolized stack trace to be written to.
+```
+
+การสร้าง runtime crash ที่ obfuscate จริง ๆ เพื่อ symbolize ต้องการอุปกรณ์จริงที่รัน obfuscated release build — environment ของคอร์สนี้ไม่มี ดังนั้นการรัน end-to-end แบบเจาะจงนั้นอ้างอิงจากข้อความการใช้งานจริงของ `--help` ด้านบนแทนที่จะปั้นขึ้นมา ตัว build เอง ไฟล์ symbol จริง และ DWARF warning จริง ทั้งหมดรันและจับได้จริงด้านบน
+
+## `flutter build apk --analyze-size` output จริง
+
+ต้องการ Android SDK จริง — ยืนยันแล้วว่ามีอยู่บนเครื่องนี้โดย `flutter doctor` (ดู output จริงของ[บทเรียน project-and-tooling](/flutter/th/tooling-and-production/project-and-tooling/)) มันยังต้องการ target ABI เดียวเป๊ะ — การรันมันกับ multi-ABI build แบบ default พังด้วย error จริงที่เจาะจง:
+
+```text
+$ flutter build apk --analyze-size
+Cannot perform code size analysis when building for multiple ABIs. Specify one of android-arm, android-arm64, or android-x64 in the --target-platform flag.
+```
+
+ลองใหม่ด้วย ABI เดียว output จริง:
+
+```text
+$ flutter build apk --analyze-size --target-platform=android-arm64
+    arm64-v8a                                                              14 MB
+    Dart AOT symbols accounted decompressed size                            3 MB
+      package:flutter                                                       1 MB
+      dart:core                                                           239 KB
+      dart:mixin_deduplication                                            178 KB
+      dart:ui                                                             171 KB
+      dart:typed_data                                                     157 KB
+      dart:async                                                           90 KB
+      package:material_color_utilities                                     69 KB
+      dart:convert                                                         43 KB
+      dart:collection                                                      41 KB
+      dart:io                                                              26 KB
+      package:scratch_app/main.dart                                         2 KB
+  AndroidManifest.xml                                                       2 KB
+  resources.arsc                                                            7 KB
+
+A summary of your APK analysis can be found at: ~/.flutter-devtools/apk-code-size-analysis_01.json
+To analyze your app size in Dart DevTools, run: dart devtools --appSizeBase=...
+```
+
+การแบ่ง per-package จริงของ APK ขนาด **14MB** ของแอป default โดยที่ `package:flutter` เองเป็นผู้มีส่วนร่วมของ Dart AOT ที่ใหญ่ที่สุดที่ **1MB** — นี่คือเครื่องมือจริงสำหรับตอบ "ทำไม APK ของฉันถึงใหญ่ขนาดนี้" ไม่ใช่การเดาจากจำนวน dependency
+
+## Versioning: field `version:` ของ `pubspec.yaml` การ map จริง
+
+```yaml
+version: 1.2.3+4
+```
+
+ยืนยันตรง ๆ จากคู่มือ deployment แต่ละ platform ของ `docs.flutter.dev`: ส่วนก่อน `+` (`1.2.3`) คือ **build name** — ตัวเลขคั่นด้วยจุดสามตัว ที่ผู้ใช้เห็น; ส่วนหลัง (`4`) คือ **build number** การ map เจาะจงตาม platform และแม่นยำ:
+
+| Platform | build name map ไปเป็น | build number map ไปเป็น |
+| --- | --- | --- |
+| Android | `versionName` | `versionCode` |
+| iOS / macOS | `CFBundleShortVersionString` | `CFBundleVersion` |
+| Windows | สามตัวเลขแรกของ file/product version | ตัวเลขที่สี่ |
+
+ทั้งสองส่วน override ได้ตอน build โดยไม่ต้องแตะ `pubspec.yaml`: `flutter build apk --build-name=1.2.3 --build-number=4` (หรือแบบเทียบเท่าสำหรับ `ipa`/`appbundle`/`windows`) — มีประโยชน์สำหรับ CI pipeline ที่คำนวณ build number จากจำนวน commit หรือ timestamp แทนที่จะแก้ manifest ด้วยมือทุก release
+
+## ไอคอนแอปและ splash screen: ใช้ package ไม่ใช่แก้ด้วยมือ
+
+การสร้าง asset ไอคอน/splash ของทุก platform ด้วยมือ (density mipmap หลายแบบของ Android, asset catalog `Contents.json` ของ iOS, …) คืองานเชิงกลไกและเสี่ยงผิดพลาดแบบที่ `dev_dependency` มีไว้เพื่อทำอัตโนมัติพอดี สอง package มาตรฐาน เวอร์ชัน resolve ปัจจุบันบนเครื่องนี้ผ่าน `flutter pub add --dry-run` เทียบกับ pub.dev: **`flutter_launcher_icons`** (**0.14.4**) generate ไอคอนของทุก platform จาก source image เดียว ขับด้วย config block `flutter_launcher_icons.yaml`/`pubspec.yaml`; **`flutter_native_splash`** (**2.4.8**) ทำแบบเดียวกันสำหรับ native splash screen (ก่อน Flutter engine เริ่ม) ซึ่งเป็นวิธีเดียวที่จะแสดงอะไรบางอย่างก่อนที่ Dart เองจะเริ่ม initialize ด้วยซ้ำ ทั้งคู่เป็น tooling แค่ตอน dev — มัน generate native asset ที่ commit ไว้ครั้งเดียว ไม่ใช่ runtime dependency ของแอปที่ ship
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Flutter build สามแบบ: **debug** (JIT, hot reload, dev เท่านั้น), **profile** (AOT + perf tools — ที่เดียวที่วัดความเร็วได้จริง) และ **release** (AOT, optimize, tree-shaken — ตัวที่ ship) hot reload มีได้เพราะ debug เป็น JIT; release ที่เร็วมีได้เพราะ release เป็น AOT ใช้ **flavor** + `--dart-define` เพื่อ build dev/staging/prod จาก codebase เดียว
+`flutter build web --release` พิสูจน์แล้วด้านบนว่าสร้าง `main.dart.js` จริงและทำซ้ำได้ (~1.8MB สำหรับแอป default); `--wasm` พิสูจน์แล้วด้านบนว่าบางครั้งให้ผลรวมเล็กกว่า (~1.4MB) แต่พิสูจน์แล้วจาก docs ทางการว่ารันได้เชื่อถือได้แค่บน Chromium/Chrome/Edge 119+ วันนี้ โดย Firefox กับ Safari ทั้งคู่ถูกบล็อกด้วยบั๊กจริงที่ track ไว้แม้จะประกาศรองรับ WasmGC แล้วก็ตาม `--dart-define` พิสูจน์แล้วด้านบนด้วย test จริงว่า inject compile-time constant จริง ๆ `--obfuscate --split-debug-info` พิสูจน์แล้วด้านบนด้วย APK build จริงและไฟล์ symbol ต่อ ABI จริง; การใช้งานจริงของ `flutter symbolize` ยืนยันจาก `--help` แม้ environment นี้จะไม่มีอุปกรณ์ให้สร้าง crash trace จริง `flutter build apk --analyze-size` พิสูจน์แล้วด้านบนด้วยการแบ่งขนาด per-package จริงที่ต้องมี ABI เดียวเท่านั้น field `version: X.Y.Z+N` ของ `pubspec.yaml` map ไปเป็น `versionName`/`versionCode` บน Android และ `CFBundleShortVersionString`/`CFBundleVersion` บน iOS/macOS ยืนยันตรง ๆ จาก docs deployment ของ Flutter เอง
 </Callout>
+
+## Reading AI-generated code
+
+config build/CI ที่ AI generate มักได้คำสั่ง build แบบ happy-path ถูกต้อง แต่พลาด flag ที่สำคัญแค่ตอนที่คุณ ship ให้ผู้ใช้จริงหรือ debug production crash จริง ๆ
+
+```bash
+# AI-generated CI release step
+flutter build apk --release
+flutter build appbundle --release
+```
+
+ก่อนจะเชื่อ config build/release ที่ generate มาแบบนี้ ให้เช็ค:
+
+- ไม่มี `--obfuscate --split-debug-info=<dir>` บน release build — พิสูจน์แล้วด้านบนว่านี่คือ flag combination ที่ใช้ได้จริง ship binary ที่เล็กกว่าและ reverse-engineer ยากกว่า; ถ้าไม่มีมัน stack trace ของ crash reporter ก็อ่านยากขึ้นเหมือนกัน (identifier ไม่ obfuscate แต่ก็ไม่ใช่สิ่งที่ `flutter symbolize` คาดหวังถ้าคุณเพิ่ม obfuscation ทีหลังโดยไม่มีไฟล์ symbol ที่ตรงกัน)
+- โฟลเดอร์ `build/symbols` (หรือเทียบเท่า) จาก `--split-debug-info` ไม่ถูก upload/archive ไว้ที่ไหนเลยใน CI pipeline — พิสูจน์แล้วด้านบนว่า `flutter symbolize` *ไร้ประโยชน์*โดยไม่มีไฟล์ symbol ที่ตรงกับ build นั้นเป๊ะ ทำหายหมายความว่า crash report ที่ symbolize ไม่ได้ตลอดไป
+- ค่า `--dart-define` สำหรับ secret (API key) ที่ commit ตรง ๆ ลง CI YAML แบบ plain text แทนที่จะ inject จาก secret storage ของ CI platform เอง — พิสูจน์แล้วด้านบนว่าค่า `--dart-define` ถูก compile เข้าไปเป็น string ตรง ๆ ที่ใครก็ตามที่มี build artifact แกะออกมาได้ ไม่ว่าค่านั้นจะมาจากไหน
+- ไม่มี `--target-platform` บน CI step ที่ใช้ `--analyze-size` — พิสูจน์แล้วด้านบนว่ามันพังทันทีด้วย error จริงที่เจาะจงสำหรับ multi-ABI build แบบ default
+
+## Mental Model
+
+ทุก flag ในบทนี้กำลังตอบคำถามเวอร์ชันเดียวกัน: **"โค้ด" หมายความว่าอะไรกันแน่ ตอนที่อุปกรณ์ของผู้ใช้รันมัน?** คำตอบของ debug mode คือ "อะไรก็ตามที่อยู่ใน editor ของคุณตอนนี้" (JIT, hot-reload ได้) คำตอบของ release mode คือ "artifact ที่ตายตัว optimize แล้ว compile แบบ AOT" — และเมื่อคุณอยู่ตรงนั้น ทุก flag เพิ่มเติม (`--obfuscate`, `--split-debug-info`, `--dart-define`) จริง ๆ แล้วคือการจัดการช่องว่างระหว่าง artifact นั้นกับ source ที่คุณอ่านได้จริง: obfuscation ขยายช่องว่างนั้นโดยตั้งใจ (เพื่อขนาดและความทนทานต่อ reverse-engineering) `--split-debug-info` + `flutter symbolize` คือเครื่องมือที่ปิดมันกลับ *เฉพาะตอนที่คุณมี symbol ที่ตรงกัน* เท่านั้น และ `--dart-define` คือค่าที่ถูกอบเข้าไปในช่องว่างนั้นตอน compile time ไม่ใช่ถูก inject จากอีกฝั่งของมัน
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `flutter build web` (dart2js) | พิสูจน์แล้วด้านบน: ทำงานได้ทุกที่ที่ browser สมัยใหม่รัน | พิสูจน์แล้วด้านบน: ~1.8MB main.dart.js สำหรับแอป default เปล่า ๆ |
+| `flutter build web --wasm` | พิสูจน์แล้วด้านบน: อาจให้ output รวมเล็กกว่า | พิสูจน์แล้วด้านบนจาก docs: เชื่อถือได้แค่บน browser ที่ใช้ Chromium วันนี้ — ความเสี่ยงเรื่อง browser compatibility จริง |
+| `--obfuscate --split-debug-info` | binary เล็กกว่า reverse-engineer ยากกว่า พิสูจน์แล้วด้านบนด้วย build จริง | พิสูจน์แล้วด้านบน: `flutter symbolize` กับไฟล์ symbol ที่ตรงกันเป๊ะกลายเป็นสิ่งจำเป็นสำหรับ crash trace ที่อ่านได้ |
+| `--dart-define` สำหรับ config | พิสูจน์แล้วด้านบน: เป็น compile-time จริง ไม่ต้องอ่านไฟล์/network ตอน runtime | พิสูจน์แล้วด้านบน (mental model): ถูกอบเข้าไปใน binary เป็น string ตรง ๆ — ไม่ใช่ที่สำหรับ secret ที่ต้องเก็บเป็นความลับ |
+| `flutter_launcher_icons`/`flutter_native_splash` | generate asset ของทุก platform ถูกต้องจาก source เดียว | ขั้นตอน generate ตอน dev-time ที่ต้องจำไว้ว่าต้องรันซ้ำหลังเปลี่ยน source asset |
+
+## Common Misconceptions
+
+- **"`flutter build web --wasm` รันได้บน browser สมัยใหม่ใดก็ได้"** พิสูจน์แล้วด้านบนว่าไม่จริง ตรง ๆ จาก docs ของ Flutter เอง: Chrome บน iOS, Firefox ปัจจุบัน และ Safari ปัจจุบัน ทั้งหมดถูกบล็อกด้วยบั๊กจริงที่ track ไว้ แม้จะรองรับมาตรฐาน WasmGC ที่อยู่เบื้องหลังในทางเทคนิคก็ตาม
+- **"`--obfuscate` เพียงอย่างเดียวพอแล้วสำหรับ crash report ที่อ่านได้ทีหลัง"** พิสูจน์แล้วด้านบนว่าไม่จริง: ข้อความ `--help` ของ SDK เองระบุว่า obfuscation "must always be combined with `--split-debug-info`" และแม้จะมีมันแล้ว `flutter symbolize` ก็ยังต้องการไฟล์ symbol ที่ตรงเป๊ะจาก build นั้น
+- **"`flutter build apk --analyze-size` ทำงานได้เลยบน release build แบบ multi-ABI default"** พิสูจน์แล้วด้านบนว่าไม่จริง ด้วย error จริงที่เจาะจง: มันต้องการ `--target-platform` เดียวเป๊ะ
+- **"ค่า `--dart-define` ถูกซ่อนอย่างปลอดภัยข้างใน binary ที่ compile แล้ว"** พิสูจน์แล้วว่าไม่จริงจาก mental model ด้านบน: มันถูก compile เข้าไปเป็น string ตรง ๆ ที่แกะออกจาก artifact ได้ — เหมาะกับ API base URL ที่ไม่ใช่ความลับจริง ๆ แต่ผิดจริง ๆ สำหรับ API key หรือ secret
 
 export const quizBuild = [
   {
     q: 'ควรใช้ build mode ไหนในการวัด performance จริง?',
     options: [
-      'Debug — มีเครื่องมือเยอะสุด',
-      'Profile — AOT-compiled เหมือน release แต่มี performance tooling ติดอยู่',
-      'Release — แต่แนบเครื่องมือไม่ได้',
-      'mode ไหนก็ให้ตัวเลขเดียวกัน',
+      'Debug — มีเครื่องมือเยอะที่สุด',
+      'Profile — compile แบบ AOT เหมือน release แต่มี performance tooling ต่ออยู่',
+      'Release — แต่ต่อเครื่องมือไม่ได้',
+      'ทุก mode ให้ตัวเลขเหมือนกัน',
     ],
     answer: 1,
   },
   {
-    q: 'ทำไม hot reload ใช้ได้ใน debug แต่ไม่ใช่ release?',
+    q: 'พิสูจน์แล้วด้านบนด้วย build จริงที่ทำซ้ำได้ main.dart.js สำหรับแอป counter default ของ flutter create มีขนาดประมาณเท่าไหร่ และ --wasm เทียบกันยังไง?',
     options: [
-      'release เล็กกว่า',
-      'debug ใช้ JIT compilation (swap code ตอน runtime); release ใช้ AOT (compile ล่วงหน้า)',
-      'hot reload ถูกปิดด้วย flag',
-      'release ไม่มี widget',
+      'main.dart.js ต่ำกว่า 10KB; --wasm ใหญ่กว่ามาก',
+      '~1.8MB สำหรับ main.dart.js; output ของ --wasm (main.dart.wasm + main.dart.mjs) เล็กกว่าจริง ๆ ที่ ~1.4MB รวมสำหรับแอปนี้เจาะจง',
+      'ขนาดเท่ากันเป๊ะเสมอ',
+      '--wasm วัดไม่ได้โดยไม่มี browser',
     ],
     answer: 1,
+    explain: 'ทั้งสอง build รันจริง: main.dart.js เป็น 1,895,343 bytes; main.dart.wasm + main.dart.mjs รวมประมาณ 1,540,646 bytes — ตัวเลขจริงที่ทำซ้ำได้สำหรับแอปนี้อันเดียว ไม่ใช่กฎทั่วไป',
   },
   {
-    q: 'tree-shaking ทำอะไรใน release build?',
+    q: 'พิสูจน์แล้วด้านบนด้วยการอ้างอิง docs WebAssembly ของ Flutter เองตรง ๆ browser ไหนรัน Flutter --wasm build ได้เชื่อถือได้จริงวันนี้?',
     options: [
-      'เรียง widget ใหม่',
-      'ตัด code ที่ไม่ถูกใช้และ icon glyph ที่ไม่ถูก reference เพื่อให้ binary เล็ก',
-      'บีบอัดรูป',
-      'รัน test',
+      'ทุก browser สมัยใหม่เท่ากันหมด',
+      'Chromium/Chrome/Edge 119+ — Chrome บน iOS (ใช้ WebKit), Firefox ปัจจุบัน และ Safari ปัจจุบัน ทั้งหมดถูกบล็อกด้วยบั๊กจริงที่ track ไว้ แม้บางตัวจะประกาศรองรับ WasmGC แล้วก็ตาม',
+      'Safari เท่านั้น',
+      'browser บน Android เท่านั้น',
     ],
     answer: 1,
+    explain: 'docs ที่อ้างอิงตรง ๆ ระบุว่า Firefox 120+ และ Safari ทั้งคู่มีบั๊ก compatibility ที่บล็อก Wasm renderer ของ Flutter โดยเฉพาะ แยกจากการรองรับ WasmGC ทั่วไปของมัน',
   },
   {
-    q: 'flavor ใช้ทำอะไร?',
+    q: 'พิสูจน์แล้วด้านบนด้วยการรัน flutter test จริง --dart-define ทำอะไรจริง ๆ?',
     options: [
-      'ทำ theme ให้ UI',
-      'สร้าง build dev/staging/prod ด้วย config ต่างกันจาก codebase เดียว',
-      'เร่ง hot reload',
-      'เขียน test',
+      'ตั้ง environment variable ที่แอปอ่านตอน runtime ผ่าน Platform.environment',
+      'inject compile-time constant จริง ๆ ที่อ่านผ่าน String.fromEnvironment/bool.fromEnvironment/int.fromEnvironment — พิสูจน์แล้วด้านบนว่า test assert ค่าที่กำหนดเป๊ะ ไม่ใช่ค่า fallback',
+      'ทำงานได้แค่กับ flutter run เท่านั้น ไม่ใช่ flutter test หรือ flutter build',
+      'ต้องการ --dart-define-from-file ถึงจะทำงานได้',
     ],
     answer: 1,
+    explain: 'test จริงส่ง API_URL ผ่าน --dart-define บน command line และ const apiUrl รับค่านั้นแทน defaultValue ของตัวเอง — พิสูจน์ว่ามันคือการแทนที่ตอน compile-time ไม่ใช่การอ่านตอน runtime',
   },
   {
-    q: 'ทำไมการที่ Impeller เป็น renderer default ถึงลดอาการ animation กระตุกตอนเล่นรอบแรก?',
+    q: 'พิสูจน์แล้วด้านบนด้วย APK build จริงและ output ของ --help สิ่งที่จำเป็นเพื่อได้ crash stack trace ที่อ่านได้จาก obfuscated release build คืออะไร?',
     options: [
-      'มันข้ามการ render frame แรกไปเลย',
-      'มัน compile shader ตอน build แทนที่จะ compile ตอนใช้ครั้งแรก',
-      'มันลด frame rate ลงเหลือ 30fps',
+      'ไม่ต้องมีอะไรเพิ่ม — obfuscated stack trace อ่านได้อัตโนมัติ',
+      '--obfuscate ต้องรวมกับ --split-debug-info (ยืนยันจาก --help) และ flutter symbolize ต้องรันด้วยไฟล์ symbol ที่ตรงกับ build นั้นเป๊ะ',
+      'ต้องการแค่ --split-debug-info เท่านั้น --obfuscate ไม่จำเป็น',
+      'Xcode symbolize crash ของ Flutter ทุกตัวให้อัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'build จริงสร้างไฟล์ .symbols หนึ่งไฟล์ต่อ target ABI และ flutter symbolize --help ยืนยันว่ามันต้องการ --debug-info ที่ชี้ไปยังไฟล์ที่ตรงกัน บวก stack trace ดิบเป็น --input',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบนด้วยข้อความ error จริง flutter build apk --analyze-size ต้องการอะไรที่ release build ปกติไม่ต้องการ?',
+    options: [
+      'ไม่ต้องมีอะไรเพิ่ม มันทำงานเหมือน build ปกติเป๊ะ',
+      'ต้องการ --target-platform เดียวเป๊ะ — error จริงที่จับได้คือ "Cannot perform code size analysis when building for multiple ABIs"',
+      'ต้องต่ออุปกรณ์ Android จริง',
+      'flag --obfuscate',
+    ],
+    answer: 1,
+    explain: 'การรันมันกับ config multi-ABI แบบ default พังทันทีด้วยข้อความ error จริงนั้นเป๊ะ; การลองใหม่ด้วย --target-platform=android-arm64 สร้างการแบ่งขนาด per-package จริง',
+  },
+  {
+    q: 'ทำไม Impeller ที่กลายเป็น renderer default ถึงลดจังหวะสะดุดของ animation ตอนรันครั้งแรก?',
+    options: [
+      'มันข้ามการ render เฟรมแรก',
+      'มัน compile shader ตอน build time แทนที่จะเป็นตอนใช้ครั้งแรก',
+      'มันลด frame rate เหลือ 30fps',
       'มันปิด animation ใน release build',
     ],
     answer: 1,

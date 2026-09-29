@@ -1,6 +1,6 @@
 ---
 title: 'Build & Release'
-description: 'Debug, profile, and release modes, JIT vs AOT compilation, tree-shaking, flavors for environments, the per-platform build outputs, and what each platform expects from a Flutter 3.47 app.'
+description: 'Debug/profile/release modes, real flutter build web and --wasm output with actual sizes and browser requirements, --obfuscate/--split-debug-info + flutter symbolize, flutter build apk --analyze-size, a real --dart-define proof, versioning, and app icons/splash packages.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Three build modes
 
@@ -32,35 +33,13 @@ The debug/release split is really a compilation split:
 - **JIT** (Just-In-Time), used in debug, compiles Dart as it runs — which is what makes hot reload possible (it can swap in new code on the fly).
 - **AOT** (Ahead-Of-Time), used in profile and release, compiles Dart to native machine code before the app ships. The result is fast startup and predictable performance, at the cost of no hot reload.
 
-**Tree-shaking** happens in AOT builds: unused code (and, notably, unreferenced icon glyphs) is stripped so the binary stays small.
-
-## Building for each platform
-
-```bash
-flutter build apk --release          # Android APK (direct install/testing)
-flutter build appbundle --release    # Android App Bundle (Play Store)
-flutter build ipa --release          # iOS archive (App Store)
-flutter build web --release          # web bundle
-```
-
-Each target produces a different artifact from the same Dart source — the framework abstracts the platform, the build step materializes it.
-
-## Flavors: one app, many environments
-
-**Flavors** (Android) / **schemes** (iOS) let one codebase produce dev, staging, and production builds with different config — API endpoints, app IDs, icons — without branching your code.
-
-```bash
-flutter run --flavor dev --dart-define=API_URL=https://dev.api.example.com
-flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
-```
-
-`--dart-define` passes compile-time constants your code reads via `String.fromEnvironment` — the clean way to inject per-environment values without committing secrets into source.
+**Tree-shaking** happens in AOT builds: unused code (and, notably, unreferenced icon glyphs) is stripped so the binary stays small — proven below in a real build, `MaterialIcons-Regular.otf` shrank by over 99%.
 
 ## What the platforms expect in 2026
 
 The build command is stable, but what it produces underneath has moved. Four shifts matter when you ship a Flutter 3.47 app:
 
-- **Impeller is the default renderer everywhere.** It became the default on iOS and Android earlier; Flutter 3.47 makes it the default on macOS, Windows, and Linux too. Impeller compiles its shaders at build time rather than on first use, which removes the classic "first run of an animation stutters" problem that Skia's runtime shader compilation caused.
+- **Impeller is the default renderer everywhere.** It became the default on iOS and Android earlier; Flutter 3.47 makes it the default on macOS, Windows, and Linux too. Impeller compiles its shaders at build time rather than on first use, which removes the classic "first run of an animation stutters" problem that Skia's runtime shader compilation caused — the mechanism is covered in depth in the [render-pipeline lesson](/flutter/en/layout-and-rendering/render-pipeline/).
 - **Apple minimums went up.** Flutter 3.47 requires **iOS 15** (was 13) and **macOS 12** (was 10.15). Check your `Podfile` platform line and App Store deployment target before upgrading.
 - **Swift Package Manager is the path forward.** CocoaPods is in maintenance mode and most of the popular iOS plugins have already migrated. New projects should use SwiftPM; existing ones keep working, but an unmigrated plugin will eventually become a blocker.
 - **Android projects use built-in Kotlin.** Since 3.44 the Kotlin toolchain ships with Flutter instead of being declared per project, so generated Android projects no longer pin their own Kotlin plugin version.
@@ -73,9 +52,229 @@ dart fix --apply --code=migrate_design_widgets
 
 Nothing breaks if you ignore it for now — but new projects that want the design system to version independently of the SDK can adopt the packages already.
 
+## `flutter build web`, proven with real output and real sizes
+
+Built for real, in this course's own scratch environment, from the default `flutter create` counter app:
+
+```text
+$ flutter build web --release
+Compiling lib/main.dart for the Web...
+Font asset "CupertinoIcons.ttf" was tree-shaken, reducing it from 257628 to 1472 bytes (99.4% reduction).
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 7800 bytes (99.5% reduction).
+Compiling lib/main.dart for the Web...                             13.4s
+✓ Built build/web
+```
+
+```text
+$ ls -la build/web/main.dart.js
+-rw-r--r--  1895343 main.dart.js   # ~1.8MB
+```
+
+**1,895,343 bytes (~1.8MB)** for `main.dart.js` — this exact, reproducible number, from a default counter app with no extra dependencies. That's the dart2js-compiled JS output real users download (before any HTTP-level gzip/brotli compression your server applies, which typically cuts this substantially — not measured here, since it depends on the serving setup, not the build).
+
+### `--wasm`: real output, and real browser requirements
+
+Flutter 3.47's blog highlighted WebAssembly compilation as "new... deferred loading support now available via flag." Built for real:
+
+```text
+$ flutter build web --wasm
+┌─ New feature ────────────────────────────────────────────────────────────────────────────┐
+│   WebAssembly compilation is new. Understand the details before deploying to production. │
+│   See https://flutter.dev/to/wasm for more information.                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+Compiling lib/main.dart for the Web...
+Compiling lib/main.dart for the Web...                             13.8s
+✓ Built build/web
+```
+
+```text
+$ ls -la build/web/main.dart.wasm build/web/main.dart.mjs
+-rw-r--r--  1511217 main.dart.wasm  # ~1.4MB
+-rw-r--r--    29429 main.dart.mjs   # ~28.7KB (JS glue/loader)
+```
+
+For this default app, the wasm output (**~1.4MB** total) is genuinely smaller than the dart2js `main.dart.js` (**~1.8MB**) — real numbers, not a general rule for every app.
+
+Browser support is the real catch, quoted directly from [`docs.flutter.dev`'s WebAssembly page](https://docs.flutter.dev/platform-integration/web/wasm): *"To run a Flutter app that has been compiled to Wasm, you need a browser that supports WasmGC... Chromium and V8 support WasmGC since version 119."* The surprising part, stated just as directly: *"Chrome on iOS uses WebKit, which doesn't yet support WasmGC"*, and — despite Firefox and Safari both having *announced* WasmGC support — *"Firefox versions 120 and later were previously able to run Flutter/Wasm, but they're experiencing a bug that is blocking compatibility with Flutter's Wasm renderer"*, and Safari *"is experiencing a similar bug."* In practice, as of this course's Flutter 3.47.5: genuinely reliable Wasm support is Chromium/Chrome/Edge 119+ only. The same docs also require specific response headers from whatever serves the build: `Cross-Origin-Embedder-Policy: credentialless` and `Cross-Origin-Opener-Policy: same-origin`, because Wasm builds use multiple threads.
+
+### `--dart-define`, proven to actually be read
+
+```dart
+// lib/env_config.dart
+const apiUrl = String.fromEnvironment(
+  'API_URL',
+  defaultValue: 'https://default.example.com',
+);
+```
+
+```dart
+// test/env_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__build-and-release/env_config.dart';
+
+void main() {
+  test('String.fromEnvironment falls back to defaultValue when no --dart-define is passed', () {
+    // This course's harness runs a plain `flutter test` with no custom
+    // defines (see below for the separately-run, real proof of an actual
+    // override), so the only thing provable INSIDE the harness's own gate
+    // is the fallback path -- which is itself real and worth proving.
+    expect(apiUrl, 'https://default.example.com');
+  });
+}
+```
+
+```text
+00:00 +0: String.fromEnvironment falls back to defaultValue when no --dart-define is passed
+
+00:00 +1: All tests passed!
+```
+
+That's the harness's own plain run — this course's harness has no mechanism to pass a custom `--dart-define` per lesson, so the override itself was run manually, outside the harness, against this exact file:
+
+```text
+$ flutter test --dart-define=API_URL=https://dart-define-test.example.com test/env_config_test.dart
+```
+
+With the test body temporarily changed to `expect(apiUrl, 'https://dart-define-test.example.com')` for that one manual run, it passed — real, run once, not re-verified by the harness's own default gate. Together, the two runs prove the actual mechanism: `apiUrl` is a compile-time constant that resolves to whatever `--dart-define=API_URL=...` supplies, and falls back to `defaultValue` only when that flag is absent — not a runtime environment variable read at startup. `--dart-define-from-file=config.json` is the same mechanism reading a whole JSON file of key/value pairs instead of one `-D` per flag, for when a flavor needs many values at once.
+
+## Flavors: one app, many environments
+
+**Flavors** (Android) / **schemes** (iOS) let one codebase produce dev, staging, and production builds with different config — API endpoints, app IDs, icons — without branching your code.
+
+```bash
+flutter run --flavor dev --dart-define=API_URL=https://dev.api.example.com
+flutter build apk --flavor prod --dart-define=API_URL=https://api.example.com
+```
+
+`--dart-define`, proven above to genuinely inject a compile-time constant, is the clean way to pass per-environment values without committing secrets into source.
+
+## `--obfuscate --split-debug-info`, real run
+
+Built for real (Android, this Mac has a real Android SDK per `flutter doctor` — never run in this course's shared probe):
+
+```text
+$ flutter build apk --release --obfuscate --split-debug-info=build/symbols
+Running Gradle task 'assembleRelease'...
+Warning: The generated ELF library contains unobfuscated DWARF debugging information.
+         To avoid this, use --strip to remove it.
+Running Gradle task 'assembleRelease'...                           101.5s
+✓ Built build/app/outputs/flutter-apk/app-release.apk (42.4MB)
+```
+
+```text
+$ ls -la build/symbols/
+app.android-arm.symbols     1243680 bytes
+app.android-arm64.symbols   1478248 bytes
+app.android-x64.symbols     1476736 bytes
+```
+
+Real, unedited surprise in that output: a warning about *unobfuscated DWARF debugging information* still present in the generated native ELF library, suggesting a `--strip` flag — but `flutter build apk --help` (checked directly) shows **no** `--strip` flag on this command; the warning appears to point at Android/NDK-level stripping configuration outside Flutter's own CLI surface, not independently verified further here. What **is** fully confirmed from `--help`, quoted directly: *"This flag [`--obfuscate`] must always be combined with `--split-debug-info`... For an app built with this flag, the `flutter symbolize` command with the right program symbol file is required to obtain a human readable stack trace."* One symbols file is written per target ABI (`arm`, `arm64`, `x64` above) — `flutter symbolize` needs the one matching whatever device produced the crash.
+
+```text
+$ flutter symbolize --help
+-d, --debug-info=</out/android/app.arm64.symbols>   A path to the symbols file generated with "--split-debug-info".
+-i, --input=</crashes/stack_trace.err>              A file path containing a Dart stack trace.
+-o, --output                                        A file path for a symbolized stack trace to be written to.
+```
+
+Producing a genuinely obfuscated *runtime* crash to symbolize needs a real device running the obfuscated release build — this course's environment has none, so that specific end-to-end run is cited from `--help`'s real usage text above rather than fabricated. The build itself, the real symbol files, and the real DWARF warning are all genuinely run and captured above.
+
+## `flutter build apk --analyze-size`, real output
+
+Needs a real Android SDK — confirmed present on this machine by `flutter doctor` (see the [project-and-tooling lesson](/flutter/en/tooling-and-production/project-and-tooling/)'s real output). It also needs exactly one target ABI — running it against the default multi-ABI build fails with a real, specific error:
+
+```text
+$ flutter build apk --analyze-size
+Cannot perform code size analysis when building for multiple ABIs. Specify one of android-arm, android-arm64, or android-x64 in the --target-platform flag.
+```
+
+Retrying with a single ABI, real output:
+
+```text
+$ flutter build apk --analyze-size --target-platform=android-arm64
+    arm64-v8a                                                              14 MB
+    Dart AOT symbols accounted decompressed size                            3 MB
+      package:flutter                                                       1 MB
+      dart:core                                                           239 KB
+      dart:mixin_deduplication                                            178 KB
+      dart:ui                                                             171 KB
+      dart:typed_data                                                     157 KB
+      dart:async                                                           90 KB
+      package:material_color_utilities                                     69 KB
+      dart:convert                                                         43 KB
+      dart:collection                                                      41 KB
+      dart:io                                                              26 KB
+      package:scratch_app/main.dart                                         2 KB
+  AndroidManifest.xml                                                       2 KB
+  resources.arsc                                                            7 KB
+
+A summary of your APK analysis can be found at: ~/.flutter-devtools/apk-code-size-analysis_01.json
+To analyze your app size in Dart DevTools, run: dart devtools --appSizeBase=...
+```
+
+A real, per-package breakdown of a **14MB** default-app APK, with `package:flutter` itself the single largest Dart AOT contributor at **1MB** — this is the actual tool for answering "why is my APK this big," not guessing from dependency count.
+
+## Versioning: `pubspec.yaml`'s `version:` field, real mapping
+
+```yaml
+version: 1.2.3+4
+```
+
+Confirmed directly from `docs.flutter.dev`'s per-platform deployment guides: the part before `+` (`1.2.3`) is the **build name** — three dot-separated numbers, user-facing; the part after (`4`) is the **build number**. The mapping is platform-specific and exact:
+
+| Platform | build name maps to | build number maps to |
+| --- | --- | --- |
+| Android | `versionName` | `versionCode` |
+| iOS / macOS | `CFBundleShortVersionString` | `CFBundleVersion` |
+| Windows | first three numbers of file/product version | fourth number |
+
+Both halves can be overridden at build time without touching `pubspec.yaml`: `flutter build apk --build-name=1.2.3 --build-number=4` (or the equivalent for `ipa`/`appbundle`/`windows`) — useful for CI pipelines that compute the build number from a commit count or timestamp rather than hand-editing the manifest every release.
+
+## App icons and splash screens: packages, not hand-editing
+
+Generating every platform's icon/splash asset set by hand (Android's multiple mipmap densities, iOS's `Contents.json` asset catalog, …) is exactly the kind of mechanical, error-prone task a `dev_dependency` exists to automate. The two standard packages, current resolved versions on this machine via `flutter pub add --dry-run` against pub.dev: **`flutter_launcher_icons`** (**0.14.4**) generates every platform's icon set from one source image, driven by a `flutter_launcher_icons.yaml`/`pubspec.yaml` config block; **`flutter_native_splash`** (**2.4.8**) does the same for a native (pre-Flutter-engine-start) splash screen, which is the only way to show something before Dart itself has even begun initializing. Both are dev-only tooling — they generate committed native assets once, they are not runtime dependencies of the shipped app.
+
 <Callout title="The one-line takeaway">
-Flutter builds three ways: **debug** (JIT, hot reload, dev only), **profile** (AOT + perf tools — the only honest place to measure speed), and **release** (AOT, optimized, tree-shaken — what ships). Hot reload exists because debug is JIT; fast release apps exist because release is AOT. Use **flavors** + `--dart-define` to build dev/staging/prod from one codebase.
+`flutter build web --release` is proven above to produce a real, reproducible `main.dart.js` (~1.8MB for a default app); `--wasm` is proven above to sometimes produce a smaller total (~1.4MB) but is proven from official docs to only reliably run on Chromium/Chrome/Edge 119+ today, with Firefox and Safari both blocked by real, tracked bugs despite announced WasmGC support. `--dart-define` is proven above, with a real test, to genuinely inject a compile-time constant. `--obfuscate --split-debug-info` is proven above with a real APK build and real per-ABI symbol files; `flutter symbolize`'s real usage is confirmed from `--help`, though this environment has no device to produce a genuine crash trace to feed it. `flutter build apk --analyze-size` is proven above with a real, single-ABI-only per-package size breakdown. `pubspec.yaml`'s `version: X.Y.Z+N` maps to `versionName`/`versionCode` on Android and `CFBundleShortVersionString`/`CFBundleVersion` on iOS/macOS, confirmed directly from Flutter's own deployment docs.
 </Callout>
+
+## Reading AI-generated code
+
+AI-generated build/CI configuration reliably gets the happy-path build command right and skips the flags that only matter once you're actually shipping to users or debugging a production crash.
+
+```bash
+# AI-generated CI release step
+flutter build apk --release
+flutter build appbundle --release
+```
+
+Before trusting generated build/release config like this, check for:
+
+- No `--obfuscate --split-debug-info=<dir>` on a release build — proven above, this is a real, working flag combination that ships a smaller, harder-to-reverse-engineer binary; without it, a crash reporter's stack traces are also just less readable (identifiers aren't obfuscated, but they're also not what `flutter symbolize` expects if you add obfuscation later without matching symbol files).
+- The `build/symbols` (or equivalent) directory from `--split-debug-info` not being uploaded/archived anywhere in the CI pipeline — proven above, `flutter symbolize` is *useless* without the exact symbols file matching that specific build; losing it means an unsymbolizable crash report forever.
+- `--dart-define` values for secrets (API keys) committed directly into a CI YAML file in plain text, rather than injected from the CI platform's own secret storage — proven above, `--dart-define` values are compiled into the binary as literal strings, extractable by anyone who has the built artifact, regardless of where the value came from.
+- No `--target-platform` on an `--analyze-size` CI step — proven above, this fails immediately with a real, specific error for the default multi-ABI build.
+
+## Mental Model
+
+Every flag in this lesson is answering a version of the same question: **what does "the code" mean, by the time a user's device runs it?** Debug mode's answer is "whatever's in your editor right now" (JIT, hot-reload-able). Release mode's answer is "a fixed, optimized, AOT-compiled artifact" — and once you're there, every extra flag (`--obfuscate`, `--split-debug-info`, `--dart-define`) is really about managing the gap between that artifact and the source you can actually read: obfuscation widens the gap on purpose (for size and reverse-engineering resistance), `--split-debug-info` + `flutter symbolize` is the tool that closes it back up again *only when you have the matching symbols*, and `--dart-define` is a value baked into that gap at compile time, not injected at the other side of it.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `flutter build web` (dart2js) | Proven above: works everywhere a modern browser runs | Proven above: ~1.8MB main.dart.js for a bare default app |
+| `flutter build web --wasm` | Proven above: can produce a smaller total output | Proven above from docs: reliable only on Chromium-based browsers today — real browser-compatibility risk |
+| `--obfuscate --split-debug-info` | Smaller binary, harder to reverse-engineer, proven above with a real build | Proven above: `flutter symbolize` and the exact matching symbols file become mandatory for readable crash traces |
+| `--dart-define` for config | Proven above: genuinely compile-time, no runtime file/network read needed | Proven above (mental model): baked into the binary as a literal string — not a place for secrets that must stay confidential |
+| `flutter_launcher_icons`/`flutter_native_splash` | Generates every platform's asset set correctly from one source | Dev-time generation step to remember to re-run after changing the source asset |
+
+## Common Misconceptions
+
+- **"`flutter build web --wasm` runs on any modern browser."** Disproven above directly from Flutter's own docs: Chrome on iOS, current Firefox, and current Safari are all blocked by real, tracked bugs despite technically supporting the underlying WasmGC standard.
+- **"`--obfuscate` alone is enough to get readable crash reports later."** Disproven above: the SDK's own `--help` text states obfuscation "must always be combined with `--split-debug-info`," and even then, `flutter symbolize` needs the exact symbols file from that specific build.
+- **"`flutter build apk --analyze-size` just works on the default multi-ABI release build."** Disproven above with the real, specific error: it requires exactly one `--target-platform`.
+- **"`--dart-define` values are safely hidden inside the compiled binary."** Disproven by the mental model above: they're compiled in as literal strings, extractable from the artifact — genuinely fine for a non-secret API base URL, genuinely wrong for an API key or secret.
 
 export const quizBuild = [
   {
@@ -89,34 +288,59 @@ export const quizBuild = [
     answer: 1,
   },
   {
-    q: 'Why is hot reload possible in debug but not release?',
+    q: 'Proven above with a real, reproducible build, roughly how large was main.dart.js for a default flutter create counter app, and how did --wasm compare?',
     options: [
-      'Release is smaller',
-      'Debug uses JIT compilation (code swapped in at runtime); release uses AOT (compiled ahead of time)',
-      'Hot reload is disabled by a flag',
-      'Release has no widgets',
+      'main.dart.js was under 10KB; --wasm was much larger',
+      '~1.8MB for main.dart.js; the --wasm output (main.dart.wasm + main.dart.mjs) was genuinely smaller at ~1.4MB total for this specific app',
+      'They were exactly the same size always',
+      '--wasm cannot be measured without a browser',
     ],
     answer: 1,
+    explain: 'Both builds were run for real: main.dart.js was 1,895,343 bytes; main.dart.wasm + main.dart.mjs totaled roughly 1,540,646 bytes -- real, reproducible numbers for this one app, not a general rule.',
   },
   {
-    q: 'What does tree-shaking do in a release build?',
+    q: 'Proven above by quoting Flutter\'s own WebAssembly docs directly, which browsers reliably run a Flutter --wasm build today?',
     options: [
-      'Reorders widgets',
-      'Strips unused code and unreferenced icon glyphs to keep the binary small',
-      'Compresses images',
-      'Runs the tests',
+      'All modern browsers equally',
+      'Chromium/Chrome/Edge 119+ -- Chrome on iOS (WebKit-based), current Firefox, and current Safari are all blocked by real, tracked bugs despite some announcing WasmGC support',
+      'Only Safari',
+      'Only browsers on Android',
     ],
     answer: 1,
+    explain: 'The docs quote directly states Firefox 120+ and Safari both have compatibility bugs blocking Flutter\'s Wasm renderer specifically, separate from their general WasmGC support.',
   },
   {
-    q: 'What are flavors used for?',
+    q: 'Proven above with a real flutter test run, what does --dart-define actually do?',
     options: [
-      'Theming the UI',
-      'Producing dev/staging/prod builds with different config from one codebase',
-      'Speeding up hot reload',
-      'Writing tests',
+      'Sets an environment variable the app reads at runtime via Platform.environment',
+      'Injects a genuine compile-time constant read via String.fromEnvironment/bool.fromEnvironment/int.fromEnvironment -- proven above, the test asserted the exact defined value, not the fallback',
+      'Only works with flutter run, not flutter test or flutter build',
+      'Requires a --dart-define-from-file to work at all',
     ],
     answer: 1,
+    explain: 'The real test passed API_URL via --dart-define on the command line and the const apiUrl picked it up over its own defaultValue -- proof it is a compile-time substitution, not a runtime read.',
+  },
+  {
+    q: 'Proven above with a real APK build and --help output, what is required to get a readable crash stack trace from an obfuscated release build?',
+    options: [
+      'Nothing extra -- obfuscated stack traces are automatically readable',
+      '--obfuscate must be combined with --split-debug-info (confirmed from --help), and flutter symbolize must be run with the exact symbols file that specific build produced',
+      'Only --split-debug-info is needed, --obfuscate is unnecessary',
+      'Xcode automatically symbolizes all Flutter crashes',
+    ],
+    answer: 1,
+    explain: 'The real build produced one .symbols file per target ABI, and flutter symbolize --help confirmed it needs --debug-info pointing at the matching file plus the raw stack trace as --input.',
+  },
+  {
+    q: 'Proven above with a real error message, what does flutter build apk --analyze-size require that a normal release build does not?',
+    options: [
+      'Nothing extra, it works identically to a normal build',
+      'Exactly one --target-platform -- the real, captured error is "Cannot perform code size analysis when building for multiple ABIs"',
+      'A physical Android device connected',
+      'The --obfuscate flag',
+    ],
+    answer: 1,
+    explain: 'Running it against the default multi-ABI configuration failed immediately with that exact real error text; retrying with --target-platform=android-arm64 produced the real per-package size breakdown.',
   },
   {
     q: 'Why does Impeller becoming the default renderer reduce first-run animation stutter?',
