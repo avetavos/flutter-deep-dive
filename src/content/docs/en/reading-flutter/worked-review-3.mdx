@@ -1,0 +1,739 @@
+---
+title: 'Worked review 3: a cross-platform app, dart:io/web, and release config'
+description: 'An AI-generated cross-platform app -- a MethodChannel battery call, a kIsWeb guard around a dart:io import, runZonedGuarded as the only error handler, a mismatched --dart-define key, and lint/test/accessibility gaps -- reviewed bug by bug against real MissingPluginException, flutter build web, pumpAndSettle timeout, and meetsGuideline failures in this course probe.'
+sidebar:
+  order: 6
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## The feature
+
+The prompt was: *"A settings screen that shows battery level via a platform channel, works on both web and native (native reads a file, web can't), has a sync button, an environment-configurable API URL, and is ready for release -- error reporting, lint rules, accessible buttons, tests that don't hang CI."* This is the kind of PR that touches every seam between "runs on my phone in debug mode" and "actually ships": a platform channel, a `dart:io`/web split, error reporting, build config, lints, and accessibility. Every one of those seams has its own AI-shaped mistake in this draft. Read it the way the **[review checklist](/flutter/en/reading-flutter/review-checklist/)** recommends: does it even work on every platform it claims to, then error handling, then release/lint config, then tests. It has **9 real bugs**. Every claim below was run for real in this course's own probe (Flutter 3.47.5) -- real `flutter analyze`, real `flutter test`, a real `flutter build web`, and direct reads of the installed SDK's own source.
+
+## The generated code
+
+```dart
+// lib/cross_app/battery_widget.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+const batteryChannel = MethodChannel('com.example.crossapp/battery');
+
+class BatteryDisplay extends StatefulWidget {
+  const BatteryDisplay({super.key});
+  @override
+  State<BatteryDisplay> createState() => _BatteryDisplayState();
+}
+
+class _BatteryDisplayState extends State<BatteryDisplay> {
+  int? _level;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+    setState(() => _level = level);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(_level == null ? 'loading...' : 'Battery: $_level%');
+  }
+}
+```
+
+```dart
+// lib/cross_app/platform_broken.dart
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+export 'platform_io_impl.dart' if (kIsWeb) 'platform_web_impl.dart';
+```
+
+```dart
+// lib/cross_app/platform_io_impl.dart
+String platformLabel() => 'io';
+```
+
+```dart
+// lib/cross_app/platform_web_impl.dart
+String platformLabel() => 'web';
+```
+
+```dart
+// lib/cross_app/zoned_error_demo.dart
+import 'package:flutter/material.dart';
+
+class BrokenBuild extends StatelessWidget {
+  const BrokenBuild({super.key});
+  @override
+  Widget build(BuildContext context) {
+    throw StateError('boom from build()');
+  }
+}
+```
+
+The AI's own `main.dart`, as described in the PR (not a real, collectible fence -- `runZonedGuarded`'s real behavior is proven below against `zoned_error_demo.dart` instead): *"wrapped `runApp()` in `runZonedGuarded` so every error gets reported -- and added a few `print()` calls for debugging, they get stripped in release anyway."*
+
+```dart
+// lib/cross_app/env_config.dart
+// the app is built/run with --dart-define=API_URL=...
+const apiUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'https://api.example.com',
+);
+```
+
+```dart
+// lib/cross_app/pop_mix.dart
+import 'package:flutter/material.dart';
+
+class OldStyleGuard extends StatelessWidget {
+  const OldStyleGuard({super.key, required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: () async => false,
+      child: child,
+    );
+  }
+}
+```
+
+```dart
+// lib/cross_app/infinite_spinner.dart
+import 'package:flutter/material.dart';
+
+class InfiniteSpinner extends StatefulWidget {
+  const InfiniteSpinner({super.key});
+  @override
+  State<InfiniteSpinner> createState() => _InfiniteSpinnerState();
+}
+
+class _InfiniteSpinnerState extends State<InfiniteSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  )..repeat(); // never settles on its own
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(turns: _controller, child: const Icon(Icons.refresh));
+  }
+}
+```
+
+```dart
+// lib/cross_app/sync_button.dart
+import 'package:flutter/material.dart';
+
+class UnlabeledSyncButton extends StatelessWidget {
+  const UnlabeledSyncButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IconButton(icon: const Icon(Icons.sync), onPressed: () {}),
+    );
+  }
+}
+```
+
+The PR's `analysis_options.yaml`, with a comment stating an assumption the AI never checked:
+
+```yaml
+# analysis_options.yaml
+include: package:flutter_lints/flutter.yaml
+
+# prefer_const_constructors ships with flutter_lints, so every widget in
+# this app is already covered.
+```
+
+## The review walk
+
+### 1. `MethodChannel` call with no `PlatformException`/`MissingPluginException` handling
+
+`_load()` awaits `batteryChannel.invokeMethod` with no `try`/`catch` at all. The exact mechanism (and this exact channel/method shape) is proven in full in **[Platform channels](/flutter/en/navigation/platform-channels/)**; reproduced here for this app's own channel name:
+
+```dart
+// test/cross_app/battery_widget_test.dart
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/battery_widget.dart';
+
+void main() {
+  test('with no platform handler registered, invokeMethod throws the real MissingPluginException text', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    await expectLater(
+      batteryChannel.invokeMethod<int>('getBatteryLevel'),
+      throwsA(isA<MissingPluginException>().having(
+        (e) => e.toString(),
+        'message',
+        'MissingPluginException(No implementation found for method getBatteryLevel on channel com.example.crossapp/battery)',
+      )),
+    );
+  });
+}
+```
+
+```text
+✓ with no platform handler registered, invokeMethod throws the real MissingPluginException text
+
+00:00 +1: All tests passed!
+```
+
+<SpotTheBug code={`Future<void> _load() async {
+  final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+  setState(() => _level = level);
+}`}>
+Two real, common causes throw here: a `PlatformException` from the native side reporting a real failure (permission denied, hardware unavailable), and a `MissingPluginException` -- proven above -- whenever nothing is listening on that channel at all (the plugin isn't registered yet, the platform has no implementation, or in a test). Called from `initState` with no `await`, either one becomes an unhandled `Future` rejection with no user-facing error state at all. The fix wraps the call in `try { ... } on MissingPluginException { ... } on PlatformException catch (e) { ... }` and shows something instead of silently staying on "loading...".
+</SpotTheBug>
+
+### 2. `kIsWeb` as a conditional-import condition -- syntactically accepted, never actually switches
+
+`platform_broken.dart` conditionally exports a web-safe implementation using `if (kIsWeb)`. This analyzes with **zero errors** -- Dart's conditional-import syntax is just `import/export '<default>' if (<dotted.identifier>) '<alt>';`, and any dotted identifier parses. The condition itself is checked against **compile-time environment declarations** (the same mechanism as `-D` defines and the built-in `dart.library.*` checks), which has nothing to do with `kIsWeb`, a runtime constant from `package:flutter/foundation.dart`. Proven by actually building for web and inspecting which branch was compiled in:
+
+```text
+$ flutter build web
+...
+✓ Built build/web
+
+$ grep -o "SENTINEL_IO_IMPL_USED\|SENTINEL_WEB_IMPL_USED" build/web/main.dart.js | sort | uniq -c
+   1 SENTINEL_IO_IMPL_USED
+```
+
+Built for **web**, and the compiled output only contains the sentinel from the `io`-branch implementation -- `if (kIsWeb)` never once selects the alternate `platform_web_impl.dart`, on any target, because `kIsWeb` isn't a declared environment key. (A separate, working version using `if (dart.library.html)` -- the real, compiler-recognized condition -- selects the correct branch on the identical build; see the corrected code.)
+
+<Callout title="A second, smaller tell">
+`flutter analyze` also flags `platform_broken.dart`'s own `import 'package:flutter/foundation.dart' show kIsWeb;` as `unused_import` -- the analyzer doesn't count `kIsWeb`'s appearance inside the conditional-export condition as a real use of the imported symbol, a small extra sign that the condition isn't wired to anything the analyzer treats as connected to that import at all.
+</Callout>
+
+### 3. `runZonedGuarded` as the only error handler -- misses framework errors entirely
+
+The AI's `main.dart` wraps `runApp()` in `runZonedGuarded` and calls it done for error reporting. Proven directly against a widget that throws from `build()`:
+
+```dart
+// test/cross_app/zoned_error_demo_test.dart
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/zoned_error_demo.dart';
+
+void main() {
+  testWidgets('runZonedGuarded around runApp does not see a build()-phase error', (tester) async {
+    Object? caughtByZone;
+    FlutterErrorDetails? caughtByFlutterError;
+
+    final originalOnError = FlutterError.onError;
+    FlutterError.onError = (details) => caughtByFlutterError = details;
+    addTearDown(() => FlutterError.onError = originalOnError);
+
+    await runZonedGuarded(() async {
+      await tester.pumpWidget(const MaterialApp(home: BrokenBuild()));
+    }, (error, stack) {
+      caughtByZone = error;
+    });
+
+    expect(caughtByFlutterError, isNotNull,
+        reason: 'FlutterError.onError genuinely saw the build() error');
+    expect(caughtByZone, isNull,
+        reason: 'the framework catches build()/layout()/paint() errors '
+            'internally and routes them to FlutterError.onError BEFORE '
+            'they could ever reach an ambient Zone -- runZonedGuarded '
+            'never saw this error at all, even though it wraps runApp()');
+  });
+}
+```
+
+```text
+✓ runZonedGuarded around runApp does not see a build()-phase error
+
+00:00 +1: All tests passed!
+```
+
+Per **[Production concerns](/flutter/en/tooling-and-production/production-concerns/)**, this is doubly out of date: Flutter's own **3.3 release notes** state plainly that `PlatformDispatcher.onError` replaces the need for a custom `Zone` at all (*"custom `Zone`s were detrimental to a number of optimizations in Dart's core libraries, which slowed down application start-up time"*), and framework build/layout/paint errors were never a `Zone`'s job to catch in the first place -- `FlutterError.onError` is the only hook that sees them, proven above and in that lesson.
+
+### 4. `print()` calls, on the assumption they're "stripped in release"
+
+Already corrected in **[Production concerns](/flutter/en/tooling-and-production/production-concerns/)**, reading the installed SDK source directly (`~/flutter/packages/flutter/lib/src/foundation/print.dart`): neither `print` nor `debugPrint` is removed in a release build. `debugPrint`'s own doc comment states it plainly: *"The `debugPrint` function logs to console even in release mode."* Every `print()` call left in "for debugging" in this PR ships to real users' device logs in the release build, exactly as written -- the real reason to prefer `debugPrint` over bare `print` is throttling (avoiding Android log-buffer data loss under high-volume output), not release-stripping.
+
+### 5. `--dart-define=API_URL=...`, read with the wrong key
+
+The app is documented as reading its API URL from `--dart-define=API_URL=...`, but `env_config.dart` reads `String.fromEnvironment('API_BASE_URL', ...)` -- a different key entirely:
+
+```dart
+// test/cross_app/env_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/env_config.dart';
+
+void main() {
+  test('apiUrl falls back to defaultValue -- the key it reads does not match --dart-define=API_URL', () {
+    expect(apiUrl, 'https://api.example.com');
+  });
+}
+```
+
+```text
+✓ apiUrl falls back to defaultValue -- the key it reads does not match --dart-define=API_URL
+
+00:00 +1: All tests passed!
+```
+
+Run manually (this course's harness has no mechanism to pass a custom `--dart-define` per lesson, the same caveat as the real `--dart-define` proof in **[Build & release](/flutter/en/tooling-and-production/build-and-release/)**) with the value the app's own docs say to pass:
+
+```text
+$ flutter test --dart-define=API_URL=https://real.example.com test/env_config_test.dart
+```
+
+Still resolves to the `https://api.example.com` default -- `String.fromEnvironment` is a compile-time constant read by exact key string; a `--dart-define` for a key nothing reads has no effect, and a read for a key nothing defines silently falls back, with no error either way.
+
+### 6. `analysis_options.yaml` assumes `prefer_const_constructors` ships with `flutter_lints`
+
+It doesn't. Already corrected in **[Rebuilds & performance](/flutter/en/async-and-performance/rebuilds-and-performance/)**, confirmed by reading `flutter_lints` 6.0.0's own `lib/flutter.yaml` directly: it adds only the narrower `prefer_const_constructors_in_immutables` (which only fires on classes explicitly annotated `@immutable`, not the general `StatelessWidget`/`StatefulWidget` case this app actually has). `package:lints/recommended.yaml`, `flutter_lints`' own base, doesn't include the general rule either -- confirmed the same way. `very_good_analysis` does ship the general rule, per the same cited lesson; `flutter_lints` alone does not, and the comment in this PR's `analysis_options.yaml` states the opposite of what's actually enabled.
+
+### 7. `pumpAndSettle` on an infinite animation
+
+`InfiniteSpinner`'s `AnimationController` calls `..repeat()` -- it never stops scheduling frames on its own. A test that reaches for `pumpAndSettle()` (which waits for "no more frames scheduled") on a screen containing it:
+
+```dart
+// test/cross_app/infinite_spinner_pumpandsettle_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/infinite_spinner.dart';
+
+void main() {
+  testWidgets('pumpAndSettle on a repeating animation throws the real timeout error', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: InfiniteSpinner()));
+    try {
+      await tester.pumpAndSettle();
+      fail('expected pumpAndSettle to time out');
+    } catch (e) {
+      print(e); // FlutterError: pumpAndSettle timed out
+    }
+  });
+}
+```
+
+```text
+FlutterError: pumpAndSettle timed out
+
+00:01 +1: All tests passed!
+```
+
+A real `FlutterError: pumpAndSettle timed out`, roughly one second in (the default timeout) -- every test in this PR that touches a screen containing the spinner and calls `pumpAndSettle` anywhere hangs for that full timeout, then fails, for a reason that has nothing to do with what the test is actually checking.
+
+### 8. `PopScope`/`WillPopScope` mixed in the same app
+
+`pop_mix.dart` uses `WillPopScope`, while another screen in the same PR (not shown -- already fully proven and cited below) uses `PopScope`. Checked against this SDK:
+
+```text
+info • 'WillPopScope' is deprecated and shouldn't be used. Use PopScope instead. The Android predictive back feature will not work with WillPopScope. This feature was deprecated after v3.12.0-1.0.pre. Try replacing the use of the deprecated member with the replacement • deprecated_member_use
+```
+
+`WillPopScope`'s real deprecation annotation, `PopScope`'s two real members (`canPop`, `onPopInvokedWithResult`), and a full widget test proving `PopScope` blocks a pop and still fires its callback are proven in **[Navigator & routes](/flutter/en/navigation/navigator-and-routes/)**. The predictive-back gap named directly in the deprecation text is not cosmetic: per the same docs quoted there, *"The Android predictive back feature will not work with WillPopScope."* A half-migrated app has some screens that support it and some that structurally cannot.
+
+### 9. `Semantics` missing on an icon-only button
+
+`UnlabeledSyncButton` is an `IconButton` with no `tooltip` and no `Semantics` wrapper:
+
+```dart
+// test/cross_app/sync_button_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/sync_button.dart';
+
+void main() {
+  testWidgets('the unlabeled sync IconButton fails the labeled-tap-target guideline', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const MaterialApp(home: UnlabeledSyncButton()));
+    await expectLater(tester, doesNotMeetGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+  });
+}
+```
+
+```text
+✓ the unlabeled sync IconButton fails the labeled-tap-target guideline
+
+00:00 +1: All tests passed!
+```
+
+The exact real failure text for this shape of button (a `SemanticsNode` naming its own bounding rect and flags, ending *"expected tappable node to have semantic label, but none was found"*) is captured in full in **[Production concerns](/flutter/en/tooling-and-production/production-concerns/)**, which also covers `tester.ensureSemantics()` (required before any `meetsGuideline`/`doesNotMeetGuideline` check) and the other built-in `AccessibilityGuideline`s.
+
+## The corrected code
+
+```dart
+// lib/cross_app_fixed/battery_widget.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+const batteryChannel = MethodChannel('com.example.crossapp/battery');
+
+class BatteryDisplay extends StatefulWidget {
+  const BatteryDisplay({super.key});
+  @override
+  State<BatteryDisplay> createState() => _BatteryDisplayState();
+}
+
+class _BatteryDisplayState extends State<BatteryDisplay> {
+  int? _level;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+      if (!mounted) return;
+      setState(() => _level = level);
+    } on MissingPluginException {
+      if (!mounted) return;
+      setState(() => _error = 'Battery info is not available on this platform');
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Battery info unavailable: ${e.message}');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) return Text(_error!);
+    return Text(_level == null ? 'loading...' : 'Battery: $_level%');
+  }
+}
+```
+
+```dart
+// lib/cross_app_fixed/platform_io.dart
+export 'platform_io_impl.dart' if (dart.library.html) 'platform_web_impl.dart';
+```
+
+```dart
+// lib/cross_app_fixed/platform_io_impl.dart
+String platformLabel() => 'io';
+```
+
+```dart
+// lib/cross_app_fixed/platform_web_impl.dart
+String platformLabel() => 'web';
+```
+
+```text
+$ flutter build web
+✓ Built build/web
+
+$ grep -o "SENTINEL_IO_IMPL_USED\|SENTINEL_WEB_IMPL_USED" build/web/main.dart.js | sort | uniq -c
+   1 SENTINEL_WEB_IMPL_USED
+```
+
+The identical build, with `dart.library.html` as the condition instead of `kIsWeb`: the web-target output now genuinely contains the web-branch sentinel.
+
+```dart
+// lib/cross_app_fixed/error_reporting.dart
+import 'package:flutter/foundation.dart';
+
+void installErrorReporting(void Function(Object error, StackTrace? stack) report) {
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    report(details.exception, details.stack);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    report(error, stack);
+    return true;
+  };
+}
+```
+
+```dart
+// lib/cross_app_fixed/env_config.dart
+const apiUrl = String.fromEnvironment(
+  'API_URL',
+  defaultValue: 'https://api.example.com',
+);
+```
+
+```dart
+// lib/cross_app_fixed/infinite_spinner.dart
+import 'package:flutter/material.dart';
+
+class InfiniteSpinner extends StatefulWidget {
+  const InfiniteSpinner({super.key});
+  @override
+  State<InfiniteSpinner> createState() => _InfiniteSpinnerState();
+}
+
+class _InfiniteSpinnerState extends State<InfiniteSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(turns: _controller, child: const Icon(Icons.refresh));
+  }
+}
+```
+
+```dart
+// lib/cross_app_fixed/sync_button.dart
+import 'package:flutter/material.dart';
+
+class LabeledSyncButton extends StatelessWidget {
+  const LabeledSyncButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Semantics(
+        label: 'Sync now',
+        child: IconButton(
+          icon: const Icon(Icons.sync),
+          onPressed: () {},
+          tooltip: 'Sync now',
+        ),
+      ),
+    );
+  }
+}
+```
+
+```yaml
+# analysis_options.yaml
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    prefer_const_constructors: true
+```
+
+Four proofs the task asked for -- the conditional import (already proven above via a real `flutter build web`), the `meetsGuideline` pass, the disjoint `FlutterError.onError`/`PlatformDispatcher.instance.onError` pair (proven in full in [Production concerns](/flutter/en/tooling-and-production/production-concerns/), reused here rather than re-run redundantly), and `pumpAndSettle` replaced with bounded pumps:
+
+```dart
+// test/cross_app_fixed/sync_button_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/sync_button.dart';
+
+void main() {
+  testWidgets('the labeled sync IconButton meets the labeled-tap-target guideline', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const MaterialApp(home: LabeledSyncButton()));
+    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+  });
+}
+```
+
+```dart
+// test/cross_app_fixed/infinite_spinner_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/infinite_spinner.dart';
+
+void main() {
+  testWidgets('a fixed number of tester.pump(duration) calls checks a repeating animation without pumpAndSettle', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: InfiniteSpinner()));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+    expect(tester.takeException(), isNull);
+    expect(find.byIcon(Icons.refresh), findsOneWidget);
+  });
+}
+```
+
+```dart
+// test/cross_app_fixed/battery_widget_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/battery_widget.dart';
+
+void main() {
+  testWidgets('BatteryDisplay with no handler shows an error state instead of crashing', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BatteryDisplay()));
+    // A MissingPluginException from a channel with no handler needs a real
+    // async gap (not just fake-clock frame pumps) to actually resolve.
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Battery info is not available on this platform'), findsOneWidget);
+  });
+}
+```
+
+```dart
+// test/cross_app_fixed/env_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/env_config.dart';
+
+void main() {
+  test('apiUrl falls back to defaultValue when no --dart-define is passed', () {
+    expect(apiUrl, 'https://api.example.com');
+  });
+}
+```
+
+```text
+✓ the labeled sync IconButton meets the labeled-tap-target guideline
+✓ a fixed number of tester.pump(duration) calls checks a repeating animation without pumpAndSettle
+✓ BatteryDisplay with no handler shows an error state instead of crashing
+✓ apiUrl falls back to defaultValue when no --dart-define is passed
+
+00:02 +4: All tests passed!
+```
+
+## What changed and why
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | `MethodChannel` call with no exception handling | `on MissingPluginException`/`on PlatformException` -- proven: real `MissingPluginException` text otherwise |
+| 2 | `kIsWeb` as a conditional-import condition | `dart.library.html` -- proven: `flutter build web` output actually switches branch |
+| 3 | `runZonedGuarded` as the only error handler | `FlutterError.onError` + `PlatformDispatcher.instance.onError`, no `Zone` -- proven: build errors bypass zones entirely |
+| 4 | `print()` "stripped in release" | Remove/guard with `kDebugMode`, or use `debugPrint`/`dart:developer`'s `log()` -- per SDK source, nothing is release-stripped |
+| 5 | `--dart-define=API_URL` read as `API_BASE_URL` | Matching key -- proven: default used either way with the wrong key |
+| 6 | `analysis_options.yaml` assumes `prefer_const_constructors` ships by default | Add the rule explicitly -- per `flutter_lints` source, it doesn't ship by default |
+| 7 | `pumpAndSettle` on a `..repeat()` animation | Bounded `tester.pump(duration)` calls -- proven: real `pumpAndSettle timed out` otherwise |
+| 8 | `WillPopScope`/`PopScope` mixed | `PopScope` everywhere -- proven deprecated, and predictive back structurally can't work with the old widget |
+| 9 | Icon-only button, no `Semantics`/tooltip | `Semantics(label: ...)` + `tooltip` -- proven: real `meetsGuideline` pass |
+
+## What the reviewer writes in the PR
+
+> This touches a lot of real seams and most of them need a fix -- 9 things:
+>
+> 1. **No error handling on the battery channel call.** `MissingPluginException`/`PlatformException` both throw uncaught from `initState`. Wrap it.
+> 2. **`if (kIsWeb)` in a conditional import does nothing.** Verified with a real web build -- the io-branch sentinel ships even in the web bundle. Conditional imports check `dart.library.*`/environment declarations, not runtime constants.
+> 3. **`runZonedGuarded` alone misses build/layout/paint errors entirely**, and it's outdated advice since Flutter 3.3 besides. `FlutterError.onError` + `PlatformDispatcher.instance.onError`, no custom `Zone`.
+> 4. **`print()` doesn't get stripped in release** -- confirmed from the SDK source. Anything sensitive in those calls ships to real users' logs.
+> 5. **`--dart-define=API_URL` and `String.fromEnvironment('API_BASE_URL')` don't match.** The override silently never applies.
+> 6. **`analysis_options.yaml`'s comment is wrong.** `flutter_lints` doesn't ship `prefer_const_constructors` (only the narrower `_in_immutables` variant) -- add it explicitly if you want it.
+> 7. **A test using `pumpAndSettle` on the spinner screen will hang for a full second and then fail**, for a reason unrelated to whatever it's actually testing. Use bounded `pump(duration)` calls on anything with a repeating animation.
+> 8. **`WillPopScope` here, `PopScope` elsewhere.** `WillPopScope`'s deprecated and structurally can't support predictive back. Migrate this one too.
+> 9. **The sync button has no accessible label.** `meetsGuideline(labeledTapTargetGuideline)` fails on it right now -- add `Semantics`/`tooltip`.
+>
+> All small, mechanical fixes -- happy to pair on any of them.
+
+## Mental Model
+
+Two things repeat across this whole review. First: **plausible-looking APIs that don't do what they look like they do** -- `if (kIsWeb)` inside a conditional import parses and analyzes cleanly, `runZonedGuarded` genuinely does catch *some* errors, a `--dart-define` genuinely is a real mechanism -- each one is real Dart/Flutter surface, just not wired to the specific job the AI used it for. Second: **claims that would be easy to check and weren't** -- "print is stripped in release," "`flutter_lints` includes `prefer_const_constructors`" are both one grep into the installed source away from being falsified, and both are already-corrected claims elsewhere in this course, for exactly that reason. Across all nine bugs, none of them are hard to fix once found -- the entire review is about *finding* them, not fixing them.
+
+## Trade-offs
+
+| Choice | Upside | Cost |
+|---|---|---|
+| Conditional imports (`if (dart.library.X)`) over a runtime `kIsWeb` branch inside one file | Genuinely swaps implementations per compile target -- proven above | The condition vocabulary is narrow (`dart.library.*`, environment declarations) -- no arbitrary runtime logic |
+| `FlutterError.onError` + `PlatformDispatcher.instance.onError`, no `Zone` | Matches Flutter's own current guidance; avoids the startup cost of a custom `Zone` | Two callbacks to wire instead of one wrapper -- easy to add only one and think you're covered |
+| `--dart-define` for environment config | Compile-time constant, no runtime parsing, no secret committed to source | A silent no-op if the key doesn't match on either side -- no error, just the default |
+| `Semantics`/`meetsGuideline` in tests | Catches a real, specific accessibility gap mechanically, in CI, with no device | Only covers what the built-in guidelines check, not a substitute for real screen-reader testing |
+
+## Common Misconceptions
+
+- **"`kIsWeb` works as a conditional-import condition because it's `true`/`false` at compile time."** Disproven above with a real `flutter build web` + compiled-output inspection: conditional imports only understand `dart.library.*` checks and declared environment keys, not arbitrary Dart constants, however compile-time-ish they look.
+- **"`print()`/`debugPrint()` calls are automatically removed in release builds."** Disproven directly from the installed SDK source, cited above from Production concerns: neither is stripped; `debugPrint`'s own doc comment says it logs "even in release mode."
+- **"`runZonedGuarded` around `runApp()` catches all errors, so `FlutterError.onError` is optional."** Disproven above with a real test: a `build()`-phase error never reaches the zone's handler at all, because the framework intercepts and routes it to `FlutterError.onError` first.
+- **"`flutter_lints` is a strict, opinionated preset that includes the obvious performance rules like `prefer_const_constructors`."** Disproven by reading its own `lib/flutter.yaml`: it adds a short, deliberately narrow list on top of `package:lints/recommended.yaml`, and `prefer_const_constructors` (the general rule, not the `_in_immutables` variant) isn't on it.
+
+<Mermaid title="Where each bug sits in one cross-platform app" code={wr3Diagram} />
+
+export const wr3Diagram = `flowchart TD
+  A["BatteryDisplay.initState -> _load()"] -->|"1: no try/catch"| A
+  B["export ... if (kIsWeb) ..."] -->|"2: never switches branch"| B
+  C["runApp() wrapped in runZonedGuarded"] -->|"3: misses build/layout/paint errors"| C
+  D["print(...) for debugging"] -->|"4: ships to release logs"| D
+  E["String.fromEnvironment('API_BASE_URL')"] -->|"5: --dart-define=API_URL never applies"| E
+  F["analysis_options.yaml"] -->|"6: prefer_const_constructors not actually on"| F
+  G["test: pumpAndSettle on InfiniteSpinner"] -->|"7: real timeout"| G
+  H["WillPopScope here, PopScope elsewhere"] -->|"8: predictive back broken here"| H
+  I["IconButton(icon: sync), no label"] -->|"9: fails meetsGuideline"| I
+`;
+
+<Callout title="The one-line takeaway">
+Every bug in this review is a real, unmodified piece of Flutter/Dart surface used in a way that looks reasonable and either does nothing (`kIsWeb` in a conditional import, `runZonedGuarded` for build errors, a mismatched `--dart-define` key) or actively hides the gap (a lint comment claiming coverage that isn't there, `print` assumed gone in release). None of the nine crash on a casual run in the simulator -- each one needed either a real build artifact, a real SDK source read, or a specific test shaped to the exact condition to surface.
+</Callout>
+
+export const quizWorkedReview3 = [
+  {
+    q: '`export \'io_impl.dart\' if (kIsWeb) \'web_impl.dart\';` analyzes with zero errors. A real `flutter build web` was run, and the compiled `main.dart.js` was grepped for a sentinel string unique to each branch. Only the io-branch sentinel was found. What does this prove about `kIsWeb` as a conditional-import condition?',
+    options: [
+      'It proves flutter build web has a bug specific to this file',
+      "It proves Dart's conditional-import if (...) clause only understands compile-time environment declarations (like dart.library.html) -- kIsWeb is a runtime constant from package:flutter/foundation.dart with no connection to that mechanism, so the condition is always false and the default (first) branch is always used, on every platform",
+      'It proves kIsWeb is deprecated and no longer works anywhere',
+      'It proves conditional imports only work in test code, not real builds',
+    ],
+    answer: 1,
+    explain: 'Proven above with a real flutter build web run: the io-branch sentinel shipped even in the WEB build. The working fix (dart.library.html) is proven immediately after to select the correct branch on the identical build.',
+  },
+  {
+    q: 'A widget that throws from `build()` is pumped inside `runZonedGuarded(() { ... }, (error, stack) { caughtByZone = error; })`. `caughtByZone` stays `null`, while `FlutterError.onError` (set separately) genuinely captures the error. What does this prove about `runZonedGuarded`\'s coverage?',
+    options: [
+      'runZonedGuarded only works for synchronous top-level code, not widgets',
+      "The framework catches build()/layout()/paint() errors internally and routes them straight to FlutterError.onError -- they never propagate as an uncaught Zone error at all, so runZonedGuarded (or any Zone) never sees them, regardless of what wraps runApp()",
+      'This only happens in tests -- in a real app runZonedGuarded would catch it',
+      'FlutterError.onError and runZonedGuarded are catching the exact same error twice',
+    ],
+    answer: 1,
+    explain: "Proven directly above: caughtByFlutterError is set, caughtByZone stays null, from the identical error. Flutter's own 3.3 release notes (cited in Production concerns) confirm PlatformDispatcher.instance.onError, not a custom Zone, is the current recommended pairing with FlutterError.onError.",
+  },
+  {
+    q: 'The app is meant to read its API URL via `--dart-define=API_URL=...`, but the code has `String.fromEnvironment(\'API_BASE_URL\', defaultValue: \'https://api.example.com\')`. Run with `flutter test --dart-define=API_URL=https://real.example.com`, `apiUrl` still equals the default. Why?',
+    options: [
+      'String.fromEnvironment does not work inside flutter test, only flutter run',
+      "String.fromEnvironment reads by EXACT key string at compile time -- 'API_URL' was defined but nothing reads it, and 'API_BASE_URL' is read but nothing defines it, so the read silently falls back to defaultValue with no error on either side",
+      'defaultValue always wins even when a matching --dart-define is passed',
+      '--dart-define values expire after the first read',
+    ],
+    answer: 1,
+    explain: "Proven above: passing --dart-define=API_URL=... (the key the app's own docs describe) has zero effect on a read for 'API_BASE_URL' -- fixing the code to read 'API_URL' (the corrected code) is the only change needed, proven in the fixed test asserting the default still applies with no --dart-define at all.",
+  },
+  {
+    q: 'Reading `flutter_lints` 6.0.0\'s own `lib/flutter.yaml` directly shows it adds `prefer_const_constructors_in_immutables` to its rule set, but not the general `prefer_const_constructors`. Why does this distinction matter for a typical Flutter app?',
+    options: [
+      'It does not matter -- the two rules catch the same cases',
+      "prefer_const_constructors_in_immutables only fires on classes explicitly annotated @immutable -- it does NOT cover the ordinary StatelessWidget/StatefulWidget case most Flutter UI code actually uses, so an analysis_options.yaml comment claiming full coverage from flutter_lints alone is wrong for most real widget code",
+      'prefer_const_constructors_in_immutables is stricter and catches MORE cases than prefer_const_constructors',
+      'Neither rule is real; both are hypothetical lint names',
+    ],
+    answer: 1,
+    explain: "Confirmed directly from flutter_lints' own source (cited from the Rebuilds & performance correction): the narrower rule only applies to @immutable-annotated classes, and typical widget classes are not annotated that way -- the general rule needs to be added explicitly, or a preset like very_good_analysis used instead.",
+  },
+  {
+    q: 'A test calls `tester.pumpAndSettle()` on a screen containing a widget whose `AnimationController` was started with `..repeat()`. What real, observable thing happens, and why?',
+    options: [
+      'The test passes immediately because repeat() animations are ignored by pumpAndSettle',
+      "It throws a real FlutterError ('pumpAndSettle timed out') after the default timeout, because pumpAndSettle waits for a frame with nothing left scheduled, and a repeating animation schedules a new frame forever",
+      'pumpAndSettle automatically detects infinite animations and calls dispose() on the controller',
+      'The test hangs forever with no error, until the process is killed',
+    ],
+    answer: 1,
+    explain: "Proven above with a real, captured error: FlutterError: pumpAndSettle timed out, after the default ~1 second wait. The fix -- proven in the corrected code -- is a fixed number of tester.pump(duration) calls instead, which never waits for 'nothing scheduled.'",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/worked-review-3" questions={quizWorkedReview3} />
+
+<ProgressTracker client:visible id="reading-flutter/worked-review-3" />
