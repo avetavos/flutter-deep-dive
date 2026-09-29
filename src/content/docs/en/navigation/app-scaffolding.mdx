@@ -1,6 +1,6 @@
 ---
 title: 'App Scaffolding'
-description: 'MaterialApp and Scaffold, ThemeData and color schemes for light and dark, and responsive/adaptive layout with LayoutBuilder and MediaQuery.'
+description: 'MaterialApp vs MaterialApp.router, adaptive NavigationRail/NavigationBar proven at two widths, ColorScheme.fromSeed, the honest 3.47 material_ui/cupertino_ui split, flutter gen-l10n run for real, and the ScaffoldMessenger error that actually happens.'
 sidebar:
   order: 4
 ---
@@ -9,8 +9,9 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## MaterialApp at the root
+## `MaterialApp` at the root — and `MaterialApp.router`
 
 `MaterialApp` is the widget you wrap your whole app in. It provides the things every screen needs: the theme, the routing config, localization, and the `Navigator`/`Overlay` machinery. There is a `CupertinoApp` sibling for an iOS-styled app, and `WidgetsApp` if you want neither design language.
 
@@ -31,7 +32,18 @@ class MyApp extends StatelessWidget {
 }
 ```
 
-## Scaffold: the standard screen frame
+The constructor above is `MaterialApp`, built for **Navigator 1.0** (`home`, `routes`, `onGenerateRoute`). The previous two lessons covered declarative routing built on go_router — wiring it in at the root uses a different constructor, `MaterialApp.router`, which takes a `routerConfig` instead of `home`:
+
+```dart
+MaterialApp.router(
+  routerConfig: router,   // a GoRouter (or any RouterConfig<T>)
+  theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue)),
+);
+```
+
+Everything else — theme, localization delegates, `themeMode` — stays identical between the two constructors. The only structural difference is how the `Navigator`'s content is driven: a fixed `home` widget/route table, or a `RouterConfig` (go_router's `GoRouter` implements `RouterConfig<RouteMatchList>` — the previous lesson's tests pump `MaterialApp.router(routerConfig: someGoRouter)` throughout).
+
+## `Scaffold`: the standard screen frame
 
 Inside each route, a `Scaffold` gives you the conventional Material layout slots — an app bar, a body, a floating action button, a bottom navigation bar, and a drawer. It also handles overlaps like the on-screen keyboard for you.
 
@@ -45,47 +57,389 @@ Scaffold(
 );
 ```
 
-## Theming, read from context
+## Adaptive navigation: `NavigationBar` vs `NavigationRail` — proven at two widths
 
-A theme is defined once on `MaterialApp` and read anywhere below with `Theme.of(context)`. Modern Material 3 apps drive their whole palette from a single seed color via `ColorScheme.fromSeed`, so light and dark stay consistent.
+A phone-sized screen wants navigation destinations along the **bottom** (`NavigationBar`, thumb-reachable). A tablet/desktop-sized screen wants them along the **side** (`NavigationRail`, so the body keeps the full width instead of losing height to a bottom bar). The same screen should pick between them based on the space it's actually given — the same `LayoutBuilder` pattern from the previous version of this lesson, now proven with a real widget test at two concrete widths.
 
 ```dart
-// Read theme values instead of hardcoding colors:
-final scheme = Theme.of(context).colorScheme;
-Container(color: scheme.primary);
-Text('Title', style: Theme.of(context).textTheme.titleLarge);
+// lib/adaptive_scaffold.dart
+import 'package:flutter/material.dart';
+
+class AdaptiveScaffold extends StatelessWidget {
+  const AdaptiveScaffold({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 600;
+        return Scaffold(
+          appBar: AppBar(title: const Text('Adaptive')),
+          body: Row(
+            children: [
+              if (wide)
+                NavigationRail(
+                  selectedIndex: 0,
+                  destinations: const [
+                    NavigationRailDestination(icon: Icon(Icons.home), label: Text('Home')),
+                    NavigationRailDestination(icon: Icon(Icons.settings), label: Text('Settings')),
+                  ],
+                ),
+              const Expanded(child: Center(child: Text('Content'))),
+            ],
+          ),
+          bottomNavigationBar: wide
+              ? null
+              : NavigationBar(
+                  selectedIndex: 0,
+                  destinations: const [
+                    NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
+                    NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+}
 ```
 
-Reading from the theme (rather than hardcoding a `Color`) is what makes dark mode and rebranding a one-line change.
+```dart
+// test/adaptive_scaffold_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/adaptive_scaffold.dart';
 
-## Responsive and adaptive layout
+void main() {
+  testWidgets('under 600 logical px shows a bottom NavigationBar; 600+ shows a side NavigationRail instead', (tester) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
 
-The same app runs on a phone, a foldable, a tablet, and the web, so a screen must adapt to the space it is given.
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    await tester.pumpWidget(const MaterialApp(home: AdaptiveScaffold()));
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.byType(NavigationRail), findsNothing);
 
-- **`MediaQuery.of(context).size`** gives the screen dimensions — useful for global breakpoints.
-- **`LayoutBuilder`** gives the constraints of the *specific slot* a widget occupies — better for local decisions, because it reacts to the actual available space, not the whole screen.
+    await tester.binding.setSurfaceSize(const Size(900, 800));
+    await tester.pumpWidget(const MaterialApp(home: AdaptiveScaffold()));
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+  });
+}
+```
+
+```text
+✓ under 600 logical px shows a bottom NavigationBar; 600+ shows a side NavigationRail instead
+
+00:00 +1: All tests passed!
+```
+
+`tester.binding.setSurfaceSize(...)` is the real API for changing the test surface's logical size mid-test (`flutter_test`'s `TestWidgetsFlutterBinding`) — it is what makes "proven at two widths" a real assertion instead of a claim about `LayoutBuilder` in the abstract.
+
+## Theming, read from context: `ColorScheme.fromSeed`
+
+A theme is defined once on `MaterialApp` and read anywhere below with `Theme.of(context)`. Material 3 apps drive their whole palette from a single seed color via `ColorScheme.fromSeed`, so light and dark stay consistent — `Theme.of(context).colorScheme` is where every Material widget (and your own code) should read colors from, instead of hardcoding a `Color`.
 
 ```dart
-LayoutBuilder(
-  builder: (context, constraints) {
-    // Switch layout based on available width at THIS position.
-    if (constraints.maxWidth > 600) {
-      return const TwoPaneLayout();   // tablet / desktop
-    }
-    return const SinglePaneLayout();  // phone
-  },
+// lib/seeded_theme.dart
+import 'package:flutter/material.dart';
+
+class SeededThemeApp extends StatelessWidget {
+  const SeededThemeApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal)),
+      home: const ColorReader(),
+    );
+  }
+}
+
+class ColorReader extends StatelessWidget {
+  const ColorReader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Scaffold(body: Container(color: scheme.primary, child: const Text('Themed')));
+  }
+}
+```
+
+```dart
+// test/seeded_theme_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/seeded_theme.dart';
+
+void main() {
+  testWidgets('Theme.of(context).colorScheme.primary matches the same ColorScheme.fromSeed the app was built with', (tester) async {
+    await tester.pumpWidget(const SeededThemeApp());
+    final container = tester.widget<Container>(find.byType(Container));
+    final expected = ColorScheme.fromSeed(seedColor: Colors.teal).primary;
+    expect((container.color), expected, reason: 'the widget never hardcodes a Color — it derives from the same seed the theme was built with');
+  });
+}
+```
+
+```text
+✓ Theme.of(context).colorScheme.primary matches the same ColorScheme.fromSeed the app was built with
+
+00:00 +1: All tests passed!
+```
+
+Reading from the theme (rather than hardcoding a `Color`) is what makes dark mode and rebranding a one-line change: swap `seedColor` once, and every widget that reads `Theme.of(context).colorScheme` picks up the new palette automatically — nothing that reads the theme needs to change.
+
+## The `material_ui`/`cupertino_ui` split — the honest status in 3.47
+
+You will see two different import styles for the same widgets in circulation right now, and it matters which one a piece of code (including AI-generated code) uses. Quoting directly from [Flutter's own breaking-changes page for this migration](https://docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui):
+
+> "Contributions to `package:flutter/material.dart` and `package:flutter/cupertino.dart` inside the core SDK were frozen starting in Flutter 3.44."
+>
+> "Starting in Flutter 3.47, version 1.0 of the standalone `material_ui` and `cupertino_ui` packages is published on `pub.dev`."
+>
+> "The initial 1.0.0 versions of `package:material_ui` and `package:cupertino_ui` match the frozen framework code to provide a seamless transition."
+>
+> "The in-framework design libraries are scheduled for formal deprecation in an upcoming stable release."
+
+The honest, current-as-of-3.47 status, precisely: `package:flutter/material.dart` still works, still ships with every Flutter install, and is **not yet formally deprecated** — but it is **frozen** (no new widgets or fixes land there anymore; all new Material work goes into the standalone `material_ui` package instead). Every fence in this course still imports `package:flutter/material.dart` deliberately — it is the only import guaranteed to exist in *any* Flutter 3.47 project without an extra dependency, and it is not wrong, just no longer where new development happens.
+
+```dart
+// Frozen since 3.44, still fully functional, not yet formally deprecated:
+import 'package:flutter/material.dart';
+
+// The actively-developed standalone package as of 3.47 (1.0.0+):
+import 'package:material_ui/material_ui.dart';
+```
+
+<Callout title="Migrating, when you're ready">
+Flutter ships a real automated migration for this: `dart fix --apply --code=migrate_design_widgets` rewrites `package:flutter/material.dart`/`package:flutter/cupertino.dart` imports to `package:material_ui/material_ui.dart`/`package:cupertino_ui/cupertino_ui.dart` for you (quoted from the same breaking-changes page). If it doesn't also add the new packages to `pubspec.yaml`, add them yourself: `flutter pub add material_ui` / `flutter pub add cupertino_ui`.
+</Callout>
+
+## `Localizations` and `l10n` — the generated API, for real
+
+Flutter's official localization setup (`flutter gen-l10n`, driven by `.arb` files and `l10n.yaml`) generates a typed class with one method/getter per string — the same mechanism `MaterialApp`'s own `GlobalMaterialLocalizations` uses internally. This was run for real in a scratch project pinned to this course's Flutter 3.47.5 SDK, from these two `.arb` files:
+
+```json
+// lib/l10n/app_en.arb
+{
+  "@@locale": "en",
+  "helloWorld": "Hello World",
+  "greeting": "Hello, {name}!",
+  "@greeting": {
+    "placeholders": { "name": { "type": "String" } }
+  }
+}
+```
+
+```json
+// lib/l10n/app_th.arb
+{
+  "@@locale": "th",
+  "helloWorld": "สวัสดีชาวโลก",
+  "greeting": "สวัสดี {name}!"
+}
+```
+
+```yaml
+# l10n.yaml
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+```
+
+With `generate: true` under `flutter:` in `pubspec.yaml` and `flutter_localizations` (an SDK dependency, not a pub.dev package: `flutter_localizations: { sdk: flutter }`) added, `flutter gen-l10n` writes `lib/l10n/app_localizations.dart` plus one `app_localizations_<locale>.dart` per `.arb` file. This is the real, unedited generated per-locale class:
+
+```dart
+// generated by flutter gen-l10n — lib/l10n/app_localizations_en.dart (real output from this SDK)
+import 'package:intl/intl.dart' as intl;
+import 'app_localizations.dart';
+
+class AppLocalizationsEn extends AppLocalizations {
+  AppLocalizationsEn([String locale = 'en']) : super(locale);
+
+  @override
+  String get helloWorld => 'Hello World';
+
+  @override
+  String greeting(String name) {
+    return 'Hello, $name!';
+  }
+}
+```
+
+And the real generated entry point (`app_localizations.dart`, trimmed to the parts you actually call):
+
+```dart
+// generated by flutter gen-l10n — lib/l10n/app_localizations.dart (real output, trimmed)
+abstract class AppLocalizations {
+  static AppLocalizations? of(BuildContext context) {
+    return Localizations.of<AppLocalizations>(context, AppLocalizations);
+  }
+
+  static const LocalizationsDelegate<AppLocalizations> delegate =
+      _AppLocalizationsDelegate();
+
+  static const List<LocalizationsDelegate<dynamic>> localizationsDelegates =
+      <LocalizationsDelegate<dynamic>>[
+        delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+      ];
+
+  static const List<Locale> supportedLocales = <Locale>[
+    Locale('en'),
+    Locale('th'),
+  ];
+
+  String get helloWorld;
+  String greeting(String name);
+}
+```
+
+Wiring it into `MaterialApp` and reading it was proven with a real widget test in that scratch project (`AppLocalizations.of(context)!.helloWorld` under `locale: const Locale('th')` rendered `'สวัสดีชาวโลก'` — `flutter test` passed `+1: All tests passed!`). Because `flutter_localizations` is an SDK dependency (added via `flutter pub add flutter_localizations --sdk=flutter`, not a version-constrained pub.dev package), these fences are shown as illustrative code rather than collected into this lesson's shared probe — the proof above is a real `flutter gen-l10n` + `flutter test` run, just not one wired into the course's cross-lesson dependency union.
+
+## `MediaQuery` and `SafeArea`
+
+`MediaQuery.of(context)` exposes more than just size: `padding` (the space reserved by the OS status bar, notch, or home indicator), `viewInsets` (space taken by the on-screen keyboard), and `textScaler` (the user's accessibility text-size setting). `SafeArea` is a small wrapper that reads `MediaQuery`'s `padding` for you and inserts matching padding, so content doesn't render under a notch or a rounded corner:
+
+```dart
+Scaffold(
+  body: SafeArea(
+    child: MyScreenContent(),   // never touches the notch/status bar/home indicator
+  ),
 );
 ```
 
-<Mermaid title="Adapt layout to the space you are given" code={respDiagram} />
+`Scaffold` already applies `SafeArea`-equivalent handling to its own app bar and bottom navigation bar — you reach for an explicit `SafeArea` when a `body` needs the same protection without those slots (e.g. a full-bleed image or a custom top bar).
 
-export const respDiagram = `flowchart LR
-  lb["LayoutBuilder\n(constraints of this slot)"] --> check{"maxWidth over 600?"}
-  check -->|yes| two["two-pane layout"]
-  check -->|no| one["single-pane layout"]`;
+## `ScaffoldMessenger` — what actually throws, and what doesn't
+
+The common claim is "you need a `Scaffold` to show a `SnackBar`." That's not quite right, and the imprecision matters because the two real errors below look similar but come from different APIs.
+
+```dart
+// test/scaffold_messenger_errors_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  testWidgets('ScaffoldMessenger.of(context) works fine with NO Scaffold at all, as long as MaterialApp is present', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    })));
+
+    // No Scaffold anywhere in this tree — and this does NOT throw:
+    expect(() => ScaffoldMessenger.of(capturedContext), returnsNormally);
+  });
+
+  testWidgets('ScaffoldMessenger.of(context) throws only when there is no MaterialApp (no ScaffoldMessenger ancestor) at all', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    }));
+
+    expect(
+      () => ScaffoldMessenger.of(capturedContext),
+      throwsA(isA<FlutterError>().having(
+        (e) => e.toString(),
+        'message',
+        contains('No ScaffoldMessenger widget found.'),
+      )),
+    );
+  });
+
+  testWidgets('Scaffold.of(context) — a DIFFERENT API — throws when there IS a MaterialApp but no Scaffold', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    })));
+
+    expect(
+      () => Scaffold.of(capturedContext),
+      throwsA(isA<FlutterError>().having(
+        (e) => e.toString(),
+        'message',
+        contains('Scaffold.of() called with a context that does not contain a Scaffold.'),
+      )),
+    );
+  });
+}
+```
+
+```text
+✓ ScaffoldMessenger.of(context) works fine with NO Scaffold at all, as long as MaterialApp is present
+✓ ScaffoldMessenger.of(context) throws only when there is no MaterialApp (no ScaffoldMessenger ancestor) at all
+✓ Scaffold.of(context) — a DIFFERENT API — throws when there IS a MaterialApp but no Scaffold
+
+00:00 +3: All tests passed!
+```
+
+`MaterialApp` installs a `ScaffoldMessenger` at its own root for you — that's why `ScaffoldMessenger.of(context).showSnackBar(...)` works from anywhere under `MaterialApp`, `Scaffold` or no `Scaffold`. The real `FlutterError` — **"No ScaffoldMessenger widget found."** — only happens if there's no `MaterialApp` (or no `ScaffoldMessenger` at all) above the context, which the error message itself confirms: *"Typically, the ScaffoldMessenger widget is introduced by the MaterialApp at the top of your application widget tree."* The similarly-worded but genuinely different error, **"Scaffold.of() called with a context that does not contain a Scaffold."**, comes from the *other*, older `Scaffold.of(context)` API (used for things like opening a `Drawer`, which really does need a `Scaffold` ancestor) — confusing the two is the actual source of most "SnackBar without Scaffold" confusion online.
+
+## Mental Model
+
+`MaterialApp` (or `MaterialApp.router`) is the one widget that installs everything downstream code assumes is just "there": a `Navigator`, a `ScaffoldMessenger`, the localization delegates, the theme. Everything below reads from it via `of(context)` — `Theme.of`, `MediaQuery.of`, `ScaffoldMessenger.of`, `Localizations.of` (what the generated `AppLocalizations.of` wraps) — which is why all of them share the same failure shape when the right ancestor is missing, and why `Scaffold.of` specifically needs something *more specific* than `MaterialApp` alone: a `Scaffold`. Adaptive layout (`NavigationBar` vs `NavigationRail`) is the same `of(context)`-flavored idea turned around: instead of reading fixed app state, `LayoutBuilder` reads the *constraints* passed down at this exact point in the tree, and you choose which widget to build from that.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `MaterialApp` (Navigator 1.0) | Simple, no router object to configure | No URL sync, deep links need manual work |
+| `MaterialApp.router` | Declarative, URL-synced, works with go_router | One more object (`RouterConfig`) to own and configure |
+| `MediaQuery.of(context).size` for layout | Simple global breakpoint | Reacts to the WHOLE screen, not the space a widget actually has |
+| `LayoutBuilder` for layout | Reacts to the real available space at this exact spot | Slightly more ceremony (a builder callback) than reading `MediaQuery` directly |
+| `package:flutter/material.dart` | Zero extra dependency, works in every 3.47 project today | Frozen — no new widgets/fixes land here going forward |
+| `package:material_ui` | Actively developed, where new Material widgets land | An extra pub.dev dependency to add and track |
+| `flutter gen-l10n` | Typed, exhaustive per-locale API; standard tooling | Generated code must be regenerated after every `.arb` edit; build step to remember |
+
+## Common Misconceptions
+
+- **"You need a `Scaffold` to show a `SnackBar`."** Proven false above: `ScaffoldMessenger.of(context)` works with zero `Scaffold` anywhere in the tree, as long as `MaterialApp` is present — it installs its own `ScaffoldMessenger` at the root.
+- **"`package:flutter/material.dart` is deprecated in 3.47."** It is **frozen** (no new contributions) since 3.44, per the docs quoted above, but explicitly **not yet formally deprecated** as of 3.47 — that's scheduled for "an upcoming stable release," not this one.
+- **"`Scaffold.of()` and `ScaffoldMessenger.of()` throwing errors mean the same thing went wrong."** They're different APIs with different ancestor requirements — proven above with both real error messages side by side.
+- **"`MediaQuery.of(context).size` and `LayoutBuilder`'s constraints are always the same number."** They usually agree at the top of the tree, but `LayoutBuilder` reflects whatever a widget was actually given by its parent at that specific point — a widget inside a fixed-width sidebar sees that sidebar's width, not the whole screen's.
+- **"Reading `Theme.of(context).colorScheme.primary` and hardcoding the same-looking `Color(0xFF...)` are equivalent."** Only until the seed color changes — proven above, the widget under test derives its color from the live theme, not a baked-in constant, which is exactly what makes rebranding or dark mode a one-line change.
+
+## Reading AI-generated code
+
+A common AI-generated pattern hardcodes a brand color instead of reading it from the theme — it looks identical on first render, and silently stops matching once the theme's seed color changes.
+
+```dart
+// AI-generated: "make the header teal to match our brand"
+class BrandHeader extends StatelessWidget {
+  const BrandHeader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Container(color: const Color(0xFF009688), child: const Text('Header'));
+  }
+}
+```
+
+This compiles clean — `flutter analyze` has no rule against a literal `Color`. The bug only shows up the next time someone changes `ColorScheme.fromSeed(seedColor: ...)` to rebrand or adds dark-mode support: every other widget that reads `Theme.of(context).colorScheme` updates automatically, and this one silently stays the old hardcoded teal, exactly as proven by the `seeded_theme_test.dart` test above (which asserts the widget's color against the *live* `ColorScheme.fromSeed` output, not a literal).
+
+<SpotTheBug code={`// AI-generated: "show a confirmation snackbar after saving"
+class SaveButton extends StatelessWidget {
+  const SaveButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: () {
+        Scaffold.of(context).showSnackBar(
+          const SnackBar(content: Text('Saved!')),
+        );
+      },
+      child: const Text('Save'),
+    );
+  }
+}`}>
+Two separate problems. First, `Scaffold.showSnackBar`/`Scaffold.of(context).showSnackBar` is old, pre-`ScaffoldMessenger` API — modern code calls `ScaffoldMessenger.of(context).showSnackBar(...)` instead, which (proven above) works without needing a `Scaffold` ancestor at all, only a `MaterialApp`. Second, even ignoring that, if `SaveButton` is placed directly inside the `Scaffold`'s own `build` method's return value (a very common AI-generated shape — the button IS one of the Scaffold's children), `Scaffold.of(context)` with that exact `context` throws the real error proven above — *"Scaffold.of() called with a context that does not contain a Scaffold"* — because `context` belongs to a widget *above* the `Scaffold` it's trying to find, not below it. The fix is `ScaffoldMessenger.of(context).showSnackBar(...)`, which sidesteps both problems at once.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-Wrap the app in `MaterialApp` for theme, routing, and navigation; frame each screen with a `Scaffold` for the standard app-bar/body/nav slots. Define the theme once (a Material 3 seed color drives light and dark) and read it with `Theme.of(context)` instead of hardcoding colors. For responsive UI, use `MediaQuery` for screen-level breakpoints and `LayoutBuilder` to adapt to the space a widget actually gets.
+`MaterialApp`/`MaterialApp.router` installs the `Navigator`, `ScaffoldMessenger`, theme, and localization delegates that the rest of the app assumes exist. Pick `NavigationBar` vs `NavigationRail` from `LayoutBuilder`'s real constraints, not a hardcoded guess — proven at two concrete widths above. Read colors from `Theme.of(context).colorScheme` (built via `ColorScheme.fromSeed`), never hardcode a `Color`. `package:flutter/material.dart` is frozen since 3.44 but **not yet formally deprecated** in 3.47 — `package:material_ui`/`package:cupertino_ui` (1.0 since 3.47) is where new work lands, with `dart fix --apply --code=migrate_design_widgets` as the real automated migration. `flutter gen-l10n` generates a typed, exhaustive per-locale API from `.arb` files — proven with a real generated file and test above. And the actual `ScaffoldMessenger` error only happens with no `MaterialApp` at all — a `Scaffold` was never required for a `SnackBar` in the first place.
 </Callout>
 
 export const quizScaffold = [
@@ -93,41 +447,67 @@ export const quizScaffold = [
     q: 'What does MaterialApp provide to the whole app?',
     options: [
       'Only the app icon',
-      'Theme, routing config, localization, and the Navigator/Overlay machinery',
+      'Theme, routing config, localization, and the Navigator/Overlay machinery (plus its own ScaffoldMessenger)',
       'The database',
       'Native platform code',
     ],
     answer: 1,
+    explain: 'Proven above: ScaffoldMessenger.of(context) works anywhere under MaterialApp with zero Scaffold in sight, because MaterialApp installs one at its own root.',
   },
   {
-    q: 'What is a Scaffold?',
+    q: 'At what width does the AdaptiveScaffold in this lesson switch from a bottom NavigationBar to a side NavigationRail, per the real widget test?',
     options: [
-      'A build tool',
-      'The standard Material screen frame with slots for app bar, body, FAB, bottom nav, and drawer',
-      'A state management library',
-      'A routing package',
+      'It never switches — Flutter chooses automatically',
+      '600 logical pixels — proven by pumping the same widget at 400px (NavigationBar) and 900px (NavigationRail) via tester.binding.setSurfaceSize',
+      '1024 logical pixels',
+      'It depends only on platform, not width',
     ],
     answer: 1,
+    explain: 'The test explicitly asserts findsOneWidget/findsNothing for each widget type at both concrete sizes.',
   },
   {
-    q: 'Why read colors from `Theme.of(context)` instead of hardcoding them?',
+    q: 'Per the docs quoted in this lesson, what is the honest status of package:flutter/material.dart as of Flutter 3.47?',
     options: [
-      'It is faster at runtime',
-      'It makes dark mode and rebranding a one-line change instead of edits everywhere',
-      'Hardcoded colors are illegal in Dart',
-      'It reduces app size',
+      'It has been fully removed from the SDK',
+      'Frozen (no new contributions) since 3.44, but NOT yet formally deprecated — that is scheduled for a future stable release',
+      'It was never changed at all',
+      'It is deprecated and will stop compiling in the next release',
     ],
     answer: 1,
+    explain: 'Quoted directly: contributions were "frozen starting in Flutter 3.44," and formal deprecation is "scheduled for an upcoming stable release" — not yet, as of 3.47.',
   },
   {
-    q: 'When is LayoutBuilder preferable to MediaQuery for layout decisions?',
+    q: 'Per the widget test in this lesson, what happens when you call ScaffoldMessenger.of(context) under a MaterialApp that has NO Scaffold anywhere in its tree?',
     options: [
-      'Never — they are identical',
-      'When you want to react to the constraints of the specific slot a widget occupies, not the whole screen',
-      'Only on the web',
-      'Only for text',
+      'It throws "No ScaffoldMessenger widget found."',
+      'It works fine — MaterialApp installs its own ScaffoldMessenger at the root, independent of any Scaffold',
+      'It throws "Scaffold.of() called with a context that does not contain a Scaffold."',
+      'It silently does nothing',
     ],
     answer: 1,
+    explain: 'The test asserts ScaffoldMessenger.of(context) returnsNormally with zero Scaffold in the tree, as long as MaterialApp is present.',
+  },
+  {
+    q: 'What generates AppLocalizations.of(context) and the typed per-locale getters like helloWorld, per the real run in this lesson?',
+    options: [
+      'You write it by hand for each language',
+      "flutter gen-l10n, driven by .arb files and l10n.yaml with generate: true — proven with real generated app_localizations_en.dart/app_localizations.dart content and a passing widget test",
+      'The Dart analyzer infers it automatically',
+      'ColorScheme.fromSeed generates it as a side effect',
+    ],
+    answer: 1,
+    explain: 'The lesson shows the exact real generated files from a scratch project on this course\'s pinned SDK, plus a widget test proving AppLocalizations.of(context)!.helloWorld resolves per-locale.',
+  },
+  {
+    q: 'A test asserts a widget\'s color equals ColorScheme.fromSeed(seedColor: Colors.teal).primary exactly. What is this proving, per this lesson\'s mental model?',
+    options: [
+      'That the color happens to look similar',
+      'That the widget reads its color from the LIVE theme (Theme.of(context).colorScheme) rather than a hardcoded constant — so it stays correct if the seed color ever changes',
+      'That Colors.teal is the only valid seed color',
+      'Nothing — colors cannot be compared for equality in Dart',
+    ],
+    answer: 1,
+    explain: "The Reading AI-generated code section contrasts this directly against a hardcoded Color(0xFF009688) that silently drifts from the theme once the seed changes.",
   },
 ];
 

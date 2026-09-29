@@ -1,6 +1,6 @@
 ---
 title: 'App Scaffolding'
-description: 'MaterialApp และ Scaffold, ThemeData และ color scheme สำหรับ light กับ dark และ responsive/adaptive layout ด้วย LayoutBuilder กับ MediaQuery'
+description: 'MaterialApp เทียบ MaterialApp.router, NavigationRail/NavigationBar แบบ adaptive ที่พิสูจน์ที่สองความกว้าง, ColorScheme.fromSeed, สถานะจริงของ material_ui/cupertino_ui ใน 3.47, flutter gen-l10n ที่รันจริง และ error ของ ScaffoldMessenger ที่เกิดขึ้นจริง'
 sidebar:
   order: 4
 ---
@@ -9,10 +9,11 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## MaterialApp ที่ root
+## `MaterialApp` ที่ root — และ `MaterialApp.router`
 
-`MaterialApp` คือ widget ที่คุณห่อทั้งแอปไว้ และให้สิ่งที่ทุกหน้าจอต้องใช้: theme, routing config, localization และกลไก `Navigator`/`Overlay` มี `CupertinoApp` เป็นตัวพี่น้องสำหรับแอปสไตล์ iOS และ `WidgetsApp` ถ้าคุณไม่ต้องการ design language ทั้งสองแบบ
+`MaterialApp` คือ widget ที่คุณห่อทั้งแอปไว้ มันให้สิ่งที่ทุกหน้าจอต้องการ: theme, routing config, localization และกลไก `Navigator`/`Overlay` มี `CupertinoApp` เป็น sibling สำหรับแอปสไตล์ iOS และ `WidgetsApp` ถ้าไม่ต้องการ design language ไหนเลย
 
 ```dart
 void main() => runApp(const MyApp());
@@ -31,9 +32,20 @@ class MyApp extends StatelessWidget {
 }
 ```
 
-## Scaffold: กรอบหน้าจอมาตรฐาน
+constructor ข้างบนคือ `MaterialApp` ที่สร้างมาสำหรับ **Navigator 1.0** (`home`, `routes`, `onGenerateRoute`) สองบทก่อนหน้าครอบคลุม declarative routing ที่สร้างบน go_router — การต่อสายมันเข้าที่ root ใช้ constructor คนละตัว คือ `MaterialApp.router` ซึ่งรับ `routerConfig` แทน `home`:
 
-ภายในแต่ละ route `Scaffold` ให้ช่อง layout มาตรฐานของ Material — app bar, body, floating action button, bottom navigation bar และ drawer `Scaffold` ยังจัดการเรื่องการซ้อนทับ เช่น keyboard บนหน้าจอ ให้คุณด้วย
+```dart
+MaterialApp.router(
+  routerConfig: router,   // a GoRouter (or any RouterConfig<T>)
+  theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue)),
+);
+```
+
+ส่วนที่เหลือทั้งหมด — theme, localization delegate, `themeMode` — เหมือนกันทุกประการระหว่าง constructor ทั้งสองแบบ ความต่างเชิงโครงสร้างมีแค่จุดเดียวคือ content ของ `Navigator` ถูกขับเคลื่อนอย่างไร: widget/route table ของ `home` แบบตายตัว หรือ `RouterConfig` (`GoRouter` ของ go_router implement `RouterConfig<RouteMatchList>` — test ของบทก่อนหน้าทั้งหมด pump `MaterialApp.router(routerConfig: someGoRouter)`)
+
+## `Scaffold`: โครงหน้าจอมาตรฐาน
+
+ภายในแต่ละ route, `Scaffold` ให้ layout slot มาตรฐานแบบ Material — app bar, body, floating action button, bottom navigation bar และ drawer มันยังจัดการเรื่อง overlap อย่าง on-screen keyboard ให้ด้วย
 
 ```dart
 Scaffold(
@@ -45,89 +57,457 @@ Scaffold(
 );
 ```
 
-## theming ที่อ่านจาก context
+## Adaptive navigation: `NavigationBar` เทียบ `NavigationRail` — พิสูจน์ที่สองความกว้าง
 
-theme ถูกกำหนดครั้งเดียวบน `MaterialApp` และอ่านได้ทุกที่ข้างใต้ด้วย `Theme.of(context)` แอป Material 3 สมัยใหม่ขับ palette ทั้งหมดจาก seed color ตัวเดียวผ่าน `ColorScheme.fromSeed` ทำให้ light และ dark สอดคล้องกัน
+หน้าจอขนาด phone ต้องการ navigation destination อยู่ที่ **ล่าง** (`NavigationBar` เอื้อมถึงด้วยนิ้วโป้งได้) หน้าจอขนาด tablet/desktop ต้องการมันอยู่ที่ **ข้าง** (`NavigationRail` เพื่อให้ body ยังคงความกว้างเต็มแทนที่จะเสียความสูงให้ bottom bar) หน้าจอเดียวกันควรเลือกระหว่างสองแบบตามพื้นที่ที่มันได้รับจริง — pattern `LayoutBuilder` แบบเดียวกับ version ก่อนหน้าของบทนี้ ตอนนี้พิสูจน์ด้วย widget test จริงที่สองความกว้างที่เจาะจง
 
 ```dart
-// Read theme values instead of hardcoding colors:
-final scheme = Theme.of(context).colorScheme;
-Container(color: scheme.primary);
-Text('Title', style: Theme.of(context).textTheme.titleLarge);
+// lib/adaptive_scaffold.dart
+import 'package:flutter/material.dart';
+
+class AdaptiveScaffold extends StatelessWidget {
+  const AdaptiveScaffold({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 600;
+        return Scaffold(
+          appBar: AppBar(title: const Text('Adaptive')),
+          body: Row(
+            children: [
+              if (wide)
+                NavigationRail(
+                  selectedIndex: 0,
+                  destinations: const [
+                    NavigationRailDestination(icon: Icon(Icons.home), label: Text('Home')),
+                    NavigationRailDestination(icon: Icon(Icons.settings), label: Text('Settings')),
+                  ],
+                ),
+              const Expanded(child: Center(child: Text('Content'))),
+            ],
+          ),
+          bottomNavigationBar: wide
+              ? null
+              : NavigationBar(
+                  selectedIndex: 0,
+                  destinations: const [
+                    NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
+                    NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+}
 ```
 
-การอ่านจาก theme (แทนการ hardcode `Color`) คือสิ่งที่ทำให้ dark mode และการ rebrand เป็นการแก้แค่บรรทัดเดียว
+```dart
+// test/adaptive_scaffold_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/adaptive_scaffold.dart';
 
-## responsive และ adaptive layout
+void main() {
+  testWidgets('under 600 logical px shows a bottom NavigationBar; 600+ shows a side NavigationRail instead', (tester) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
 
-แอปเดียวกันรันบนโทรศัพท์, foldable, tablet และเว็บ หน้าจอจึงต้องปรับตามพื้นที่ที่ได้รับ
+    await tester.binding.setSurfaceSize(const Size(400, 800));
+    await tester.pumpWidget(const MaterialApp(home: AdaptiveScaffold()));
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.byType(NavigationRail), findsNothing);
 
-- **`MediaQuery.of(context).size`** ให้ขนาดของหน้าจอ — มีประโยชน์สำหรับ breakpoint ระดับ global
-- **`LayoutBuilder`** ให้ constraint ของ *ช่องเฉพาะ* ที่ widget อยู่ — ดีกว่าสำหรับการตัดสินใจ local เพราะตอบสนองต่อพื้นที่ที่มีจริง ไม่ใช่ทั้งหน้าจอ
+    await tester.binding.setSurfaceSize(const Size(900, 800));
+    await tester.pumpWidget(const MaterialApp(home: AdaptiveScaffold()));
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+  });
+}
+```
+
+```text
+✓ under 600 logical px shows a bottom NavigationBar; 600+ shows a side NavigationRail instead
+
+00:00 +1: All tests passed!
+```
+
+`tester.binding.setSurfaceSize(...)` คือ API จริงสำหรับเปลี่ยนขนาด logical ของ test surface กลาง test (`TestWidgetsFlutterBinding` ของ `flutter_test`) — มันคือสิ่งที่ทำให้ "พิสูจน์ที่สองความกว้าง" เป็น assertion จริง ไม่ใช่แค่ claim เกี่ยวกับ `LayoutBuilder` แบบนามธรรม
+
+## Theming อ่านจาก context: `ColorScheme.fromSeed`
+
+theme ถูกกำหนดครั้งเดียวบน `MaterialApp` แล้วอ่านได้ทุกที่ข้างล่างด้วย `Theme.of(context)` แอป Material 3 ขับเคลื่อน palette ทั้งหมดจาก seed color เดียวผ่าน `ColorScheme.fromSeed` ทำให้ light กับ dark สอดคล้องกัน — `Theme.of(context).colorScheme` คือจุดที่ทุก Material widget (และโค้ดของคุณเอง) ควรอ่านสีมาจาก แทนที่จะ hardcode `Color`
 
 ```dart
-LayoutBuilder(
-  builder: (context, constraints) {
-    // Switch layout based on available width at THIS position.
-    if (constraints.maxWidth > 600) {
-      return const TwoPaneLayout();   // tablet / desktop
-    }
-    return const SinglePaneLayout();  // phone
-  },
+// lib/seeded_theme.dart
+import 'package:flutter/material.dart';
+
+class SeededThemeApp extends StatelessWidget {
+  const SeededThemeApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal)),
+      home: const ColorReader(),
+    );
+  }
+}
+
+class ColorReader extends StatelessWidget {
+  const ColorReader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Scaffold(body: Container(color: scheme.primary, child: const Text('Themed')));
+  }
+}
+```
+
+```dart
+// test/seeded_theme_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/seeded_theme.dart';
+
+void main() {
+  testWidgets('Theme.of(context).colorScheme.primary matches the same ColorScheme.fromSeed the app was built with', (tester) async {
+    await tester.pumpWidget(const SeededThemeApp());
+    final container = tester.widget<Container>(find.byType(Container));
+    final expected = ColorScheme.fromSeed(seedColor: Colors.teal).primary;
+    expect((container.color), expected, reason: 'the widget never hardcodes a Color — it derives from the same seed the theme was built with');
+  });
+}
+```
+
+```text
+✓ Theme.of(context).colorScheme.primary matches the same ColorScheme.fromSeed the app was built with
+
+00:00 +1: All tests passed!
+```
+
+การอ่านจาก theme (แทนที่จะ hardcode `Color`) คือสิ่งที่ทำให้ dark mode และ rebrand เป็นการแก้แค่บรรทัดเดียว: เปลี่ยน `seedColor` ครั้งเดียว แล้วทุก widget ที่อ่าน `Theme.of(context).colorScheme` จะรับ palette ใหม่โดยอัตโนมัติ — ไม่มีอะไรที่อ่าน theme ต้องแก้เลย
+
+## การแยก `material_ui`/`cupertino_ui` — สถานะจริงใน 3.47
+
+คุณจะเห็น import style สองแบบสำหรับ widget เดียวกันในหมุนเวียนอยู่ตอนนี้ และมันสำคัญว่าโค้ดชิ้นหนึ่ง (รวมถึงโค้ด AI-generated) ใช้แบบไหน ยกมาตรง ๆ จาก [หน้า breaking-changes ของ Flutter เองสำหรับ migration นี้](https://docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui):
+
+> "Contributions to `package:flutter/material.dart` and `package:flutter/cupertino.dart` inside the core SDK were frozen starting in Flutter 3.44."
+>
+> "Starting in Flutter 3.47, version 1.0 of the standalone `material_ui` and `cupertino_ui` packages is published on `pub.dev`."
+>
+> "The initial 1.0.0 versions of `package:material_ui` and `package:cupertino_ui` match the frozen framework code to provide a seamless transition."
+>
+> "The in-framework design libraries are scheduled for formal deprecation in an upcoming stable release."
+
+สถานะที่จริงที่สุด ณ 3.47 คือ: `package:flutter/material.dart` ยังใช้งานได้ ยังมาพร้อมกับทุกการติดตั้ง Flutter และ **ยังไม่ถูก deprecate อย่างเป็นทางการ** — แต่มันถูก **frozen** (ไม่มี widget หรือ fix ใหม่ลงที่นี่อีกแล้ว งาน Material ใหม่ทั้งหมดไปลงที่ standalone package `material_ui` แทน) ทุก fence ในคอร์สนี้ยังคง import `package:flutter/material.dart` โดยตั้งใจ — มันเป็น import เดียวที่รับประกันว่ามีอยู่ในโปรเจกต์ Flutter 3.47 *ทุกตัว* โดยไม่ต้องมี dependency เพิ่ม และมันไม่ผิด แค่ไม่ใช่ที่ที่ development ใหม่เกิดขึ้นอีกแล้ว
+
+```dart
+// Frozen since 3.44, still fully functional, not yet formally deprecated:
+import 'package:flutter/material.dart';
+
+// The actively-developed standalone package as of 3.47 (1.0.0+):
+import 'package:material_ui/material_ui.dart';
+```
+
+<Callout title="ย้ายเมื่อพร้อม">
+Flutter มี automated migration จริงสำหรับเรื่องนี้: `dart fix --apply --code=migrate_design_widgets` เขียน import ของ `package:flutter/material.dart`/`package:flutter/cupertino.dart` ใหม่ให้เป็น `package:material_ui/material_ui.dart`/`package:cupertino_ui/cupertino_ui.dart` ให้อัตโนมัติ (ยกจากหน้า breaking-changes เดียวกัน) ถ้ามันไม่เพิ่ม package ใหม่ลง `pubspec.yaml` ให้ด้วย ให้เพิ่มเอง: `flutter pub add material_ui` / `flutter pub add cupertino_ui`
+</Callout>
+
+## `Localizations` และ `l10n` — API ที่ generate จริง
+
+การตั้งค่า localization ทางการของ Flutter (`flutter gen-l10n` ขับเคลื่อนด้วยไฟล์ `.arb` และ `l10n.yaml`) generate class แบบ typed ที่มี method/getter หนึ่งตัวต่อ string หนึ่งตัว — กลไกเดียวกับที่ `GlobalMaterialLocalizations` ของ `MaterialApp` เองใช้ภายใน สิ่งนี้ถูกรันจริงในโปรเจกต์ scratch ที่ pin ไว้กับ Flutter SDK 3.47.5 ของคอร์สนี้ จากไฟล์ `.arb` สองไฟล์นี้:
+
+```json
+// lib/l10n/app_en.arb
+{
+  "@@locale": "en",
+  "helloWorld": "Hello World",
+  "greeting": "Hello, {name}!",
+  "@greeting": {
+    "placeholders": { "name": { "type": "String" } }
+  }
+}
+```
+
+```json
+// lib/l10n/app_th.arb
+{
+  "@@locale": "th",
+  "helloWorld": "สวัสดีชาวโลก",
+  "greeting": "สวัสดี {name}!"
+}
+```
+
+```yaml
+# l10n.yaml
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+```
+
+ด้วย `generate: true` ใต้ `flutter:` ใน `pubspec.yaml` และเพิ่ม `flutter_localizations` (SDK dependency ไม่ใช่ pub.dev package: `flutter_localizations: { sdk: flutter }`) `flutter gen-l10n` เขียน `lib/l10n/app_localizations.dart` บวกกับ `app_localizations_<locale>.dart` หนึ่งไฟล์ต่อไฟล์ `.arb` นี่คือ class ต่อ-locale ที่ generate จริง ไม่ได้แก้อะไรเลย:
+
+```dart
+// generated by flutter gen-l10n — lib/l10n/app_localizations_en.dart (real output from this SDK)
+import 'package:intl/intl.dart' as intl;
+import 'app_localizations.dart';
+
+class AppLocalizationsEn extends AppLocalizations {
+  AppLocalizationsEn([String locale = 'en']) : super(locale);
+
+  @override
+  String get helloWorld => 'Hello World';
+
+  @override
+  String greeting(String name) {
+    return 'Hello, $name!';
+  }
+}
+```
+
+และ entry point ที่ generate จริง (`app_localizations.dart` ตัดมาแค่ส่วนที่คุณเรียกใช้จริง):
+
+```dart
+// generated by flutter gen-l10n — lib/l10n/app_localizations.dart (real output, trimmed)
+abstract class AppLocalizations {
+  static AppLocalizations? of(BuildContext context) {
+    return Localizations.of<AppLocalizations>(context, AppLocalizations);
+  }
+
+  static const LocalizationsDelegate<AppLocalizations> delegate =
+      _AppLocalizationsDelegate();
+
+  static const List<LocalizationsDelegate<dynamic>> localizationsDelegates =
+      <LocalizationsDelegate<dynamic>>[
+        delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+      ];
+
+  static const List<Locale> supportedLocales = <Locale>[
+    Locale('en'),
+    Locale('th'),
+  ];
+
+  String get helloWorld;
+  String greeting(String name);
+}
+```
+
+การต่อสายมันเข้ากับ `MaterialApp` และอ่านมันถูกพิสูจน์ด้วย widget test จริงในโปรเจกต์ scratch นั้น (`AppLocalizations.of(context)!.helloWorld` ภายใต้ `locale: const Locale('th')` render ออกมาเป็น `'สวัสดีชาวโลก'` — `flutter test` ผ่าน `+1: All tests passed!`) เพราะ `flutter_localizations` เป็น SDK dependency (เพิ่มผ่าน `flutter pub add flutter_localizations --sdk=flutter` ไม่ใช่ pub.dev package ที่มี version constraint) fence เหล่านี้จึงแสดงเป็นโค้ดประกอบ ไม่ได้ถูกเก็บเข้า probe ของบทนี้ — การพิสูจน์ข้างบนคือการรัน `flutter gen-l10n` + `flutter test` จริง แค่ไม่ได้ต่อสายเข้ากับ dependency union ข้ามบทของคอร์ส
+
+## `MediaQuery` และ `SafeArea`
+
+`MediaQuery.of(context)` เปิดเผยมากกว่าแค่ size: `padding` (พื้นที่ที่ OS status bar, notch หรือ home indicator จอง), `viewInsets` (พื้นที่ที่ on-screen keyboard กิน) และ `textScaler` (ค่า accessibility text-size ของ user) `SafeArea` คือ wrapper เล็ก ๆ ที่อ่าน `padding` ของ `MediaQuery` ให้แล้วใส่ padding ที่ตรงกันให้ ทำให้เนื้อหาไม่ render ใต้ notch หรือมุมโค้ง:
+
+```dart
+Scaffold(
+  body: SafeArea(
+    child: MyScreenContent(),   // never touches the notch/status bar/home indicator
+  ),
 );
 ```
 
-<Mermaid title="ปรับ layout ตามพื้นที่ที่ได้รับ" code={respDiagram} />
+`Scaffold` เองใช้ handling แบบเทียบเท่า `SafeArea` กับ app bar และ bottom navigation bar ของตัวเองอยู่แล้ว — คุณจะเอื้อมไปหา `SafeArea` ตรง ๆ เมื่อ `body` ต้องการการปกป้องแบบเดียวกันโดยไม่มี slot สองอันนั้น (เช่น รูปเต็มจอหรือ top bar ที่กำหนดเอง)
 
-export const respDiagram = `flowchart LR
-  lb["LayoutBuilder\n(constraints of this slot)"] --> check{"maxWidth over 600?"}
-  check -->|yes| two["two-pane layout"]
-  check -->|no| one["single-pane layout"]`;
+## `ScaffoldMessenger` — สิ่งที่ throw จริง กับสิ่งที่ไม่ throw
+
+คำกล่าวที่ได้ยินบ่อยคือ "คุณต้องมี `Scaffold` ถึงจะโชว์ `SnackBar` ได้" นั่นไม่ค่อยถูกนัก และความไม่แม่นยำนี้สำคัญเพราะ error จริงสองตัวข้างล่างดูคล้ายกันแต่มาจาก API คนละตัว
+
+```dart
+// test/scaffold_messenger_errors_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  testWidgets('ScaffoldMessenger.of(context) works fine with NO Scaffold at all, as long as MaterialApp is present', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    })));
+
+    // No Scaffold anywhere in this tree — and this does NOT throw:
+    expect(() => ScaffoldMessenger.of(capturedContext), returnsNormally);
+  });
+
+  testWidgets('ScaffoldMessenger.of(context) throws only when there is no MaterialApp (no ScaffoldMessenger ancestor) at all', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    }));
+
+    expect(
+      () => ScaffoldMessenger.of(capturedContext),
+      throwsA(isA<FlutterError>().having(
+        (e) => e.toString(),
+        'message',
+        contains('No ScaffoldMessenger widget found.'),
+      )),
+    );
+  });
+
+  testWidgets('Scaffold.of(context) — a DIFFERENT API — throws when there IS a MaterialApp but no Scaffold', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    })));
+
+    expect(
+      () => Scaffold.of(capturedContext),
+      throwsA(isA<FlutterError>().having(
+        (e) => e.toString(),
+        'message',
+        contains('Scaffold.of() called with a context that does not contain a Scaffold.'),
+      )),
+    );
+  });
+}
+```
+
+```text
+✓ ScaffoldMessenger.of(context) works fine with NO Scaffold at all, as long as MaterialApp is present
+✓ ScaffoldMessenger.of(context) throws only when there is no MaterialApp (no ScaffoldMessenger ancestor) at all
+✓ Scaffold.of(context) — a DIFFERENT API — throws when there IS a MaterialApp but no Scaffold
+
+00:00 +3: All tests passed!
+```
+
+`MaterialApp` ติดตั้ง `ScaffoldMessenger` ที่ root ของตัวเองให้คุณ — นั่นคือเหตุผลที่ `ScaffoldMessenger.of(context).showSnackBar(...)` ทำงานได้จากทุกที่ใต้ `MaterialApp` ไม่ว่าจะมี `Scaffold` หรือไม่ก็ตาม `FlutterError` จริง — **"No ScaffoldMessenger widget found."** — เกิดขึ้นก็ต่อเมื่อไม่มี `MaterialApp` เลย (หรือไม่มี `ScaffoldMessenger` เลย) เหนือ context ซึ่ง error message เองก็ยืนยัน: *"Typically, the ScaffoldMessenger widget is introduced by the MaterialApp at the top of your application widget tree."* error ที่คำคล้ายกันแต่ต่างกันจริง ๆ คือ **"Scaffold.of() called with a context that does not contain a Scaffold."** มาจาก API *อีกตัว* ที่เก่ากว่า คือ `Scaffold.of(context)` (ใช้สำหรับเช่นการเปิด `Drawer` ซึ่งต้องการ `Scaffold` เป็น ancestor จริง ๆ) — การสับสนระหว่างสองตัวนี้คือต้นตอจริงของความสับสนเรื่อง "SnackBar without Scaffold" ส่วนใหญ่ที่เจอบนอินเทอร์เน็ต
+
+## Mental Model
+
+`MaterialApp` (หรือ `MaterialApp.router`) คือ widget ตัวเดียวที่ติดตั้งทุกอย่างที่โค้ดข้างล่างสมมติว่า "มีอยู่แล้ว": `Navigator`, `ScaffoldMessenger`, localization delegate, theme ทุกอย่างข้างล่างอ่านจากมันผ่าน `of(context)` — `Theme.of`, `MediaQuery.of`, `ScaffoldMessenger.of`, `Localizations.of` (ที่ `AppLocalizations.of` ที่ generate ห่ออยู่) — นั่นคือเหตุผลที่ทุกตัวมี failure shape เดียวกันเมื่อ ancestor ที่ถูกต้องหายไป และเหตุผลที่ `Scaffold.of` โดยเฉพาะต้องการสิ่งที่ *เฉพาะเจาะจงกว่า* `MaterialApp` เดี่ยว ๆ คือ `Scaffold` Adaptive layout (`NavigationBar` เทียบ `NavigationRail`) คือไอเดียแบบ `of(context)` เดียวกันแต่กลับด้าน: แทนที่จะอ่าน app state ตายตัว `LayoutBuilder` อ่าน *constraints* ที่ถูกส่งลงมาตรงจุดนี้ใน tree แล้วคุณเลือกว่าจะ build widget ไหนจากมัน
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `MaterialApp` (Navigator 1.0) | ง่าย ไม่ต้อง config router object | ไม่มี URL sync, deep link ต้องทำเอง |
+| `MaterialApp.router` | Declarative, URL-synced, ใช้กับ go_router ได้ | ต้องมี object เพิ่มอีกตัว (`RouterConfig`) ให้ดูแลและ config |
+| `MediaQuery.of(context).size` สำหรับ layout | breakpoint แบบ global ง่าย ๆ | ตอบสนองต่อหน้าจอ "ทั้งหมด" ไม่ใช่พื้นที่ที่ widget ได้รับจริง |
+| `LayoutBuilder` สำหรับ layout | ตอบสนองพื้นที่จริงที่มีตรงจุดนี้ | ceremony มากกว่าอ่าน `MediaQuery` ตรง ๆ นิดหน่อย (ต้องมี builder callback) |
+| `package:flutter/material.dart` | ไม่มี dependency เพิ่ม ใช้ได้ในทุกโปรเจกต์ 3.47 วันนี้ | Frozen — ไม่มี widget/fix ใหม่ลงที่นี่อีกต่อไป |
+| `package:material_ui` | พัฒนาอย่างต่อเนื่อง เป็นที่ที่ Material widget ใหม่ลง | dependency pub.dev เพิ่มอีกตัวที่ต้องเพิ่มและติดตาม |
+| `flutter gen-l10n` | API แบบ typed ครอบคลุมต่อ-locale, tooling มาตรฐาน | generated code ต้อง regenerate ทุกครั้งที่แก้ `.arb`, มี build step ต้องจำ |
+
+## Common Misconceptions
+
+- **"ต้องมี `Scaffold` ถึงจะโชว์ `SnackBar` ได้"** พิสูจน์แล้วว่าไม่จริงข้างบน: `ScaffoldMessenger.of(context)` ทำงานได้โดยไม่มี `Scaffold` เลยใน tree ตราบใดที่มี `MaterialApp` อยู่ — มันติดตั้ง `ScaffoldMessenger` ของตัวเองที่ root
+- **"`package:flutter/material.dart` deprecated ใน 3.47"** มันถูก **frozen** (ไม่มี contribution ใหม่) มาตั้งแต่ 3.44 ตาม docs ที่ยกมาข้างบน แต่ยัง **ไม่ถูก deprecate อย่างเป็นทางการ** ใน 3.47 — นั่นถูกกำหนดไว้ว่าจะเกิดใน "an upcoming stable release" ไม่ใช่ release นี้
+- **"`Scaffold.of()` กับ `ScaffoldMessenger.of()` throw error แปลว่าเรื่องเดียวกันผิด"** มันเป็น API คนละตัวที่มีข้อกำหนด ancestor ต่างกัน พิสูจน์แล้วข้างบนด้วย error message จริงทั้งสองแบบเทียบกัน
+- **"`MediaQuery.of(context).size` กับ constraints ของ `LayoutBuilder` เป็นตัวเลขเดียวกันเสมอ"** ปกติมันตรงกันที่ด้านบนสุดของ tree แต่ `LayoutBuilder` สะท้อนสิ่งที่ widget ได้รับจริงจาก parent ตรงจุดนั้น — widget ที่อยู่ใน sidebar ความกว้างตายตัวจะเห็นความกว้างของ sidebar นั้น ไม่ใช่ความกว้างทั้งหน้าจอ
+- **"การอ่าน `Theme.of(context).colorScheme.primary` กับการ hardcode `Color(0xFF...)` ที่หน้าตาเหมือนกันคือสิ่งเดียวกัน"** เหมือนกันแค่จนกว่า seed color จะเปลี่ยน — พิสูจน์แล้วข้างบน widget ที่ทดสอบดึงสีจาก theme ที่ยังมีชีวิตอยู่ ไม่ใช่ค่าคงที่ที่ฝังไว้ ซึ่งเป็นสิ่งที่ทำให้ rebrand หรือ dark mode เป็นการแก้บรรทัดเดียวได้จริง
+
+## Reading AI-generated code
+
+pattern ที่ AI-generated เจอบ่อย คือการ hardcode สีแบรนด์แทนที่จะอ่านมันจาก theme — มันดูเหมือนกันตอน render ครั้งแรก แล้วเลิกตรงกันอย่างเงียบ ๆ ทันทีที่ seed color ของ theme เปลี่ยน
+
+```dart
+// AI-generated: "make the header teal to match our brand"
+class BrandHeader extends StatelessWidget {
+  const BrandHeader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Container(color: const Color(0xFF009688), child: const Text('Header'));
+  }
+}
+```
+
+โค้ดนี้ compile ผ่านสะอาด — `flutter analyze` ไม่มีกฎห้าม `Color` แบบ literal bug จะโผล่ตอนที่มีคนเปลี่ยน `ColorScheme.fromSeed(seedColor: ...)` เพื่อ rebrand หรือเพิ่ม dark-mode เท่านั้น: ทุก widget อื่นที่อ่าน `Theme.of(context).colorScheme` อัปเดตอัตโนมัติ แต่ตัวนี้ยังเป็น teal เดิมที่ hardcode ไว้อย่างเงียบ ๆ ตรงกับที่ test `seeded_theme_test.dart` พิสูจน์ไว้ข้างบนเป๊ะ (ซึ่ง assert สีของ widget เทียบกับ output ของ `ColorScheme.fromSeed` ที่ *มีชีวิตอยู่จริง* ไม่ใช่ literal)
+
+<SpotTheBug code={`// AI-generated: "show a confirmation snackbar after saving"
+class SaveButton extends StatelessWidget {
+  const SaveButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: () {
+        Scaffold.of(context).showSnackBar(
+          const SnackBar(content: Text('Saved!')),
+        );
+      },
+      child: const Text('Save'),
+    );
+  }
+}`}>
+ปัญหาสองข้อแยกกัน อย่างแรก `Scaffold.showSnackBar`/`Scaffold.of(context).showSnackBar` เป็น API เก่าก่อนยุค `ScaffoldMessenger` — โค้ดสมัยใหม่เรียก `ScaffoldMessenger.of(context).showSnackBar(...)` แทน ซึ่ง (พิสูจน์แล้วข้างบน) ทำงานได้โดยไม่ต้องมี `Scaffold` เป็น ancestor เลย ต้องการแค่ `MaterialApp` อย่างที่สอง แม้จะไม่นับเรื่องนั้น ถ้า `SaveButton` ถูกวางตรงเข้าไปใน return value ของ `build` method ของ `Scaffold` เอง (รูปแบบที่ AI-generated เจอบ่อยมาก — ปุ่มเป็นหนึ่งใน children ของ Scaffold เอง) `Scaffold.of(context)` ด้วย context ตัวนั้นเป๊ะ ๆ จะ throw error จริงที่พิสูจน์ไว้ข้างบน — *"Scaffold.of() called with a context that does not contain a Scaffold"* — เพราะ `context` เป็นของ widget ที่อยู่ *เหนือ* `Scaffold` ที่มันพยายามหา ไม่ใช่อยู่ใต้มัน ทางแก้คือ `ScaffoldMessenger.of(context).showSnackBar(...)` ซึ่งหลบทั้งสองปัญหาไปพร้อมกัน
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-ห่อแอปด้วย `MaterialApp` เพื่อได้ theme, routing และ navigation; frame แต่ละหน้าจอด้วย `Scaffold` เพื่อได้ช่อง app-bar/body/nav มาตรฐาน กำหนด theme ครั้งเดียว (seed color ของ Material 3 ขับทั้ง light และ dark) และอ่านด้วย `Theme.of(context)` แทนการ hardcode สี สำหรับ responsive UI ใช้ `MediaQuery` สำหรับ breakpoint ระดับหน้าจอ และ `LayoutBuilder` เพื่อปรับตามพื้นที่ที่ widget ได้รับจริง
+`MaterialApp`/`MaterialApp.router` ติดตั้ง `Navigator`, `ScaffoldMessenger`, theme และ localization delegate ที่ส่วนที่เหลือของแอปสมมติว่ามีอยู่ เลือก `NavigationBar` เทียบ `NavigationRail` จาก constraints จริงของ `LayoutBuilder` ไม่ใช่การเดาแบบตายตัว — พิสูจน์ที่สองความกว้างจริงข้างบน อ่านสีจาก `Theme.of(context).colorScheme` (สร้างผ่าน `ColorScheme.fromSeed`) อย่า hardcode `Color` เลย `package:flutter/material.dart` frozen มาตั้งแต่ 3.44 แต่ **ยังไม่ deprecate อย่างเป็นทางการ** ใน 3.47 — `package:material_ui`/`package:cupertino_ui` (1.0 ตั้งแต่ 3.47) คือที่ที่งานใหม่ลง พร้อม `dart fix --apply --code=migrate_design_widgets` เป็น automated migration จริง `flutter gen-l10n` generate API แบบ typed ครอบคลุมต่อ-locale จากไฟล์ `.arb` — พิสูจน์ด้วยไฟล์ที่ generate จริงและ test ข้างบน และ error จริงของ `ScaffoldMessenger` เกิดขึ้นแค่ตอนไม่มี `MaterialApp` เลย — `Scaffold` ไม่เคยจำเป็นสำหรับ `SnackBar` ตั้งแต่แรกอยู่แล้ว
 </Callout>
 
 export const quizScaffold = [
   {
     q: 'MaterialApp ให้อะไรกับทั้งแอป?',
     options: [
-      'แค่ไอคอนแอป',
-      'theme, routing config, localization และกลไก Navigator/Overlay',
-      'database',
+      'แค่ app icon',
+      'Theme, routing config, localization, และกลไก Navigator/Overlay (บวกกับ ScaffoldMessenger ของตัวเอง)',
+      'ฐานข้อมูล',
       'native platform code',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: ScaffoldMessenger.of(context) ทำงานได้จากทุกที่ใต้ MaterialApp โดยไม่มี Scaffold เลย เพราะ MaterialApp ติดตั้งอันหนึ่งไว้ที่ root ของตัวเอง',
   },
   {
-    q: 'Scaffold คืออะไร?',
+    q: 'AdaptiveScaffold ในบทนี้สลับจาก NavigationBar ที่ล่างเป็น NavigationRail ที่ข้างที่ความกว้างเท่าไหร่ ตาม widget test จริง?',
     options: [
-      'build tool',
-      'กรอบหน้าจอ Material มาตรฐานที่มีช่องสำหรับ app bar, body, FAB, bottom nav และ drawer',
-      'library จัดการ state',
-      'package สำหรับ routing',
+      'ไม่เคยสลับเลย — Flutter เลือกให้อัตโนมัติ',
+      '600 logical pixel — พิสูจน์โดย pump widget เดียวกันที่ 400px (NavigationBar) และ 900px (NavigationRail) ผ่าน tester.binding.setSurfaceSize',
+      '1024 logical pixel',
+      'ขึ้นอยู่กับ platform อย่างเดียว ไม่เกี่ยวกับความกว้าง',
     ],
     answer: 1,
+    explain: 'test assert findsOneWidget/findsNothing สำหรับแต่ละ widget type ที่ทั้งสองขนาดจริงตรง ๆ',
   },
   {
-    q: 'ทำไมควรอ่านสีจาก `Theme.of(context)` แทนการ hardcode?',
+    q: 'ตาม docs ที่ยกมาในบทนี้ สถานะจริงของ package:flutter/material.dart ณ Flutter 3.47 คืออะไร?',
     options: [
-      'เร็วกว่าตอน runtime',
-      'ทำให้ dark mode และการ rebrand เป็นการแก้แค่บรรทัดเดียวแทนที่จะแก้ทุกที่',
-      'สี hardcode ผิดกฎใน Dart',
-      'ลดขนาดแอป',
+      'ถูกลบออกจาก SDK ไปแล้วทั้งหมด',
+      'Frozen (ไม่มี contribution ใหม่) ตั้งแต่ 3.44 แต่ยัง "ไม่" ถูก deprecate อย่างเป็นทางการ — นั่นถูกกำหนดไว้สำหรับ stable release ในอนาคต',
+      'ไม่เคยถูกเปลี่ยนอะไรเลย',
+      'deprecated แล้วและจะคอมไพล์ไม่ผ่านใน release ถัดไป',
     ],
     answer: 1,
+    explain: 'ยกมาตรง ๆ: contribution ถูก "frozen starting in Flutter 3.44" และการ deprecate อย่างเป็นทางการ "scheduled for an upcoming stable release" — ยังไม่ใช่ตอนนี้ ณ 3.47',
   },
   {
-    q: 'เมื่อไรที่ LayoutBuilder เหมาะกว่า MediaQuery สำหรับการตัดสินใจเรื่อง layout?',
+    q: 'ตาม widget test ในบทนี้ เกิดอะไรขึ้นเมื่อเรียก ScaffoldMessenger.of(context) ใต้ MaterialApp ที่ไม่มี Scaffold เลยใน tree?',
     options: [
-      'ไม่มีเลย — เหมือนกันทุกอย่าง',
-      'เมื่อคุณต้องการตอบสนองต่อ constraint ของช่องเฉพาะที่ widget อยู่ ไม่ใช่ทั้งหน้าจอ',
-      'เฉพาะบนเว็บ',
-      'เฉพาะสำหรับ text',
+      'มัน throw "No ScaffoldMessenger widget found."',
+      'มันทำงานได้ปกติ — MaterialApp ติดตั้ง ScaffoldMessenger ของตัวเองที่ root โดยไม่เกี่ยวกับ Scaffold เลย',
+      'มัน throw "Scaffold.of() called with a context that does not contain a Scaffold."',
+      'มันไม่ทำอะไรเลยอย่างเงียบ ๆ',
     ],
     answer: 1,
+    explain: 'test assert ว่า ScaffoldMessenger.of(context) returnsNormally โดยไม่มี Scaffold เลยใน tree ตราบใดที่มี MaterialApp อยู่',
+  },
+  {
+    q: 'อะไรที่ generate AppLocalizations.of(context) กับ getter แบบ typed ต่อ-locale อย่าง helloWorld ตามการรันจริงในบทนี้?',
+    options: [
+      'คุณเขียนมันเองด้วยมือสำหรับแต่ละภาษา',
+      'flutter gen-l10n ขับเคลื่อนด้วยไฟล์ .arb และ l10n.yaml ที่มี generate: true — พิสูจน์ด้วยเนื้อหา app_localizations_en.dart/app_localizations.dart ที่ generate จริงและ widget test ที่ผ่าน',
+      'Dart analyzer infer ให้อัตโนมัติ',
+      'ColorScheme.fromSeed generate มันเป็น side effect',
+    ],
+    answer: 1,
+    explain: 'บทนี้แสดงไฟล์ที่ generate จริงจากโปรเจกต์ scratch บน SDK ที่ pin ไว้ของคอร์สนี้เป๊ะ บวกกับ widget test ที่พิสูจน์ว่า AppLocalizations.of(context)!.helloWorld resolve ตาม-locale',
+  },
+  {
+    q: 'test assert ว่าสีของ widget เท่ากับ ColorScheme.fromSeed(seedColor: Colors.teal).primary เป๊ะ นี่พิสูจน์อะไร ตาม mental model ของบทนี้?',
+    options: [
+      'ว่าสีบังเอิญดูคล้ายกัน',
+      'ว่า widget อ่านสีจาก theme ที่ "มีชีวิตอยู่จริง" (Theme.of(context).colorScheme) แทนที่จะเป็นค่าคงที่ที่ฝังไว้ — ดังนั้นมันยังถูกต้องแม้ seed color จะเปลี่ยนไป',
+      'ว่า Colors.teal เป็น seed color ที่ใช้ได้ตัวเดียว',
+      'ไม่มีอะไรเลย — เทียบสีกันไม่ได้ใน Dart',
+    ],
+    answer: 1,
+    explain: 'ส่วน Reading AI-generated code เปรียบเทียบตรง ๆ กับ Color(0xFF009688) ที่ hardcode ไว้ซึ่ง drift ออกจาก theme อย่างเงียบ ๆ ทันทีที่ seed เปลี่ยน',
   },
 ];
 
