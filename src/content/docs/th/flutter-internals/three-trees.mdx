@@ -1,0 +1,365 @@
+---
+title: 'The Three Trees, From the Source'
+description: 'Widget.createElement, Element.updateChild (ตาราง 4 กรณีจริง อ้างจาก doc comment ของมันเอง), Widget.canUpdate, RenderObjectElement, และ RenderObject.markNeedsLayout/markNeedsPaint ในฐานะ dirty flag คนละตัว — พิสูจน์ด้วย spy RenderObjectWidget, test การย้าย GlobalKey จริงด้วย identical(), และ debugDumpApp ตัวจริงแบบตัดทอน'
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## บทนี้เพิ่มอะไร
+
+[Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/) พิสูจน์ไปแล้วด้วย `createElement`/`didUpdateWidget` ที่ spy ไว้ว่า rebuild แบบ type/key เดิมจะ reuse `Element` และ `const` จะข้าม rebuild ไปเลย บทนี้ไม่ทำซ้ำการพิสูจน์นั้น — แต่ลงลึกไปอีกชั้นหนึ่ง เข้าไปใน source ของ `flutter/flutter` จริง (Flutter ที่ติดตั้งในคอร์สนี้ **3.47.5** revision `6a19cca564`) เพื่อแสดง *ทำไม* การ reuse นั้นถึงเกิดขึ้น (`Widget.canUpdate`, ตาราง 4 กรณีจริงของ `Element.updateChild`) และขยายเทคนิค spy แบบเดียวกันลงไปถึง tree ที่ **สาม**: `RenderObject` ซึ่งพบว่า layout กับ paint เป็น dirty flag คนละตัวกันจริง ๆ และการย้าย `GlobalKey` พิสูจน์ด้วย `identical()` ว่าได้ render object ตัวเดิมกลับมา
+
+<Callout title="permalink ทุกอันด้านล่างคือ SDK ที่ติดตั้งจริงตัวนี้">
+เลขบรรทัดทั้งหมดมาจาก `~/flutter` (`dirname $(dirname $(which flutter))`) บน Mac เครื่องนี้ ยืนยันด้วย `flutter --version`: `Framework - revision 6a19cca564 (12 days ago) - 2026-09-17` permalink ตรึง revision นี้ไว้ ดังนั้นบรรทัดที่อ้างจะตรงกับที่ลิงก์ไว้เสมอ แม้ SDK นี้จะอัปเกรดในอนาคต
+</Callout>
+
+## `Widget.createElement`: เมธอดเดียวที่ widget ทุกตัวต้องมี
+
+`Widget` ทุกตัวต้อง implement เมธอดเดียวเท่านั้นคือ [`Widget.createElement()`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L349) ซึ่งมี doc comment อยู่เหนือ declaration บอกว่ามัน "inflates this configuration to a concrete instance" — และ doc comment เดียวกันนี้ระบุข้อเท็จจริงที่ [Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/) พิสูจน์ด้วย counter ไว้แล้ว: *"a given widget can be placed in the tree multiple times. Each time a widget is placed in the tree, it is inflated into an `Element`, which means a widget that is incorporated into the tree multiple times will be inflated multiple times."* widget คือคำอธิบาย ส่วน `createElement()` คือประตูบานเดียวจากคำอธิบายไปสู่ tree ที่มีชีวิตจริง
+
+## `Widget.canUpdate`: การทดสอบสองฟิลด์ตรงตัว
+
+[`Widget.canUpdate`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L382) คือฟังก์ชันตัวจริงเบื้องหลัง "type และ key เหมือนกัน = reuse":
+
+```dart
+// framework.dart:382 -- quoted verbatim from the installed 3.47.5 source
+static bool canUpdate(Widget oldWidget, Widget newWidget) {
+  return oldWidget.runtimeType == newWidget.runtimeType && oldWidget.key == newWidget.key;
+}
+```
+
+สองฟิลด์เท่านั้น ไม่มีอย่างอื่น: `runtimeType` กับ `key` ไม่ใช่ argument อื่น ๆ ของ constructor ไม่ใช่ตำแหน่งใน children list ของ parent (นอกเหนือจากวิธีที่ list นั้นถูกเดิน) — แค่ type เท่ากันและ key เท่ากันล้วน ๆ ทุกอย่างที่บทนี้พิสูจน์ต่อไปนี้ ล้วนขึ้นอยู่กับผลลัพธ์ `true`/`false` ของฟังก์ชันนี้ตัวเดียว
+
+## `Element.updateChild`: ตาราง 4 กรณีจริง
+
+[`Element.updateChild`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L3995) คือ ตามคำพูดใน doc comment ของมันเอง *"the core of the widgets system. It is called each time we are to add, update, or remove a child based on an updated configuration."* doc comment ของมันมีตารางอยู่ — อ้างตรงตัว ไม่ได้แปลความ:
+
+> |                     | **newWidget == null**  | **newWidget != null**   |
+> | :-----------------: | :--------------------- | :---------------------- |
+> |  **child == null**  |  Returns null.         |  Returns new `Element`. |
+> |  **child != null**  |  Old child is removed, returns null. | Old child updated if possible, returns child or new `Element`. |
+
+"Updated if possible" คือ `Widget.canUpdate` จากข้างบนพอดี: doc comment พูดต่อว่า *"If `newWidget` can be given to the existing child (as determined by `Widget.canUpdate`), then it is so given. Otherwise, the old child needs to be disposed and a new child created."* อ่าน implementation จริงที่บรรทัด 4035 ยืนยันสิ่งนี้: `hasSameSuperclass && Widget.canUpdate(child.widget, newWidget)` เป็นเงื่อนไขคุมทาง reuse ส่วนกรณีอื่นทั้งหมดตกไปที่ deactivate-แล้วสร้างใหม่
+
+## `RenderObjectElement`: จุดที่ `Element` งอก `RenderObject`
+
+[`RenderObjectElement`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L6624) คือ subclass ของ `Element` ที่ widget ที่ทำ layout/paint ทุกตัว (`LeafRenderObjectWidget`, `SingleChildRenderObjectWidget`, `MultiChildRenderObjectWidget`) สืบทอดในที่สุด doc comment ของมันเองระบุสามเมธอดที่ดูแล tree ที่ *สาม*: *"Once a descendant produces a render object, it will call `insertRenderObjectChild`. If the descendant's slot changes identity, it will call `moveRenderObjectChild`. If a descendant goes away, it will call `removeRenderObjectChild`."* นี่คือกลไกจริงที่ element tree ของ `Padding`, `Center`, `Column` ใช้ประกอบ render tree ของ `RenderPadding`, `RenderPositionedBox`, `RenderFlex` ขึ้นมาข้างใต้ — พิสูจน์ตรง ๆ ด้านล่างด้วย `RenderObjectWidget` จริง
+
+## `Element.mount` / `update` / `unmount`: สามการเปลี่ยนสถานะของวงจรชีวิต
+
+`Element` ทุกตัว implement สามการเปลี่ยนสถานะเดียวกันที่ [Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/) พิสูจน์ผ่านตัวแทน (`createElement`/`didUpdateWidget`):
+
+- [`mount(Element? parent, Object? newSlot)`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L4341) — การ attach ครั้งแรก doc comment ของมันบังคับ `@mustCallSuper` และสั่งให้ implementation *"start with a call to the inherited method, as in `super.mount(parent, newSlot)`."*
+- [`update(covariant Widget newWidget)`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L4388) — ทางที่ `updateChild` เดินเมื่อ `canUpdate` คืนค่า `true`
+- [`unmount()`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L4864) — การรื้อทิ้ง เรียกเมื่อ `updateChild` ตัดสินว่า child เก่าใช้ซ้ำไม่ได้
+
+`RenderObjectElement` override `update` เพิ่มเพื่อเรียก `updateRenderObject` บน render object ของตัวเอง (พิสูจน์ตรง ๆ ด้านล่าง) — เทียบเท่ากับ `Element.update` ในฝั่ง render tree
+
+## `BuildOwner.buildScope` และ `_dirtyElements`: element ที่ "dirty" อยู่ที่ไหนจริง ๆ
+
+[`BuildOwner`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L2724) เก็บ `final List<Element> _dirtyElements = <Element>[]` ไว้ตรง ๆ — ทุก element ที่ `markNeedsBuild()` แตะจะถูกเพิ่มเข้ามาตรงนี้ doc comment ของ [`buildScope`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L3069) เอง: *"builds all the elements that were marked as dirty using `scheduleBuildFor`, in depth order... This is what the framework does each frame, in `WidgetsBinding.drawFrame`."* นี่คือจุดเชื่อมกลไกสามต้นไม้เข้ากับเฟรมจริง — เรื่องราวการ schedule เต็ม ๆ (`setState` → `markNeedsBuild` → `scheduleBuildFor` → `scheduleFrame` และทำไมเรียก `setState` สองครั้งใน microtask เดียวกันถึง rebuild แค่ครั้งเดียว) พิสูจน์ลึก ๆ ใน [Build Scheduling and Frames](/flutter/th/flutter-internals/build-scheduling-and-frames/) บทนี้ต้องการแค่ข้อเท็จจริงว่า dirty list มีอยู่จริง และ `buildScope` คือตัวที่ดึงมันออกมา
+
+## `RenderObject.markNeedsLayout` / `markNeedsPaint`: dirty flag คนละตัวกัน พิสูจน์แล้ว
+
+รูปแบบ "mark dirty แล้วค่อย batch งาน" แบบเดียวกันเกิดซ้ำอีกชั้นหนึ่ง และ — นี่คือข้อเท็จจริงที่ test ของบทนี้เองพิสูจน์ในสิ่งที่บทก่อนหน้ายังไม่ได้พิสูจน์ — **layout กับ paint เป็น dirty flag คนละตัวกันจริง ๆ** ไม่ใช่ตัวเดียวกัน doc comment ของ [`markNeedsLayout`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L2676): *"Rather than eagerly updating layout information in response to writes into a render object, we instead mark the layout information as dirty, which schedules a visual update."* [`markNeedsPaint`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L3338) คือรูปแบบเดียวกันเป๊ะสำหรับ paint: *"Rather than eagerly updating this render object's display list in response to writes, we instead mark the render object as needing to paint."* ไม่มีส่วนไหนใน implementation ของ `markNeedsPaint` แตะ layout flag เลย และ setter ที่เปลี่ยนแค่ข้อมูลสำหรับ paint ก็ไม่จำเป็นต้องเรียก `markNeedsLayout` เลย — ซึ่งคือสิ่งที่ counter-proof ด้านล่างแสดง: การเปลี่ยนข้อมูลที่ใช้แค่ตอน paint ทำให้ `paint()` รันใหม่โดยไม่เคยทำให้ `performLayout()` รันใหม่เลย
+
+## พิสูจน์แล้ว: `createRenderObject` รันครั้งเดียว, `updateRenderObject`/`paint` รันทุก rebuild, `performLayout` ไม่รัน
+
+`LeafRenderObjectWidget` (ตัวที่ง่ายที่สุดของ `RenderObjectWidget` — ไม่มี widget child) ที่ spy hook ทั้งสี่ตัวซึ่งขับเคลื่อนโดย `RenderObjectElement`: `createRenderObject` (เรียกจาก `mount`), `updateRenderObject` (เรียกจาก `update`), และ `performLayout`/`paint` ของ render object เอง:
+
+```dart
+// lib/render_spy.dart
+import 'package:flutter/material.dart';
+
+int createRenderObjectCount = 0;
+int updateRenderObjectCount = 0;
+int performLayoutCount = 0;
+int paintCount = 0;
+
+/// A RenderObjectElement-backed widget (LeafRenderObjectElement, specifically
+/// -- LeafRenderObjectWidget is the RenderObjectWidget subclass for widgets
+/// with no widget children) that spies on the four render-tree lifecycle
+/// hooks: createRenderObject (Element.mount), updateRenderObject
+/// (Element.update), performLayout, and paint.
+class SpyLeaf extends LeafRenderObjectWidget {
+  const SpyLeaf({super.key, required this.color});
+  final Color color;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    createRenderObjectCount++;
+    return _RenderSpyLeaf(color);
+  }
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) {
+    updateRenderObjectCount++;
+    (renderObject as _RenderSpyLeaf).color = color;
+  }
+}
+
+class _RenderSpyLeaf extends RenderBox {
+  _RenderSpyLeaf(this._color);
+  Color _color;
+  set color(Color v) {
+    if (_color == v) return;
+    _color = v;
+    markNeedsPaint(); // color is paint-only data -- never calls markNeedsLayout
+  }
+
+  @override
+  void performLayout() {
+    performLayoutCount++;
+    size = constraints.constrain(const Size(20, 20));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    paintCount++;
+    context.canvas.drawRect(offset & size, Paint()..color = _color);
+  }
+}
+```
+
+```dart
+// test/render_spy_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/render_spy.dart';
+
+void main() {
+  void reset() {
+    createRenderObjectCount = 0;
+    updateRenderObjectCount = 0;
+    performLayoutCount = 0;
+    paintCount = 0;
+  }
+
+  testWidgets('same type + same key: createRenderObject runs once; updateRenderObject and paint run per rebuild; performLayout does NOT rerun when size is unaffected', (tester) async {
+    reset();
+    await tester.pumpWidget(const MaterialApp(home: SpyLeaf(key: ValueKey('a'), color: Colors.red)));
+    expect(createRenderObjectCount, 1);
+    expect(performLayoutCount, 1);
+    expect(paintCount, 1);
+    expect(updateRenderObjectCount, 0, reason: 'first mount goes through createRenderObject, not update');
+
+    await tester.pumpWidget(const MaterialApp(home: SpyLeaf(key: ValueKey('a'), color: Colors.blue)));
+    await tester.pumpWidget(const MaterialApp(home: SpyLeaf(key: ValueKey('a'), color: Colors.green)));
+
+    expect(createRenderObjectCount, 1, reason: 'the RenderObject was reused -- same key, same type');
+    expect(updateRenderObjectCount, 2, reason: 'each rebuild handed the SAME render object new data');
+    expect(paintCount, 3, reason: 'color changed -> markNeedsPaint -> paint reran each time');
+    expect(performLayoutCount, 1, reason: 'size never changed, so markNeedsLayout was never called -- layout is a SEPARATE dirty flag from paint');
+  });
+
+  testWidgets('a different key forces createRenderObject to run again', (tester) async {
+    reset();
+    await tester.pumpWidget(const MaterialApp(home: SpyLeaf(key: ValueKey('a'), color: Colors.red)));
+    expect(createRenderObjectCount, 1);
+
+    await tester.pumpWidget(const MaterialApp(home: SpyLeaf(key: ValueKey('b'), color: Colors.red)));
+
+    expect(createRenderObjectCount, 2, reason: 'Widget.canUpdate returned false for a key mismatch -- old element+render object torn down, new ones created');
+    expect(updateRenderObjectCount, 0, reason: 'no reuse happened, so update never ran');
+  });
+
+  testWidgets('a GlobalKey moves the SAME element (and its render object) to a new position -- no new createRenderObject', (tester) async {
+    reset();
+    final gk = GlobalKey();
+
+    await tester.pumpWidget(MaterialApp(
+      home: Row(children: [SpyLeaf(key: gk, color: Colors.red), const SizedBox(width: 5)]),
+    ));
+    expect(createRenderObjectCount, 1);
+    final firstRenderObject = tester.renderObject(find.byKey(gk));
+
+    // Move the SAME GlobalKey to a structurally different position -- wrapped
+    // in a new Padding, on the OTHER side of the sibling. A position-based
+    // (unkeyed) match would tear this down; GlobalKey identity does not.
+    await tester.pumpWidget(MaterialApp(
+      home: Row(children: [const SizedBox(width: 5), Padding(padding: const EdgeInsets.all(8), child: SpyLeaf(key: gk, color: Colors.blue))]),
+    ));
+
+    expect(createRenderObjectCount, 1, reason: 'GlobalKey reparenting reused the exact same RenderObject across a structural move');
+    expect(updateRenderObjectCount, 1, reason: 'the move was handled as an update, not a rebuild from scratch');
+    final secondRenderObject = tester.renderObject(find.byKey(gk));
+    expect(identical(firstRenderObject, secondRenderObject), isTrue, reason: 'literally the same RenderObject instance, proven by identical()');
+  });
+}
+```
+
+```text
+00:00 +0: same type + same key: createRenderObject runs once; updateRenderObject and paint run per rebuild; performLayout does NOT rerun when size is unaffected
+00:00 +1: a different key forces createRenderObject to run again
+00:00 +2: a GlobalKey moves the SAME element (and its render object) to a new position -- no new createRenderObject
+00:00 +3: All tests passed!
+```
+
+(ตัดทอนจากการรัน `flutter test test/lessons/flutter-internals__three-trees/` จริงบน Mac เครื่องนี้)
+
+สามผลลัพธ์จริงแยกกัน: (1) `performLayoutCount` นิ่งอยู่ที่ `1` ในขณะที่ `paintCount` ไต่ขึ้นไปถึง `3` คือหลักฐานตรงตัวว่า `markNeedsPaint` กับ `markNeedsLayout` เป็นอิสระต่อกัน — การเปลี่ยนสีคืองานที่เกี่ยวกับ paint เท่านั้น ถูกกว่าการเปลี่ยน size จริง ๆ; (2) key ที่ไม่ตรงกันทำให้ `createRenderObjectCount` เพิ่มเป็นสองเท่า ซึ่งเป็นภาพสะท้อนฝั่ง render tree ของการพิสูจน์ฝั่ง element tree ใน [Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/); (3) `identical(firstRenderObject, secondRenderObject)` คืนค่า `true` หลังจากย้าย widget ไปยังตำแหน่งที่โครงสร้างต่างออกไป คือหลักฐานที่หนักแน่นที่สุดของการ reparent ด้วย `GlobalKey` — ไม่ใช่ "render object ที่มี property เท่ากัน" แต่คือ object ตัวเดิมในหน่วยความจำ
+
+## พิสูจน์แล้ว: `debugDumpApp` ตัวจริงแบบตัดทอน
+
+`debugDumpApp()` dump element tree ที่มีชีวิตจริง ไม่ใช่คำอธิบายของมัน ตัวอย่างจริงที่ไม่ได้แก้ไขจาก `MaterialApp(home: Scaffold(body: Center(child: Text('Hi'))))` — root แล้ว (element ภายใน `MaterialApp` จำนวนมากถูกตัดออก) ตามด้วยเส้นทางไปยัง `Text` จริง ๆ:
+
+```text
+[root]
+└View(state: _ViewState#52074)
+ └RawView
+  └_RawViewInternal-[_DeprecatedRawViewKey TestFlutterView#f3f35](renderObject: _ReusableRenderView#c4d26)
+   └_ViewScope
+    └_PipelineOwnerScope
+     └_MediaQueryFromView(state: _MediaQueryFromViewState#7c2ad)
+      └MediaQuery(MediaQueryData(size: Size(800.0, 600.0), devicePixelRatio: 3.0, …))
+       └FocusTraversalGroup(policy: ReadingOrderTraversalPolicy#021dc, …)
+        …
+       └_BodyBuilder
+        └KeyedSubtree-[GlobalKey#71390]
+         └Center(alignment: Alignment.center, dependencies: [Directionality], renderObject: RenderPositionedBox#012fd relayoutBoundary=up1)
+          └Text("Hi", dependencies: [DefaultSelectionStyle, DefaultTextStyle, MediaQuery])
+           └RichText(softWrap: wrapping at box width, maxLines: unlimited, text: "Hi", …, renderObject: RenderParagraph#4728b relayoutBoundary=up2)
+```
+
+(จากการรัน `flutter test` จริงที่เรียก `debugDumpApp()` บน Mac เครื่องนี้ — output ที่ไม่ตัดทอนมีทั้งหมด 187 บรรทัดสำหรับ `MaterialApp` เดียว — `MaterialApp`/`Scaffold` เดินผ่านกลไก focus, navigation, theming, `FadeTransition`/`SlideTransition` ก่อนจะไปถึง `Center`/`Text` ของเราเองเสียอีก hash ของ object อย่าง `#71390` คือที่อยู่หน่วยความจำในการรันครั้งนั้น ไม่ใช่ identifier ที่คงที่) ทุก element ใน dump นี้คือ `Element` จริงที่มีชีวิตอยู่ใน tree ที่บทนี้กำลังอธิบาย — บรรทัดของ `Center` ยังระบุ `RenderObject` ของตัวเอง (`RenderPositionedBox#012fd`) และสถานะ `relayoutBoundary` ของมัน ซึ่งเป็นกลไกที่ [Layout and Paint Internals](/flutter/th/flutter-internals/layout-and-paint-internals/) จะพิสูจน์ต่อไป
+
+## Mental Model
+
+`Widget.canUpdate` คือแม่กุญแจสองฟิลด์ (`runtimeType`, `key`) และตารางของ `Element.updateChild` คือประตูที่มันเฝ้าอยู่: ชุดกุญแจเดียวกัน → `Element` ตัวเดิม (และพิสูจน์แล้วข้างบนว่า `RenderObject` ตัวเดิม) อยู่ที่เดิม แค่ได้รับข้อมูลใหม่ผ่าน `update`/`updateRenderObject`; ชุดกุญแจต่างกัน → ตัวเก่าถูกรื้อทิ้ง (`unmount`) แล้วสร้างตัวใหม่ (`mount`/`createElement`/`createRenderObject`) ตั้งแต่ต้น `markNeedsLayout` กับ `markNeedsPaint` คือสัญญาณเตือนสองตัวแยกกันบน render object ตัวเดิม — ดึงตัวหนึ่งไม่ได้ดึงอีกตัว พิสูจน์แล้วข้างบนด้วยการเปลี่ยนสีที่ทำให้ `paint()` รันใหม่สามครั้งในขณะที่ `performLayout()` รันแค่ครั้งเดียว `GlobalKey` คือกุญแจสำรองที่ตามล็อกไปไม่ว่าจะย้ายไปที่ไหนในตึก ซึ่งเป็นเหตุผลที่ `identical()` ข้างบนคืนค่า `true` แม้ตำแหน่งของ subtree ทั้งหมดของ widget จะเปลี่ยนไป
+
+## Trade-offs
+
+| กลไก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| การจับคู่ type+key (`Widget.canUpdate`) | reuse อัตโนมัติ ไม่ต้องเขียนโค้ดเพิ่ม สำหรับ rebuild ส่วนใหญ่ | key ชนกัน (type+key เดียวกันแต่ identity ทางตรรกะต่างกัน) จะเผลอใช้ state เก่าซ้ำโดยไม่มีเสียงเตือน — พบน้อยแต่มีจริง |
+| `GlobalKey` | reparent element/render object ข้ามการย้ายโครงสร้างแบบไหนก็ได้ พิสูจน์แล้วข้างบนด้วย `identical()` | ต้อง unique ทั้งแอป ซ้ำแล้ว throw; `GlobalKey` แต่ละตัวยังมีต้นทุนเป็นรายการใน lookup table |
+| dirty flag แยกกันของ layout/paint | การเปลี่ยนที่กระทบแค่ paint (พิสูจน์แล้วข้างบน) ไม่ต้องเสียค่า layout pass ที่ไม่จำเป็น | ถ้าทำผิดใน `RenderObject` ที่เขียนเอง (ลืมเรียก `markNeedsLayout` ตอน field ที่กระทบ layout เปลี่ยน) จะทำให้ layout ค้างเก่าแบบเงียบ ๆ — บั๊กจริงที่พลาดง่ายใน `RenderBox` subclass ที่เขียนมือ |
+| hook insert/move/remove ของ `RenderObjectElement` | รักษาความถูกต้องของ render tree โดยไม่ต้องเขียน logic เองในทุก element | variant ที่มีหลาย child (`MultiChildRenderObjectElement`) ต้อง track slot/forgotten children เอง — ความซับซ้อนจริงที่มีเอกสารรองรับ สำหรับ widget ที่มีจำนวน render child ไม่คงที่ |
+
+## Common Misconceptions
+
+- **"การตัดสินใจของ `Element.updateChild` ขึ้นอยู่กับมากกว่าแค่ type และ key"** พิสูจน์แล้วว่าผิดข้างบน: เนื้อหาทั้งหมดของ `Widget.canUpdate` คือ `oldWidget.runtimeType == newWidget.runtimeType && oldWidget.key == newWidget.key` — สองฟิลด์ อ้างตรงตัวจาก source
+- **"render object ถูก reuse โดยอัตโนมัติทุกครั้งที่ widget ของมันถูก reuse โดยไม่ต้องทำอะไรเพิ่ม"** การ reuse พิสูจน์แล้วข้างบน แต่มันไม่ใช่เวทมนตร์อัตโนมัติ — `RenderObjectElement.update` เรียก `updateRenderObject` ของเราตรง ๆ และถ้า override นั้นลืมเรียก `markNeedsLayout` สำหรับ field ที่กระทบ layout render object จะยังคง layout เก่าไว้แบบเงียบ ๆ
+- **"การเปลี่ยน property ใด ๆ ของ widget มีค่าใช้จ่ายเป็น layout + paint เต็มรูปแบบเสมอ"** พิสูจน์แล้วว่าผิดข้างบน: การเปลี่ยนแค่สีทำให้ `paint()` รันใหม่โดยที่ `performLayout()` ไม่เคยรันใหม่เลย — layout กับ paint เป็น dirty flag คนละตัว
+- **"`GlobalKey` แค่ให้ widget มี identifier ที่ unique มากขึ้น กลไกเดียวกับ `ValueKey`"** พิสูจน์แล้วข้างบนว่าต่างกันโดยโครงสร้าง: `ValueKey`/`ObjectKey` ที่ไม่ตรงกัน (test ที่สองของบทนี้) จะรื้อทิ้งแล้วสร้างใหม่; `GlobalKey` ที่ตรงกัน (test ที่สามของบทนี้) reparent object ตัวเดิมจริง ๆ ยืนยันด้วย `identical()` แม้จะอยู่ในตำแหน่งโครงสร้างที่ต่างไปโดยสิ้นเชิง
+
+## Reading AI-generated code
+
+รูปแบบหนึ่งที่ AI assistant มักหยิบมาใช้บ่อยอย่างน่าแปลกใจ: สร้าง `GlobalKey()` ใหม่ **ข้างใน `build()`** เพื่อ "ให้ widget นี้มี identity ที่เสถียร" ซึ่งตรงข้ามกับความเสถียรโดยสิ้นเชิง — พิสูจน์ตรง ๆ โดย test ที่สามของบทนี้เอง: การ reuse `GlobalKey` ทำงานได้ก็ต่อเมื่อมันเป็น *instance เดิม* ข้าม rebuild เท่านั้น ส่วน key ที่สร้างใหม่ทุกครั้งที่ `build()` ถูกเรียก คือ key ใหม่ทุกเฟรม
+
+```dart
+// @expect-error compiles clean -- creates a fresh GlobalKey every build, defeating the exact reuse this lesson proved requires the SAME key instance
+class ProfileAvatar extends StatelessWidget {
+  const ProfileAvatar({super.key, required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return KeyedSubtree(key: GlobalKey(), child: child);
+  }
+}
+```
+
+ก่อนเชื่อโค้ดที่ generate มาซึ่งใช้ `GlobalKey` ตรวจสอบ:
+
+- `GlobalKey` เป็น field แบบ `final` บน `State` หรือส่งมาจาก ancestor ที่เสถียร — ไม่ใช่สร้างขึ้นสด ๆ ข้างใน `build()` ใช่หรือไม่? key ที่สร้างใน `build()` คือ key ใหม่ทุก rebuild ซึ่ง (ตาม `Widget.canUpdate` ที่พิสูจน์แล้วข้างบน) ทำให้ `Element.updateChild` มองว่าเป็น identity ใหม่ทั้งหมดทุกครั้ง รื้อแล้วสร้าง subtree ใหม่ทุกเฟรม แทนที่จะรักษามันไว้
+- โค้ดจำเป็นต้องใช้ `GlobalKey` จริงหรือไม่? มันคือเครื่องมือ identity ที่หนักที่สุด (ต้อง unique ทั้งแอป มีต้นทุนเป็นรายการใน lookup table) สำหรับงานที่ `ValueKey`/`ObjectKey` (ขอบเขตแค่ sibling พิสูจน์แล้วว่าถูกกว่าใน test ที่สองข้างบน) มักทำได้ดีพอ ๆ กัน
+
+<SpotTheBug code={`class ReorderableAvatar extends StatefulWidget {
+  const ReorderableAvatar({required this.userId});
+  final String userId;
+
+  @override
+  State<ReorderableAvatar> createState() => _ReorderableAvatarState();
+}
+
+class _ReorderableAvatarState extends State<ReorderableAvatar> {
+  @override
+  Widget build(BuildContext context) {
+    return KeyedSubtree(
+      key: GlobalKey(debugLabel: widget.userId),
+      child: CircleAvatar(child: Text(widget.userId)),
+    );
+  }
+}`}>
+บั๊กเดียวกับข้างบน แค่สังเกตยากกว่าเพราะ `debugLabel: widget.userId` ทำให้ *ดู* เสถียร (label เดิมทุก rebuild) แต่จริง ๆ ไม่ใช่: `GlobalKey(debugLabel: ...)` ยังคงสร้าง `GlobalKey` object ใหม่ทุกครั้งที่ `build()` รัน — label มีไว้สำหรับ debug print เท่านั้น ไม่เกี่ยวกับความเท่ากัน ตาม `Widget.canUpdate` (พิสูจน์แล้วข้างบน, `oldWidget.key == newWidget.key`) ความเท่ากันของ `GlobalKey` ขึ้นอยู่กับ identity (ค่าเริ่มต้นของ `Object.==`) ดังนั้น `GlobalKey` สอง instance ที่มี `debugLabel` เหมือนกันจะไม่มีวัน `==` กัน ทางแก้: ยก key ไปเป็น field แบบ `final` ที่สร้างครั้งเดียวใน `initState` (`late final _avatarKey = GlobalKey(debugLabel: widget.userId);`) เพื่อให้ instance เดิมอยู่รอดทุก rebuild — ตรงตามเงื่อนไขที่ test ที่สามของบทนี้พิสูจน์ไว้ว่าจำเป็นสำหรับการ reparent จะ reuse render object แทนที่จะสร้างใหม่
+</SpotTheBug>
+
+export const quizThreeTrees = [
+  {
+    q: 'อ้างตามตารางใน doc comment ของ Element.updateChild เอง เกิดอะไรขึ้นเมื่อ child != null และ newWidget != null?',
+    options: [
+      'child เก่าถูกลบเสมอและคืนค่า null',
+      'child เก่าถูก update ถ้าเป็นไปได้ (ตาม Widget.canUpdate) คืนค่า child เดิมหรือ Element ใหม่',
+      'สร้าง Element ใหม่เสมอ ไม่สนใจ canUpdate',
+      'ไม่มีอะไรเกิดขึ้นจนกว่าจะถึงเฟรมถัดไป',
+    ],
+    answer: 1,
+    explain: 'ช่องของตารางที่อ้างไว้สำหรับ child != null / newWidget != null เขียนไว้ตรงตัวว่า "Old child updated if possible, returns child or new Element" — canUpdate เป็นตัวตัดสินว่าจะไปทางไหน',
+  },
+  {
+    q: 'อ้างตรงตัวจาก source 3.47.5 ที่ติดตั้งไว้ สองฟิลด์ที่ Widget.canUpdate เปรียบเทียบคืออะไร?',
+    options: [
+      'hashCode ของ widget และตำแหน่ง index',
+      'runtimeType และ key — ไม่มีอย่างอื่น',
+      'รายการ argument ทั้งหมดของ constructor',
+      'แค่ key เท่านั้น runtimeType ถูกมองข้าม',
+    ],
+    answer: 1,
+    explain: 'เนื้อหาทั้งหมดของ canUpdate ที่อ้างไว้ข้างบน: oldWidget.runtimeType == newWidget.runtimeType && oldWidget.key == newWidget.key',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบนด้วย counter จริง เกิดอะไรขึ้นกับ performLayoutCount เมื่อมีแค่ property ที่เกี่ยวกับ paint (สี) เปลี่ยนบน render object ที่ key เดิม?',
+    options: [
+      'เพิ่มขึ้นทุก rebuild เหมือน paintCount',
+      'นิ่งอยู่ที่ 1 ในขณะที่ paintCount ไต่ไปถึง 3 — markNeedsPaint ไม่เคยเรียก markNeedsLayout',
+      'รีเซ็ตเป็น 0 หลัง rebuild ครั้งที่สอง',
+      'test วัดสิ่งนี้ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'performLayoutCount นิ่งอยู่ที่ 1 ตลอดสาม rebuild ที่เปลี่ยนสี ในขณะที่ paintCount ไต่ไปถึง 3 — หลักฐานตรงตัวว่า layout กับ paint เป็น dirty flag คนละตัว',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบนด้วย identical() เกิดอะไรขึ้นกับ RenderObject เมื่อ GlobalKey ของ widget ย้ายไปยัง parent ที่โครงสร้างต่างออกไป?',
+    options: [
+      'สร้าง RenderObject ใหม่ที่มี property เท่ากัน',
+      'RenderObject instance เดิมถูกใช้ซ้ำจริง ๆ — identical() คืนค่า true ข้ามการย้ายโครงสร้าง',
+      'RenderObject ถูกทำลายและ layout รีเซ็ตเป็นศูนย์',
+      'GlobalKey ไม่มีผลต่อ render tree มีผลแค่ element tree',
+    ],
+    answer: 1,
+    explain: 'test เก็บ RenderObject ไว้ก่อนและหลังย้าย widget ที่ผูกกับ GlobalKey ไปยังตำแหน่งใหม่ที่ห่อด้วย Padding และ identical(firstRenderObject, secondRenderObject) เป็น true — object ตัวเดิมจริง ๆ',
+  },
+  {
+    q: 'ตาม doc comment ของ RenderObjectElement เอง สามเมธอดที่ดูแล render tree เมื่อ element tree เปลี่ยนคืออะไร?',
+    options: [
+      'build, layout, paint',
+      'insertRenderObjectChild, moveRenderObjectChild, removeRenderObjectChild',
+      'mount, update, unmount เท่านั้น ไม่มีเมธอดเฉพาะ render tree',
+      'createElement, updateChild, deactivateChild',
+    ],
+    answer: 1,
+    explain: 'อ้างตรงจาก doc comment ของ RenderObjectElement: insertRenderObjectChild เมื่อ descendant สร้าง render object, moveRenderObjectChild เมื่อ slot identity เปลี่ยน, removeRenderObjectChild เมื่อ descendant หายไป',
+  },
+  {
+    q: 'ใน SpotTheBug ข้างบน ทำไมการสร้าง GlobalKey(debugLabel: widget.userId) ใหม่ข้างใน build() ยังทำให้การ reparent พังอยู่ดี แม้ label จะเหมือนเดิมทุกครั้ง?',
+    options: [
+      'debugLabel ถูกใช้เป็นตัวเปรียบเทียบความเท่ากันจริง ๆ ดังนั้น label ที่ตรงกันควรใช้ได้แต่มีบั๊กใน framework',
+      'ความเท่ากันของ GlobalKey ขึ้นอยู่กับ identity (Object.== ค่าเริ่มต้น) — instance ใหม่ทุก build() ไม่มีวัน == กับตัวก่อนหน้า ไม่ว่า debugLabel จะตรงกันแค่ไหน',
+      'ใช้ GlobalKey ใน StatefulWidget ไม่ได้เลย',
+      'บั๊กนี้เกิดเฉพาะใน release build เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'debugLabel มีไว้สำหรับ debug print เท่านั้น Widget.canUpdate เปรียบเทียบ oldWidget.key == newWidget.key และ GlobalKey สอง object ที่ต่างกันจะไม่ == กันด้วย identity equality ค่าเริ่มต้น — ทางแก้คือยก key ไปเป็น field ที่สร้างครั้งเดียว ไม่ใช่สร้างใน build()',
+  },
+];
+
+<Quiz client:visible id="flutter-internals/three-trees" questions={quizThreeTrees} />
+
+<ProgressTracker client:visible id="flutter-internals/three-trees" />
