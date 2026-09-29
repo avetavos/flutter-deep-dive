@@ -1,6 +1,6 @@
 ---
 title: 'Stateless vs Stateful'
-description: 'The two base widgets, why State is a separate object from the widget, how State survives rebuilds, and when to reach for each.'
+description: 'The two base widgets, why State is a separate object from the widget, proven by test that a rebuilt StatefulWidget keeps its State while a key/type change does not, StatefulBuilder, flutter_hooks, and ValueNotifier for narrowing rebuild scope.'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Stateless: pure description
 
@@ -54,9 +55,17 @@ class _CounterState extends State<Counter> {
 
 `setState` does two things: it runs your mutation, then marks the element dirty so Flutter rebuilds. Without `setState`, you can change `_count` all day and the screen never updates — the framework doesn't know anything changed.
 
-## Why the split? So state survives rebuilds
+## Where state belongs
 
-The Widget is thrown away and recreated on every rebuild — so it *cannot* hold state that must persist. The `State` object is held by the **element**, which lives on across rebuilds. That is the entire reason for the two-class design.
+The question is never "stateless or stateful," it's **where** the state should live, and the answer follows the element tree directly:
+
+- **Local, ephemeral, nobody else cares** (a text field's focus ring, whether a card is expanded, an animation's current value) → keep it in that widget's own `State`. No reason to push it anywhere.
+- **Two or more sibling widgets need the same value, or a parent needs to react to a child's change** → lift the state to their nearest common ancestor's `State`, and pass it down as constructor arguments plus a callback. This is the same "lift state up" rule React developers already know.
+- **Many widgets across distant parts of the tree need it, and threading it through every constructor would be prop-drilling hell** → reach for `InheritedWidget`/`Provider`/Riverpod instead (see the [State Management module](/flutter/en/state-management/choosing-state-approach/)).
+
+## Proven: a rebuilt StatefulWidget keeps its State — a key or type change does not
+
+The widget is thrown away and recreated on every rebuild — so it *cannot* hold state that must persist. The `State` object is held by the **element**, which lives on across rebuilds; that is the entire reason for the two-class design. Provable directly by stamping an id on `State` the moment it's created (`initState`) and watching whether that id survives:
 
 <Mermaid title="The widget is recreated; its State persists on the element" code={splitDiagram} />
 
@@ -64,11 +73,336 @@ export const splitDiagram = `flowchart TB
   w1["Counter widget\n(rebuilt, discarded)"] -.->|createState once| s["_CounterState\n(persists on the element,\nkeeps _count)"]
   w2["Counter widget\n(new instance next build)"] -.->|reuses same State| s`;
 
-When the parent rebuilds and makes a *new* `Counter` widget, Flutter matches it to the existing element and hands it the *same* `_CounterState` — so `_count` is preserved. New widget, same state. (`didUpdateWidget` lets the State react to the new widget's data; full lifecycle is in the State Management module.)
+```dart
+// lib/state_persistence.dart
+import 'package:flutter/material.dart';
+
+int nextStateId = 0;
+
+/// Stamps a unique id in initState — proves whether THIS SAME State object
+/// survives across rebuilds, or whether a fresh one was created.
+class IdCounter extends StatefulWidget {
+  const IdCounter({super.key});
+  @override
+  IdCounterState createState() => IdCounterState();
+}
+
+class IdCounterState extends State<IdCounter> {
+  late final int stateId;
+  int count = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    stateId = nextStateId++; // only runs when a NEW State object is created
+  }
+
+  void increment() => setState(() => count++);
+
+  @override
+  Widget build(BuildContext context) => Text('id:$stateId count:$count');
+}
+```
+
+```dart
+// test/state_persistence_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/state_persistence.dart';
+
+void main() {
+  testWidgets('parent rebuild with the SAME key/type keeps the same State object', (tester) async {
+    nextStateId = 0;
+    final key = GlobalKey<IdCounterState>();
+
+    await tester.pumpWidget(MaterialApp(home: IdCounter(key: key)));
+    expect(key.currentState!.stateId, 0);
+
+    key.currentState!.increment();
+    await tester.pump();
+    expect(key.currentState!.count, 1, reason: 'same State object — count persisted');
+
+    // Rebuild the WHOLE app with a brand-new IdCounter widget instance,
+    // same key, same type — this is what a parent rebuild always does.
+    await tester.pumpWidget(MaterialApp(home: IdCounter(key: key)));
+
+    expect(key.currentState!.stateId, 0, reason: 'still the SAME State object — initState did not run again');
+    expect(key.currentState!.count, 1, reason: 'count survived the rebuild — new widget, same State');
+  });
+
+  testWidgets('changing the key forces a brand-new State object', (tester) async {
+    nextStateId = 0;
+
+    await tester.pumpWidget(const MaterialApp(home: IdCounter(key: ValueKey('a'))));
+    final firstState = tester.state<IdCounterState>(find.byType(IdCounter));
+    firstState.increment();
+    await tester.pump();
+    expect(firstState.count, 1);
+
+    // Same type, but a DIFFERENT key — a new element, a new State, from scratch.
+    await tester.pumpWidget(const MaterialApp(home: IdCounter(key: ValueKey('b'))));
+    final secondState = tester.state<IdCounterState>(find.byType(IdCounter));
+
+    expect(secondState.stateId, 1, reason: 'a fresh State object — initState ran again with a new id');
+    expect(secondState.count, 0, reason: 'the old count is gone — this is genuinely a new State, not the old one');
+  });
+}
+```
+
+```text
+00:00 +0: parent rebuild with the SAME key/type keeps the same State object
+00:00 +1: changing the key forces a brand-new State object
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__stateless-vs-stateful/` run on this Mac)
+
+`stateId` staying `0` across a full `pumpWidget` of a brand-new `IdCounter()` instance is the whole "why the split" argument made concrete: the *widget* is genuinely a different object each time, but Flutter looked at its type and key, matched it to the existing element, and handed that element's `State` the new widget without ever calling `initState` again. Change the key and the id jumps to `1` — proof that Flutter really did discard the old `State` and start over, exactly like the reorder problem the [Keys lesson](/flutter/en/widgets/keys/) covers in depth.
+
+## `StatefulBuilder`: local mutable state without a whole class
+
+Sometimes you want a small pocket of mutable state — inside a dialog, inside one branch of a larger `build` — without writing a full `StatefulWidget` subclass. `StatefulBuilder` gives you a `setState` scoped to just that builder:
+
+```dart
+showDialog(
+  context: context,
+  builder: (context) => StatefulBuilder(
+    builder: (context, setDialogState) {
+      var agreed = false;
+      return AlertDialog(
+        content: CheckboxListTile(
+          value: agreed,
+          onChanged: (v) => setDialogState(() => agreed = v!),
+          title: const Text('I agree'),
+        ),
+      );
+    },
+  ),
+);
+```
+
+It's the escape hatch for "just this one widget needs to rebuild itself" without the ceremony of a dedicated `State` class — reach for it in dialogs, bottom sheets, and other short-lived, self-contained pockets of UI.
+
+## Hooks-style alternatives
+
+The community package `flutter_hooks` (not part of the Flutter SDK) offers a React-hooks-flavored alternative to writing a `StatefulWidget`/`State` pair: `useState()`, `useEffect()`, `useAnimationController()` and friends let you keep local mutable state inside a `HookWidget`'s single `build` method instead of a separate class. It solves the same "state that outlives one build" problem as `StatefulWidget`, with a different ergonomic trade-off (no `State` subclass, but a set of ordering rules — hooks must be called unconditionally, in the same order, every build — borrowed directly from React's rules of hooks). This course does not add it as a dependency; mentioned here so generated code that imports `package:flutter_hooks/flutter_hooks.dart` doesn't look unfamiliar.
+
+## Proven: `ValueNotifier` + `ValueListenableBuilder` narrows the rebuild, plain lifted `setState` does not
+
+"Lift state up" is correct, but naive: calling `setState` in the ancestor's `State` marks *that element* dirty, and rebuilding it reruns its whole `build()` — every non-`const` child in that subtree rebuilds too, even ones that never read the value that changed. `ValueNotifier` + `ValueListenableBuilder` narrows the rebuild to exactly the builder that actually listens.
+
+```dart
+// lib/rebuild_scope.dart
+import 'package:flutter/material.dart';
+
+int liftedParentBuildCount = 0;
+int liftedSiblingBuildCount = 0;
+int notifierBuilderBuildCount = 0;
+int notifierSiblingBuildCount = 0;
+
+/// Approach A: state lifted into a StatefulWidget's State. A plain setState
+/// reruns the WHOLE build() — including a sibling that never reads count.
+class LiftedCounter extends StatefulWidget {
+  const LiftedCounter({super.key});
+  @override
+  LiftedCounterState createState() => LiftedCounterState();
+}
+
+class LiftedCounterState extends State<LiftedCounter> {
+  int count = 0;
+  void increment() => setState(() => count++);
+
+  @override
+  Widget build(BuildContext context) {
+    liftedParentBuildCount++;
+    return Column(children: [Text('$count'), _LiftedSibling()]);
+  }
+}
+
+/// Deliberately NOT const, to mirror the common real-world case where a
+/// sibling takes some other (non-constant) prop — it still never reads count.
+class _LiftedSibling extends StatelessWidget {
+  // ignore: prefer_const_constructors_in_immutables — non-const is the point of this demo
+  _LiftedSibling();
+  @override
+  Widget build(BuildContext context) {
+    liftedSiblingBuildCount++;
+    return const SizedBox();
+  }
+}
+
+/// Approach B: a ValueNotifier lives outside the widget tree's rebuild path;
+/// only the ValueListenableBuilder that actually reads it is rebuilt.
+class NotifierCounterScope extends StatelessWidget {
+  const NotifierCounterScope({super.key, required this.notifier});
+  final ValueNotifier<int> notifier;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ValueListenableBuilder<int>(
+          valueListenable: notifier,
+          builder: (context, value, _) {
+            notifierBuilderBuildCount++;
+            return Text('$value');
+          },
+        ),
+        const _NotifierSibling(),
+      ],
+    );
+  }
+}
+
+class _NotifierSibling extends StatelessWidget {
+  const _NotifierSibling();
+  @override
+  Widget build(BuildContext context) {
+    notifierSiblingBuildCount++;
+    return const SizedBox();
+  }
+}
+```
+
+```dart
+// test/rebuild_scope_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/rebuild_scope.dart';
+
+void main() {
+  testWidgets('lifted setState reruns the WHOLE build() — a non-listening sibling rebuilds too', (tester) async {
+    liftedParentBuildCount = 0;
+    liftedSiblingBuildCount = 0;
+
+    final key = GlobalKey<LiftedCounterState>();
+    await tester.pumpWidget(MaterialApp(home: LiftedCounter(key: key)));
+    expect(liftedParentBuildCount, 1);
+    expect(liftedSiblingBuildCount, 1);
+
+    key.currentState!.increment();
+    await tester.pump();
+    key.currentState!.increment();
+    await tester.pump();
+    key.currentState!.increment();
+    await tester.pump();
+
+    expect(liftedParentBuildCount, 4, reason: 'every increment reruns build()');
+    expect(liftedSiblingBuildCount, 4, reason: 'the sibling never reads count, yet it rebuilds every single time too');
+  });
+
+  testWidgets('ValueListenableBuilder rebuilds ONLY the builder — the sibling never moves', (tester) async {
+    notifierBuilderBuildCount = 0;
+    notifierSiblingBuildCount = 0;
+    final notifier = ValueNotifier<int>(0);
+
+    await tester.pumpWidget(MaterialApp(home: NotifierCounterScope(notifier: notifier)));
+    expect(notifierBuilderBuildCount, 1);
+    expect(notifierSiblingBuildCount, 1);
+
+    notifier.value++;
+    await tester.pump();
+    notifier.value++;
+    await tester.pump();
+    notifier.value++;
+    await tester.pump();
+
+    expect(notifierBuilderBuildCount, 4, reason: 'the builder listens to the notifier and rebuilds on each change');
+    expect(notifierSiblingBuildCount, 1, reason: 'the sibling never listens — its build count never moves, unlike the lifted-setState case above');
+    expect(find.text('3'), findsOneWidget);
+  });
+}
+```
+
+```text
+00:00 +0: lifted setState reruns the WHOLE build() — a non-listening sibling rebuilds too
+00:00 +1: ValueListenableBuilder rebuilds ONLY the builder — the sibling never moves
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__stateless-vs-stateful/` run on this Mac)
+
+Side by side: `liftedSiblingBuildCount` climbs from `1` to `4` in lockstep with a value it never reads, while `notifierSiblingBuildCount` stays flat at `1` through the same three updates. Lifting state up is still the right *first* move — it's simple and correct — but once a rebuild's cost is measured and matters, narrowing the listener (`ValueListenableBuilder`, `Selector`, Riverpod's `.select()`) is how you keep the correctness of "shared state" without paying to rebuild widgets that never asked for the new value.
 
 <Callout title="The one-line takeaway">
-Use `StatelessWidget` for UI that is a pure function of its inputs (most widgets). Use `StatefulWidget` when the UI changes over time — but the widget stays immutable and the mutable data lives in a separate `State` object, held by the persistent element. Call `setState` to mutate *and* trigger a rebuild; without it, the framework never knows to update.
+Use `StatelessWidget` for UI that is a pure function of its inputs. Use `StatefulWidget` when the UI changes over time — the widget stays immutable and the mutable data lives in a separate `State` object, held by the persistent element: proven above, a parent rebuild with the same key/type keeps the exact same `State` (same id, same fields), while a key or type change creates a fresh one from scratch. `StatefulBuilder` gives a scoped `setState` without a full class; `flutter_hooks` is a community alternative with the same goal. Naive "lift state up" rebuilds everything under the `setState` call, proven above — `ValueNotifier` + `ValueListenableBuilder` (or any narrower listener) rebuilds only what actually reads the value.
 </Callout>
+
+## Mental Model
+
+The widget is a **claim ticket**, not the coat. Every rebuild hands the cloakroom attendant (the element) a new ticket — new paper, same handwriting style (same type), same ticket number (same key) — and the attendant checks the number against the coat already hanging up (the `State`) rather than making you a new coat from scratch. Only a different ticket number (a different key) or a different *kind* of ticket (a different widget type) makes the attendant say "that's not mine, let me get you an entirely new coat" — proven above by `stateId` jumping when the key changes.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `StatelessWidget` | Simplest, cheapest, easiest to test and reason about | Cannot hold state that survives a rebuild on its own |
+| `StatefulWidget` + local `State` | State exactly where it's used, no dependency on anything external | Only visible to that widget and its children — not siblings |
+| Lift state to a common ancestor | Simple, explicit, no new machinery | Naive `setState` reruns the whole subtree below it — proven above |
+| `ValueNotifier` + `ValueListenableBuilder` | Narrows the rebuild to exactly the listener — proven above | One more object to create/dispose; only useful once you have a *scope* problem to solve |
+| `StatefulBuilder` | Zero-ceremony local state for a one-off widget (dialogs, sheets) | Not reusable — it's an inline pocket, not a real component |
+| `flutter_hooks` | No separate `State` class, familiar to React developers | Extra dependency; hooks-ordering rules to learn (call unconditionally, same order every build) |
+
+## Common Misconceptions
+
+- **"A StatefulWidget's fields hold the mutable state."** They're `final`, same as a `StatelessWidget` — the mutable data lives in the separate `State` object, proven above to persist independently of the widget.
+- **"Every rebuild creates a new `State`."** Proven false above: `stateId` stays identical across a full `pumpWidget` rebuild with the same key/type — only a key or type change creates a new one.
+- **"Lifting state up has no downside — it's just 'the React way'."** Proven above: a plain lifted `setState` reruns the entire subtree under it, including siblings that never read the changed value (`liftedSiblingBuildCount` climbing right alongside the counter).
+- **"`ValueNotifier`/`ValueListenableBuilder` is just Provider with extra steps."** It's simpler and has no dependency on `InheritedWidget` at all — it's a plain `Listenable` object plus a widget that subscribes/unsubscribes to it; Provider is built on top of similar ideas but adds `InheritedWidget`-based scoping.
+
+## Reading AI-generated code
+
+AI-generated Flutter code often reaches for a `StatefulWidget` out of habit even when nothing in the widget actually changes over time — or does the opposite: lifts every piece of state to the nearest common ancestor "to be safe," even for values only one leaf widget ever reads, creating exactly the over-broad rebuild proven above.
+
+```dart
+// @expect-error compiles clean — a scope bug, not an analyzer error: the sibling rebuilds needlessly
+class ProfileHeader extends StatefulWidget {
+  const ProfileHeader({super.key, required this.name});
+  final String name;
+
+  @override
+  State<ProfileHeader> createState() => _ProfileHeaderState();
+}
+
+class _ProfileHeaderState extends State<ProfileHeader> {
+  // No field here is ever mutated — this widget never needed to be stateful.
+  @override
+  Widget build(BuildContext context) {
+    return Text(widget.name);
+  }
+}
+```
+
+Before trusting generated widget code, check:
+
+- Does this `StatefulWidget` actually mutate a field anywhere, or is it a `StatelessWidget` wearing extra ceremony for no reason?
+- Is state that only one leaf widget reads being lifted all the way to a distant ancestor "to be safe," causing every sibling under that ancestor's `setState` to rebuild for no reason — proven above to be a real, measurable cost, not a style nitpick?
+- Does a `showDialog`/`showModalBottomSheet` builder need its own tiny bit of state? If so, is it reaching for a full `StatefulWidget` where a `StatefulBuilder` would do?
+
+<SpotTheBug code={`class VolumeSlider extends StatefulWidget {
+  const VolumeSlider({super.key, required this.onChanged});
+  final ValueChanged<double> onChanged;
+
+  @override
+  State<VolumeSlider> createState() => _VolumeSliderState();
+}
+
+class _VolumeSliderState extends State<VolumeSlider> {
+  double _volume = 0.5;
+
+  @override
+  Widget build(BuildContext context) {
+    return Slider(
+      value: _volume,
+      onChanged: (v) {
+        _volume = v;
+        widget.onChanged(v);
+      },
+    );
+  }
+}`}>
+`onChanged` mutates `_volume` directly but never calls `setState` — the field changes, but Flutter's element is never marked dirty, so the slider's own visual thumb position never updates on screen even though `_volume` (and the parent, via `widget.onChanged`) is perfectly correct internally. This is the mirror image of the lesson's opening example: `setState` does two things (mutate, then mark dirty), and skipping the second half leaves the UI stale exactly the way skipping `setState` entirely does. Fix: wrap the mutation in `setState(() => _volume = v);`.
+</SpotTheBug>
 
 export const quizStateful = [
   {
@@ -80,36 +414,62 @@ export const quizStateful = [
       'In the RenderObject',
     ],
     answer: 1,
+    explain: 'The widget stays immutable and disposable; State is a distinct object the element holds onto across rebuilds.',
   },
   {
-    q: 'What does calling setState do?',
+    q: 'Proven in this lesson by stamping a unique id in initState, what happens to a StatefulWidget\'s State when the PARENT rebuilds with a new widget instance of the same type and key?',
     options: [
-      'Only runs the mutation, nothing else',
-      'Runs the mutation and marks the element dirty so Flutter rebuilds',
-      'Creates a new widget class',
-      'Forces a full app restart',
+      'A brand-new State object is created every time, losing all fields',
+      'The exact same State object is reused — initState does not run again, and its fields (like a running count) survive',
+      'The State is reset to its initial values but the object identity stays',
+      'It depends on whether the widget is const',
     ],
     answer: 1,
+    explain: 'The probe test shows stateId staying at 0 and count staying at 1 across a full pumpWidget rebuild with the same key — proof it is genuinely the same State object.',
   },
   {
-    q: 'Why is State a separate object from the widget?',
+    q: 'In the same probe test, what happens when the KEY changes between two otherwise-identical StatefulWidgets?',
     options: [
-      'To make the code longer',
-      'Because the widget is recreated on every rebuild and cannot hold persistent state; State lives on the durable element',
-      'Because Dart forbids fields on widgets',
-      'For no real reason',
+      'Nothing — keys only matter for lists',
+      'A brand-new State object is created (new stateId, count reset to 0) — the old one is discarded',
+      'The old State object is reused but its id field is manually reset',
+      'It throws a runtime error',
     ],
     answer: 1,
+    explain: 'secondState.stateId came back as 1 (a fresh id) and count came back as 0 — proof a key change genuinely discards the old State and starts over.',
   },
   {
-    q: 'When should you choose a StatelessWidget?',
+    q: 'Proven in this lesson with real build counters, what is the actual cost of a naive "lifted" setState compared to ValueNotifier + ValueListenableBuilder?',
     options: [
-      'When the widget needs an animation controller',
-      'When the widget just renders its inputs and has no state of its own',
-      'Only for the root of the app',
-      'Never — always use StatefulWidget',
+      'They have identical rebuild scope — no real difference',
+      'The lifted setState reruns the whole build() below it (a non-listening sibling rebuilds too); ValueListenableBuilder rebuilds only the widget that actually listens',
+      'ValueListenableBuilder is always slower because it needs a separate object',
+      'Lifted setState only rebuilds widgets that read the changed value',
     ],
     answer: 1,
+    explain: 'liftedSiblingBuildCount climbed from 1 to 4 right alongside the counter it never reads, while notifierSiblingBuildCount stayed flat at 1 through the same three updates.',
+  },
+  {
+    q: 'What does StatefulBuilder provide that a plain StatelessWidget cannot?',
+    options: [
+      'Access to InheritedWidget ancestors',
+      'A setState scoped to just that builder, for a small pocket of local mutable state without writing a full State class',
+      'Automatic animation support',
+      'A way to skip the widget tree entirely',
+    ],
+    answer: 1,
+    explain: 'StatefulBuilder is the escape hatch for short-lived, self-contained mutable UI (dialogs, sheets) without the ceremony of a dedicated State subclass.',
+  },
+  {
+    q: 'How does this lesson describe flutter_hooks relative to StatefulWidget?',
+    options: [
+      'It replaces StatefulWidget entirely inside the Flutter SDK',
+      'A community (non-SDK) package offering a React-hooks-style alternative — useState/useEffect inside one build method instead of a separate State class, with its own hooks-ordering rules',
+      'It is only usable with Riverpod',
+      'It removes the need for BuildContext',
+    ],
+    answer: 1,
+    explain: 'flutter_hooks is explicitly a community package (not part of the SDK) that solves the same problem with a different ergonomic trade-off, borrowing React\'s rules of hooks (unconditional calls, same order every build).',
   },
 ];
 
