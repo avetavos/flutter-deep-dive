@@ -1,8 +1,164 @@
 ---
-title: 'flutter-internals'
-description: 'placeholder — being written'
+title: 'How Flutter Works Internally'
+description: 'Widget/Element/RenderObject จาก source จริง, สายโซ่ scheduling จริงจาก setState ไปสู่เฟรม, กฎ relayout-boundary ที่แน่นอน, สถาปัตยกรรมจริงของ Impeller และโมเดล thread UI-กับ-raster ตัวจริง, และ build pipeline จริง (gen_snapshot, dart2js) — ห้าบท ทุกข้อกล่าวอ้างพิสูจน์กับ source ของ Flutter 3.47.5 / Dart 3.13.4 ที่ติดตั้งไว้ หรือคำสั่งจริงที่รันบน Mac เครื่องนี้'
 sidebar:
   order: 0
 ---
 
-Placeholder.
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## โมดูลนี้มีไว้ทำอะไร
+
+ทุกโมดูลก่อนหน้านี้ในคอร์สสอนให้คุณ*ใช้*Flutter: สร้าง widget, จัดการ state, navigate, จัด layout หน้าจอ, ship build ไม่มีข้อไหนต้องรู้ว่า `setState` ทำอะไรจริง ๆ ข้างใต้, "relayout boundary" คืออะไร, ทำไม PSO ของ Impeller ถึง "precompiled", หรือ `gen_snapshot` สร้างอะไรจริง ๆ ช่องว่างนั้นแหละคือจุดที่คำอธิบาย Flutter ที่ฟังดูมั่นใจ (ไม่ว่ามนุษย์หรือ AI เขียน) ผิดพลาดในแบบที่ `flutter analyze` เพียงอย่างเดียวจับไม่ได้ — ข้อกล่าวอ้างที่ฟังดูสมเหตุสมผลอย่าง "UI thread กับ raster thread รวมกันแล้ว" หรือ "isolate แต่ละตัวมี heap แยกกันโดยสิ้นเชิง" อ่านดูน่าเชื่อถือจนกว่าคุณจะตรวจ source จริงหรือรันคำสั่งจริง
+
+โมดูลนี้ตอบคำถามภายในห้าข้อ แต่ละข้อพิสูจน์กับ source จริงของ Flutter 3.47.5 / Dart 3.13.4 ที่ติดตั้งไว้ (revision `6a19cca564`) หรือคำสั่งจริงที่รันบน Mac เครื่องนี้ ไม่เคยยืนยันจากความจำ:
+
+1. **เกิดอะไรขึ้นจริง ๆ ระหว่าง widget rebuild กับ pixel เปลี่ยน?** ([The Three Trees, From the Source](/flutter/th/flutter-internals/three-trees/) — `Widget.canUpdate`, ตาราง 4 กรณีจริงของ `Element.updateChild`, `RenderObjectWidget` ที่เขียนเองพิสูจน์ว่า `createRenderObject`/`updateRenderObject`/`performLayout`/`paint` คือ hook สี่ตัวที่กระตุ้นแยกกันได้ และการ reparent ด้วย `GlobalKey` พิสูจน์ด้วย `identical()`)
+2. **อะไรที่เปลี่ยน "widget เรียก `setState`" ให้เป็น "เฟรมหนึ่งรันจริง" และตามลำดับไหน?** ([Build Scheduling and Frames](/flutter/th/flutter-internals/build-scheduling-and-frames/) — `SchedulerPhase` enum จริง, doc comment 8 ขั้นของ `WidgetsBinding.drawFrame` เอง และ test จริงที่พิสูจน์ว่า `setState` แบบซิงโครนัสสองครั้งรวมกันเป็น build เดียว)
+3. **สายการเรียก `markNeedsLayout` หยุดไต่ tree ตรงไหนแน่ ๆ?** ([Layout and Paint Internals](/flutter/th/flutter-internals/layout-and-paint-internals/) — กฎ relayout-boundary ที่แน่นอนอ้างจาก source พิสูจน์ด้วยคู่ `RenderBox` ที่เขียนเองและ `debugDumpRenderTree` จริงที่แสดง annotation ของ boundary ปรากฏและหายไป)
+4. **Impeller แทนที่อะไรจริง ๆ และ "UI+raster รวมกันแล้ว" จริงไหม?** ([Impeller and the GPU](/flutter/th/flutter-internals/impeller-and-the-gpu/) — README ของ engine เองและ source ของ `Entity`/`Contents`/`RenderPass` และการแก้ไขจริง: การรวม thread ตั้งแต่ 3.29+ ที่มีเอกสารรองรับคือ UI+**platform** ไม่ใช่ UI+raster)
+5. **`flutter build` รันอะไรจริง ๆ และโมเดลหน่วยความจำของ Dart isolate หน้าตาเป็นแบบไหนจริง ๆ?** ([The Dart VM and Isolates](/flutter/th/flutter-internals/dart-vm-and-isolates/) — output แบบ verbose จริงของ `flutter build apk`/`flutter build web`, ELF `libapp.so` จริงที่แกะออกมาตรวจด้วย `file(1)` และหลักฐานสด ๆ ที่ grep เจอว่า branch ของ `kDebugMode` ถูกลบออกจาก release build)
+
+<Callout title="สรุปหนึ่งบรรทัด">
+กลไกทั้งห้านี้พิสูจน์ได้จากภายนอกด้วย tool ที่คุณมีอยู่แล้ว — source ของ `~/flutter` ที่ติดตั้งไว้เอง, `flutter test`, `debugDumpRenderTree`/`debugDumpApp`, และ `flutter build -v` — ไม่ใช่สิ่งที่ต้องเชื่อจาก diagram หรือย่อหน้าที่ฟังดูมั่นใจ งานของโมดูลนี้คือแสดง tool เหล่านั้นชี้ไปที่ Flutter 3.47.5 / Dart 3.13.4 ตัวจริงที่ตรึงไว้สำหรับคอร์สนี้ เพื่อว่าเมื่อคุณอ่านข้อกล่าวอ้างของคนอื่น (หรือ AI) เกี่ยวกับ "Flutter ทำงานยังไงข้างใต้" คุณจะรู้ตรง ๆ ว่าคำสั่งหรือไฟล์ source ไหนจะพิสูจน์หรือหักล้างมันได้
+</Callout>
+
+## การพิสูจน์แต่ละอย่างในโมดูลนี้ทำอย่างไร
+
+ทุกข้อกล่าวอ้างระดับ source ด้านล่างอ้าง permalink จริงเข้าไปใน `github.com/flutter/flutter` ที่ revision ที่คอร์สนี้ตรึงไว้ `6a19cca564` (Flutter 3.47.5) หรือ `github.com/dart-lang/sdk` ที่ tag ที่ตรงกัน `3.13.4` — revision เดียวกับที่ `flutter --version` รายงานบน Mac เครื่องนี้ ดังนั้นทุกเลขบรรทัดที่อ้างจะตรงกับที่ลิงก์ไว้ แม้ SDK นี้จะอัปเกรดในอนาคต ทุกข้อกล่าวอ้างระดับ runtime คือการรัน `flutter test` จริงกับ probe ที่ share ของคอร์สนี้ (output ตัดทอนจริง ไม่เคยแต่งขึ้น) และทุกข้อกล่าวอ้างเกี่ยวกับ build pipeline (ข้อความ `--help` ของ CLI ของ [Impeller and the GPU](/flutter/th/flutter-internals/impeller-and-the-gpu/), output ของ `flutter build apk`/`flutter build web -v` ของ [The Dart VM and Isolates](/flutter/th/flutter-internals/dart-vm-and-isolates/)) คือคำสั่งจริงที่รันบน Mac เครื่องนี้ ผ่าน probe หรือแอป scratch จาก `flutter create` แบบใช้แล้วทิ้งสำหรับสิ่งที่ probe ที่ share รันไม่ได้อย่างปลอดภัย (การ build APK/web เต็มรูปแบบ) จุดที่สภาพแวดล้อมนี้ไม่มี device และข้อกล่าวอ้างยืนยันในเครื่องจริง ๆ ไม่ได้ (screenshot ของ DevTools raster-stats, frame trace จริงของ Impeller ใน production) แต่ละบทพูดตรง ๆ แทนที่จะเดา
+
+<Mermaid title="ห้าบทภายในเรียงตามลำดับที่ต่อยอดกัน" code={moduleMap} />
+
+export const moduleMap = `flowchart TD
+  t["The Three Trees, From the Source\\n(Widget/Element/RenderObject)"] --> f["Build Scheduling and Frames\\n(setState -> a real frame)"]
+  t --> l["Layout and Paint Internals\\n(the relayout-boundary rule)"]
+  f --> l
+  l --> i["Impeller and the GPU\\n(what actually runs on the raster thread)"]
+  f --> v["The Dart VM and Isolates\\n(the real build pipeline)"]
+  i --> v`;
+
+## ลำดับการอ่าน และแต่ละบทสมมติอะไรไว้
+
+| บท | ต่อยอดจาก (Phase 3) | ตอบคำถามอะไร |
+|---|---|---|
+| [The Three Trees, From the Source](/flutter/th/flutter-internals/three-trees/) | [Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/) | ทำไม rebuild แบบ type/key เดิมถึง reuse `Element` และ `Widget.canUpdate` เปรียบเทียบอะไรจริง ๆ? |
+| [Build Scheduling and Frames](/flutter/th/flutter-internals/build-scheduling-and-frames/) | [The Render Pipeline](/flutter/th/layout-and-rendering/render-pipeline/), [Async in Dart](/flutter/th/dart-foundations/async-in-dart/) | สายโซ่จริงจากการเรียก `setState()` หนึ่งครั้งไปสู่เฟรมที่ถูก schedule หนึ่งครั้งคืออะไร และทำไม `setState` ที่ซ้ำซ้อนถึงรวมกัน? |
+| [Layout and Paint Internals](/flutter/th/flutter-internals/layout-and-paint-internals/) | [Constraints & Layout](/flutter/th/layout-and-rendering/constraints-and-layout/), [The Render Pipeline](/flutter/th/layout-and-rendering/render-pipeline/) | การเรียก `markNeedsLayout()` หยุดแพร่ขึ้น tree ตรงไหนแน่ ๆ? |
+| [Impeller and the GPU](/flutter/th/flutter-internals/impeller-and-the-gpu/) | [The Render Pipeline](/flutter/th/layout-and-rendering/render-pipeline/) | สถาปัตยกรรมจริงของ Impeller คืออะไร และ UI thread กับ raster thread รวมกันจริงไหม? |
+| [The Dart VM and Isolates](/flutter/th/flutter-internals/dart-vm-and-isolates/) | [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/), [Build & Release](/flutter/th/tooling-and-production/build-and-release/) | `flutter build` เรียกอะไรจริง ๆ และโมเดลหน่วยความจำของ isolate หน้าตาเป็นแบบไหนจริง ๆ? |
+
+แต่ละบท Phase 3 ที่ลิงก์ไว้ข้างบนแสดงมุมมอง*ภายนอก*ให้คุณแล้ว (widget test ที่นับ rebuild, ขนาดที่รายงานจริงของ build จริง, ข้อความ error จริง) โมดูลนี้แสดงกลไก*เบื้องหลัง*มุมมองนั้น — มันไม่ได้สอนมุมมองภายนอกซ้ำ แต่ลิงก์ไปหามันแล้วลงลึกไปอีกชั้น
+
+## Mental Model
+
+ทุกบทในโมดูลนี้คือแนวคิดเดียวกันที่นำไปใช้กับคนละชั้น: **ภายในของ Flutter ไม่ใช่กล่องดำ — มันคือชุด source file และคำสั่งที่รันได้จริงที่ตายตัว ซึ่งจะแสดงกลไกจริงให้คุณเห็นตรง ๆ เสมอ** "rebuild แพง" ไม่ใช่คำขวัญ มันคือการทดสอบสองฟิลด์ที่แน่นอนของ `Widget.canUpdate` พิสูจน์ได้ด้วย spy "relayout boundary หยุดการไต่" ไม่ใช่อุปมา มันคือบรรทัดเดียวตรงตัว `_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null` พิสูจน์ได้ด้วย counter และ `debugDumpRenderTree` จริง "Impeller กำจัด shader jank" ไม่ใช่การตลาด มันคือ doc comment ของ `ContentContextOptions` เองที่จำกัดจำนวน PSO variant ไว้ที่ "หลายร้อย ไม่ใช่หมื่น" เมื่อคุณรู้ว่า source file หรือคำสั่งไหนพิสูจน์ข้อกล่าวอ้างไหน "เชื่อฉันสิ Flutter ทำงานแบบนี้ข้างใต้" ก็ไม่จำเป็นอีกต่อไป — สำหรับข้อกล่าวอ้างของคุณเอง และสำหรับตัดสินข้อกล่าวอ้างของ AI
+
+## Common Misconceptions
+
+- **"widget rebuild หมายความว่ามี `RenderObject` ใหม่เสมอ"** [The Three Trees](/flutter/th/flutter-internals/three-trees/) พิสูจน์ตรงข้ามด้วย counter จริง: `createRenderObject` รันครั้งเดียว; rebuild ที่ key เดิมจ่ายแค่ค่า `updateRenderObject` เท่านั้น
+- **"เรียก `setState` สองครั้งเสมอทำให้เกิด rebuild สองครั้ง"** [Build Scheduling and Frames](/flutter/th/flutter-internals/build-scheduling-and-frames/) พิสูจน์ว่า guard `if (dirty) return;` ของ `Element.markNeedsBuild` เองรวมการเรียกแบบซิงโครนัสสองครั้งให้เหลือ build เดียวเป๊ะ
+- **"การทำเครื่องหมาย widget ว่าต้อง layout ทำให้ทุกอย่างข้างบนมัน relayout เสมอ"** [Layout and Paint Internals](/flutter/th/flutter-internals/layout-and-paint-internals/) พิสูจน์ว่า relayout boundary ดูดซับ dirty flag จริง ๆ — `debugDumpRenderTree` จริงยืนยันจากมุมที่สองที่เป็นอิสระ
+- **"Impeller รวม UI thread กับ raster thread เข้าด้วยกัน"** [Impeller and the GPU](/flutter/th/flutter-internals/impeller-and-the-gpu/) พิสูจน์ด้วย quote จริงจาก `docs.flutter.dev` ว่าการรวมจริงตั้งแต่ 3.29+ คือ UI+platform บน iOS/Android — raster thread ที่ Impeller/Skia คุยกับ GPU จริง ๆ ไม่เคยถูกรวมกับ UI thread เลย
+- **"Dart isolate แต่ละตัวมี heap แยกกันโดยสิ้นเชิง"** [The Dart VM and Isolates](/flutter/th/flutter-internals/dart-vm-and-isolates/) พิสูจน์จาก glossary ของ `dart-lang/sdk` เองว่า isolate ใน group เดียวกัน share heap — แล้วพิสูจน์สด ๆ ว่าการส่ง message ของ `compute()` ยัง copy ไม่ใช่ alias ไม่ว่าจะอย่างไร
+
+## Reading AI-generated code
+
+ตัวอย่างของรูปแบบที่ทุกบทในโมดูลนี้พิสูจน์อย่างน้อยหนึ่งครั้ง: ข้อกล่าวอ้างเกี่ยวกับภายในของ Flutter ที่ฟังดูสมเหตุสมผลแต่การอ้างอิง source จริงหรือ test จริงหักล้างได้
+
+<SpotTheBug code={`// A comment an AI assistant added above a custom RenderBox
+// "sizedByParent means the framework never needs to re-check this
+// widget's layout when its internal state changes -- just call
+// markNeedsLayout() like any other render object."
+class _RenderFixedHeightBox extends RenderBox {
+  @override
+  bool get sizedByParent => true;
+
+  double _height = 40;
+  set targetHeight(double v) {
+    _height = v;
+    markNeedsLayout();
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      constraints.constrain(Size(constraints.maxWidth, _height));
+}`}>
+พิสูจน์แล้วว่าผิดใน [Layout and Paint Internals](/flutter/th/flutter-internals/layout-and-paint-internals/) ด้วย test จริงที่รันแล้ว: object ที่ `sizedByParent: true` เป็น relayout boundary ของตัวเองเสมอ (พิสูจน์จากกฎ source ที่แน่นอนที่บทนั้นอ้างไว้) ซึ่งหมายความว่า `markNeedsLayout()` เฉย ๆ ไม่เคยแจ้ง parent เลยเมื่อ *size ของ object นี้เอง* เปลี่ยน — parent เก็บ size เก่าไว้แบบเงียบ ๆ doc comment ของ `sizedByParent` เองต้องการ `markNeedsLayoutForSizedByParentChange()` แทนสำหรับกรณีนี้เป๊ะ และ test ของบทนั้นพิสูจน์ความต่างตรง ๆ: ด้วยการเรียกเฉย ๆ width ของ child ที่ parent สังเกตเห็นค้างอยู่ที่ค่าเก่า; ด้วยการเรียกที่ถูกต้อง มันอัปเดต
+</SpotTheBug>
+
+export const quizFlutterInternalsIndex = [
+  {
+    q: 'โมดูลนี้อ้าง permalink เข้าไปใน github.com/flutter/flutter และ github.com/dart-lang/sdk มันตรึงไว้ที่ revision/tag ไหน และทำไมถึงสำคัญ?',
+    options: [
+      'branch "main" เพื่อให้ลิงก์แสดงโค้ดล่าสุดเสมอ',
+      'revision/tag ที่แน่นอนที่ SDK ที่ติดตั้งในคอร์สนี้รายงาน (revision ของ framework จาก flutter --version และ tag ที่ตรงกันของ Dart SDK) — เพื่อให้ทุกเลขบรรทัดที่อ้างถูกต้องแม้หลัง SDK อัปเกรดในอนาคต',
+      'commit ที่สุ่มเลือกมาเพื่อความสั้น',
+      'revision ที่ใช้ตอน Flutter 1.0 ออก',
+    ],
+    answer: 1,
+    explain: 'permalink ทุกอันในโมดูลนี้ชี้ไปที่ revision 6a19cca564 (framework/engine) หรือ tag 3.13.4 (Dart SDK) — เวอร์ชันที่แน่นอนที่ติดตั้งบน Mac เครื่องนี้ ยืนยันด้วย flutter --version ดังนั้นเลขบรรทัดที่อ้างจะตรงกับที่ลิงก์ไว้เสมอ',
+  },
+  {
+    q: 'พิสูจน์แล้วใน The Three Trees ด้วย spy ระดับ render-object จริง เกิดอะไรขึ้นกับ createRenderObject เมื่อ widget type และ key เดิม rebuild โดยเปลี่ยนแค่ property ที่กระทบ paint?',
+    options: [
+      'createRenderObject รันใหม่ทุกครั้ง',
+      'createRenderObject รันครั้งเดียว; render object ที่ reuse จ่ายแค่ค่า updateRenderObject และ performLayout ไม่รันใหม่เพราะ size ไม่เคยเปลี่ยน',
+      'ไม่มีอะไรเกิดขึ้นเลย — widget ถูกมองข้าม',
+      'สร้าง Element ใหม่แต่ RenderObject ถูก reuse',
+    ],
+    answer: 1,
+    explain: 'test ที่ spy ในบทนั้นแสดง createRenderObjectCount นิ่งอยู่ที่ 1 ในขณะที่ updateRenderObjectCount กับ paintCount ไต่ขึ้น — การ reuse ไม่ใช่การสร้างใหม่',
+  },
+  {
+    q: 'พิสูจน์แล้วใน Build Scheduling and Frames ด้วย build counter จริง guard การ schedule ตัวจริงเบื้องหลัง "การเรียก setState ซ้ำซ้อนไม่มีต้นทุน" คืออะไร?',
+    options: [
+      'Flutter เพิกเฉยต่อการเรียก setState ทุกครั้งหลังครั้งแรกในเฟรมแบบเงียบ ๆ',
+      'บรรทัด "if (dirty) { return; }" ของ Element.markNeedsBuild เอง — การเรียกครั้งที่สองบน element ที่ dirty อยู่แล้วเป็น no-op จริงในระดับ scheduling',
+      'การเรียก setState ถูกจัดคิวและรันครั้งละหนึ่งข้ามหลายเฟรม',
+      'ไม่มี guard แบบนี้ มันคือความบังเอิญของจังหวะ test',
+    ],
+    answer: 1,
+    explain: 'อ้างตรงจาก source ในบทนั้น: guard คือสองบรรทัดจริงข้างใน markNeedsBuild พิสูจน์ด้วย test ที่เรียก setState แบบซิงโครนัสสองครั้งแล้วได้ rebuild แค่ครั้งเดียวเป๊ะ',
+  },
+  {
+    q: 'พิสูจน์แล้วใน Layout and Paint Internals อ้างตรงตัวจาก RenderObject.layout กฎ relayout-boundary ที่แน่นอนคืออะไร?',
+    options: [
+      '_isRelayoutBoundary เป็น true เสมอ',
+      '_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null',
+      '_isRelayoutBoundary ขึ้นกับ runtimeType ของ widget เท่านั้น',
+      '_isRelayoutBoundary ถูกตั้งโดย heuristic ตอน runtime ไม่ใช่สูตรตายตัว',
+    ],
+    answer: 1,
+    explain: 'บรรทัดที่แน่นอนที่อ้างจาก object.dart พิสูจน์ด้วยคู่ RenderBox ที่เขียนเองแสดงว่า markNeedsLayout() ของ child ที่ constraints แบบ tight ไม่เคยไปถึง parent ของมัน ในขณะที่ child ที่ constraints แบบ loose ไปถึง',
+  },
+  {
+    q: 'พิสูจน์แล้วใน Impeller and the GPU ด้วย quote จริงจาก docs.flutter.dev การรวม thread ตัวจริงที่เกิดขึ้นตั้งแต่ Flutter 3.29 คืออะไร?',
+    options: [
+      'UI กับ raster thread รวมกัน บนทุกแพลตฟอร์ม',
+      'UI กับ platform thread รวมกัน (UI thread ถูกลบออก; Dart รันบน native platform thread) เฉพาะ iOS และ Android — raster thread ยังแยกอยู่',
+      'ไม่เคยมีการรวมเกิดขึ้นเลย',
+      'raster thread ถูกลบออกทั้งหมด',
+    ],
+    answer: 1,
+    explain: 'อ้างตรง: "As of Flutter 3.29, the UI and platform threads are merged on iOS and Android... the UI thread is removed and the Dart code runs on the native platform thread" — ไม่ใช่ raster thread ที่ Impeller/Skia รันจริง',
+  },
+  {
+    q: 'พิสูจน์แล้วใน The Dart VM and Isolates ด้วยการแกะ APK ที่ build จริง การรันคำสั่ง Unix มาตรฐาน file(1) บน libapp.so แสดงอะไร?',
+    options: [
+      'รูปแบบ binary เฉพาะของ Flutter',
+      'ELF shared library ARM64 จริง — ยืนยันตรง ๆ ตรงกับข้อกล่าวอ้างของ glossary ของ dart-lang/sdk เองเรื่อง output ของ AOT compiler',
+      'ไฟล์ text ธรรมดา',
+      'คำสั่ง file จำแนกมันไม่ได้',
+    ],
+    answer: 1,
+    explain: 'output จริงไม่ได้แก้ไขของ file(1): "ELF 64-bit LSB shared object, ARM aarch64... stripped" — output จริง มาตรฐาน ตรวจสอบได้ของ gen_snapshot',
+  },
+];
+
+<Quiz client:visible id="flutter-internals/index" questions={quizFlutterInternalsIndex} />
+
+<ProgressTracker client:visible id="flutter-internals/index" />

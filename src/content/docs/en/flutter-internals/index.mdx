@@ -1,8 +1,164 @@
 ---
-title: 'flutter-internals'
-description: 'placeholder — being written'
+title: 'How Flutter Works Internally'
+description: 'Widget/Element/RenderObject from the source, the real setState-to-frame scheduling chain, the exact relayout-boundary rule, Impeller''s real architecture and the real UI-vs-raster thread model, and the real build pipeline (gen_snapshot, dart2js) -- five lessons, every claim proven against the installed Flutter 3.47.5 / Dart 3.13.4 source or a real command run on this Mac.'
 sidebar:
   order: 0
 ---
 
-Placeholder.
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## What this module is for
+
+Every earlier module in this course taught you to *use* Flutter: build widgets, manage state, navigate, lay out screens, ship a build. None of it required knowing what `setState` actually does underneath, what a "relayout boundary" is, why Impeller's PSOs are "precompiled," or what `gen_snapshot` actually produces. That gap is exactly where a confident-sounding explanation of Flutter (human- or AI-written) goes wrong in ways `flutter analyze` alone won't catch -- a plausible-sounding claim about "the UI and raster threads merging" or "each isolate having its own totally separate heap" reads as authoritative right up until you check the actual source or run the actual command.
+
+This module answers five internals questions, each proven against the real, installed Flutter 3.47.5 / Dart 3.13.4 source (revision `6a19cca564`) or a real command run on this Mac, never asserted from memory:
+
+1. **What actually happens between a widget rebuilding and a pixel changing?** ([The Three Trees, From the Source](/flutter/en/flutter-internals/three-trees/) -- `Widget.canUpdate`, `Element.updateChild`'s real four-case table, a custom `RenderObjectWidget` proving `createRenderObject`/`updateRenderObject`/`performLayout`/`paint` are four separately-triggerable hooks, and `GlobalKey` reparenting proven with `identical()`)
+2. **What turns "a widget called `setState`" into "a frame actually runs," and in what order?** ([Build Scheduling and Frames](/flutter/en/flutter-internals/build-scheduling-and-frames/) -- the real `SchedulerPhase` enum, `WidgetsBinding.drawFrame`'s own 8-step doc comment, and a real test proving two synchronous `setState` calls coalesce into exactly one build)
+3. **Where, precisely, does a chain of `markNeedsLayout` calls stop climbing the tree?** ([Layout and Paint Internals](/flutter/en/flutter-internals/layout-and-paint-internals/) -- the exact relayout-boundary rule quoted from source, proven with a custom `RenderBox` pair and a real `debugDumpRenderTree` showing the boundary annotation appear and disappear)
+4. **What does Impeller actually replace, and is "UI+raster merged" even true?** ([Impeller and the GPU](/flutter/en/flutter-internals/impeller-and-the-gpu/) -- the engine's own README and `Entity`/`Contents`/`RenderPass` source, and a real correction: the documented 3.29+ thread merge is UI+**platform**, not UI+raster)
+5. **What does `flutter build` actually run, and what does a Dart isolate's memory model really look like?** ([The Dart VM and Isolates](/flutter/en/flutter-internals/dart-vm-and-isolates/) -- real, verbose `flutter build apk`/`flutter build web` output, a real ELF `libapp.so` extracted and inspected with `file(1)`, and a live, grepped proof that a `kDebugMode` branch is deleted from a release build)
+
+<Callout title="The one-line takeaway">
+Every one of these five mechanisms is provable from the outside with tools you already have -- the installed `~/flutter` source itself, `flutter test`, `debugDumpRenderTree`/`debugDumpApp`, and `flutter build -v` -- not something you have to trust from a diagram or a confident-sounding paragraph. This module's job is to show you those tools pointed at the real, pinned Flutter 3.47.5 / Dart 3.13.4 installed for this course, so that when you read someone else's (or an AI's) claim about "what Flutter does under the hood," you know exactly which command or source file would prove or disprove it.
+</Callout>
+
+## How every proof in this module was made
+
+Every source-level claim below cites a real permalink into `github.com/flutter/flutter` at this course's pinned revision `6a19cca564` (Flutter 3.47.5), or `github.com/dart-lang/sdk` at the matching pinned tag `3.13.4` -- the same revision `flutter --version` reports on this Mac, so every quoted line number matches what's linked, even after this SDK is eventually upgraded. Every runtime claim is a real `flutter test` run against this course's shared probe (real, trimmed output, never fabricated), and every build-pipeline claim ([Impeller and the GPU](/flutter/en/flutter-internals/impeller-and-the-gpu/)'s CLI `--help` text, [The Dart VM and Isolates](/flutter/en/flutter-internals/dart-vm-and-isolates/)'s `flutter build apk`/`flutter build web -v` output) is a real command run on this Mac, either through the probe or a throwaway scratch `flutter create` app for anything the shared probe can't safely run (a full APK/web build). Where this environment has no device and a claim genuinely can't be verified locally (DevTools raster-stats screenshots, a real production Impeller frame trace), each lesson says so directly instead of guessing.
+
+<Mermaid title="The five internals lessons, in the order they build on each other" code={moduleMap} />
+
+export const moduleMap = `flowchart TD
+  t["The Three Trees, From the Source\\n(Widget/Element/RenderObject)"] --> f["Build Scheduling and Frames\\n(setState -> a real frame)"]
+  t --> l["Layout and Paint Internals\\n(the relayout-boundary rule)"]
+  f --> l
+  l --> i["Impeller and the GPU\\n(what actually runs on the raster thread)"]
+  f --> v["The Dart VM and Isolates\\n(the real build pipeline)"]
+  i --> v`;
+
+## Reading order and what each lesson assumes
+
+| Lesson | Builds on (Phase 3) | Answers |
+|---|---|---|
+| [The Three Trees, From the Source](/flutter/en/flutter-internals/three-trees/) | [Widgets and the Tree](/flutter/en/widgets/widgets-and-the-tree/) | Why does same-type-same-key reuse an `Element`, and what does `Widget.canUpdate` actually compare? |
+| [Build Scheduling and Frames](/flutter/en/flutter-internals/build-scheduling-and-frames/) | [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/), [Async in Dart](/flutter/en/dart-foundations/async-in-dart/) | What is the real chain from one `setState()` call to one scheduled frame, and why do redundant `setState` calls coalesce? |
+| [Layout and Paint Internals](/flutter/en/flutter-internals/layout-and-paint-internals/) | [Constraints & Layout](/flutter/en/layout-and-rendering/constraints-and-layout/), [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) | Where, exactly, does a `markNeedsLayout()` call stop propagating up the tree? |
+| [Impeller and the GPU](/flutter/en/flutter-internals/impeller-and-the-gpu/) | [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) | What is Impeller's real architecture, and are the UI and raster threads actually merged? |
+| [The Dart VM and Isolates](/flutter/en/flutter-internals/dart-vm-and-isolates/) | [Isolates & compute](/flutter/en/async-and-performance/isolates-and-compute/), [Build & Release](/flutter/en/tooling-and-production/build-and-release/) | What does `flutter build` actually invoke, and what does an isolate's memory model really look like? |
+
+Each Phase 3 lesson linked above already showed you the *outside* view (a widget test counting rebuilds, a real build's reported size, a real error message). This module shows the mechanism *behind* that view -- it does not re-teach the outside view, it links to it and goes one level deeper.
+
+## Mental Model
+
+Every lesson in this module is the same idea applied to a different layer: **Flutter's internals are not a black box -- they are a fixed set of source files and real, runnable commands that will always show you the actual mechanism directly.** "Rebuilding is expensive" is not a slogan; it's `Widget.canUpdate`'s exact two-field test, provable with a spy. "A relayout boundary stops the climb" is not a metaphor; it's one literal line, `_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null`, provable with a counter and a real `debugDumpRenderTree`. "Impeller removed shader jank" is not marketing; it's `ContentContextOptions`' own doc comment bounding PSO variants at "hundreds, not 10,000s." Once you know which source file or which command proves which claim, "trust me, that's how Flutter works under the hood" stops being necessary -- for your own claims, and for judging an AI's.
+
+## Common Misconceptions
+
+- **"A widget rebuilding always means a new `RenderObject`."** [The Three Trees](/flutter/en/flutter-internals/three-trees/) proves the opposite with a real counter: `createRenderObject` runs once; same-key rebuilds only ever pay for `updateRenderObject`.
+- **"Calling `setState` twice always triggers two rebuilds."** [Build Scheduling and Frames](/flutter/en/flutter-internals/build-scheduling-and-frames/) proves `Element.markNeedsBuild`'s own `if (dirty) return;` guard coalesces two synchronous calls into exactly one.
+- **"Marking a widget as needing layout always relays out everything above it."** [Layout and Paint Internals](/flutter/en/flutter-internals/layout-and-paint-internals/) proves a relayout boundary genuinely absorbs the dirty flag -- a real `debugDumpRenderTree` confirms it from a second, independent angle.
+- **"Impeller merged the UI thread and the raster thread."** [Impeller and the GPU](/flutter/en/flutter-internals/impeller-and-the-gpu/) proves, with real `docs.flutter.dev` quotes, that the actual 3.29+ merge is UI+platform on iOS/Android -- the raster thread, where Impeller/Skia actually talk to the GPU, was never merged with the UI thread.
+- **"Each Dart isolate has its own completely separate heap."** [The Dart VM and Isolates](/flutter/en/flutter-internals/dart-vm-and-isolates/) proves, from `dart-lang/sdk`'s own glossary, that isolates in the same group share a heap -- and then proves, fresh, that `compute()`'s message passing still copies rather than aliases regardless.
+
+## Reading AI-generated code
+
+A preview of the pattern every lesson in this module proves at least once: a plausible-sounding claim about Flutter internals that a real source citation or a real test disproves.
+
+<SpotTheBug code={`// A comment an AI assistant added above a custom RenderBox
+// "sizedByParent means the framework never needs to re-check this
+// widget's layout when its internal state changes -- just call
+// markNeedsLayout() like any other render object."
+class _RenderFixedHeightBox extends RenderBox {
+  @override
+  bool get sizedByParent => true;
+
+  double _height = 40;
+  set targetHeight(double v) {
+    _height = v;
+    markNeedsLayout();
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      constraints.constrain(Size(constraints.maxWidth, _height));
+}`}>
+Proven wrong in [Layout and Paint Internals](/flutter/en/flutter-internals/layout-and-paint-internals/), with a real, run test: a `sizedByParent: true` object is unconditionally its own relayout boundary (proven from the exact source rule that lesson quotes), which means plain `markNeedsLayout()` never notifies the parent when this object's *own size* changes -- the parent silently keeps a stale size. `sizedByParent`'s own doc comment requires `markNeedsLayoutForSizedByParentChange()` instead for exactly this case, and that lesson's test proves the difference directly: with the plain call, the parent's observed child width stayed stuck at the old value; with the correct call, it updated.
+</SpotTheBug>
+
+export const quizFlutterInternalsIndex = [
+  {
+    q: 'This module cites permalinks into github.com/flutter/flutter and github.com/dart-lang/sdk. What revision/tag are they pinned to, and why does that matter?',
+    options: [
+      'The "main" branch, so links always show the newest code',
+      'The exact revision/tag this course\'s installed SDK reports (flutter --version\'s framework revision, and the matching Dart SDK tag) -- so every quoted line number stays correct even after the SDK is eventually upgraded',
+      'A random commit chosen for brevity',
+      'Whatever revision was current when Flutter 1.0 shipped',
+    ],
+    answer: 1,
+    explain: 'Every permalink in this module points at revision 6a19cca564 (framework/engine) or tag 3.13.4 (Dart SDK) -- the exact versions installed on this Mac, confirmed by flutter --version, so a quoted line number is guaranteed to match what\'s linked.',
+  },
+  {
+    q: 'Proven in The Three Trees with a real render-object-level spy, what happens to createRenderObject when the SAME widget type and key rebuild with only a paint-affecting property changed?',
+    options: [
+      'createRenderObject runs again every time',
+      'createRenderObject runs once; the reused render object only pays for updateRenderObject, and performLayout does not rerun since size never changed',
+      'Nothing happens at all -- the widget is ignored',
+      'A new Element is created but the RenderObject is reused',
+    ],
+    answer: 1,
+    explain: 'The spy test in that lesson shows createRenderObjectCount staying at 1 while updateRenderObjectCount and paintCount climb -- reuse, not recreation.',
+  },
+  {
+    q: 'Proven in Build Scheduling and Frames with a real build counter, what is the actual scheduling guard behind "redundant setState calls are cheap"?',
+    options: [
+      'Flutter silently ignores every setState call after the first one in a frame',
+      'Element.markNeedsBuild\'s own "if (dirty) { return; }" line -- a second call on an already-dirty element is a real no-op at the scheduling level',
+      'setState calls are queued and run one per frame over multiple frames',
+      'There is no such guard; it is a coincidence of test timing',
+    ],
+    answer: 1,
+    explain: 'Quoted directly from the source in that lesson: the guard is two real lines inside markNeedsBuild, proven with a test where two synchronous setState calls produced exactly one rebuild.',
+  },
+  {
+    q: 'Proven in Layout and Paint Internals, quoted verbatim from RenderObject.layout, what is the exact relayout-boundary rule?',
+    options: [
+      '_isRelayoutBoundary is always true',
+      '_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null',
+      '_isRelayoutBoundary depends only on the widget\'s runtimeType',
+      '_isRelayoutBoundary is set by a runtime heuristic, not a fixed formula',
+    ],
+    answer: 1,
+    explain: 'The exact quoted line from object.dart, proven with a custom RenderBox pair showing a tight-constrained child\'s markNeedsLayout() never reaching its parent, while a loose-constrained one\'s does.',
+  },
+  {
+    q: 'Proven in Impeller and the GPU with real docs.flutter.dev quotes, what is the REAL thread merge that happened as of Flutter 3.29?',
+    options: [
+      'UI and raster threads merged, on every platform',
+      'UI and platform threads merged (the UI thread is removed; Dart runs on the native platform thread), scoped to iOS and Android -- the raster thread stayed separate',
+      'No merge has ever happened',
+      'The raster thread was removed entirely',
+    ],
+    answer: 1,
+    explain: 'Quoted directly: "As of Flutter 3.29, the UI and platform threads are merged on iOS and Android... the UI thread is removed and the Dart code runs on the native platform thread" -- not the raster thread, which is where Impeller/Skia actually run.',
+  },
+  {
+    q: 'Proven in The Dart VM and Isolates by extracting a real built APK, what did running the standard Unix file(1) command on libapp.so show?',
+    options: [
+      'A proprietary Flutter-only binary format',
+      'A genuine ARM64 ELF shared library -- confirmed directly, matching dart-lang/sdk\'s own glossary claim about AOT compiler output',
+      'A plain text file',
+      'The file command failed to recognize it',
+    ],
+    answer: 1,
+    explain: 'The real, unedited file(1) output: "ELF 64-bit LSB shared object, ARM aarch64... stripped" -- gen_snapshot\'s real, standard, inspectable output.',
+  },
+];
+
+<Quiz client:visible id="flutter-internals/index" questions={quizFlutterInternalsIndex} />
+
+<ProgressTracker client:visible id="flutter-internals/index" />
