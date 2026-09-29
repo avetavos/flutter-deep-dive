@@ -40,6 +40,9 @@ export default defineConfig({
         { label: 'Navigation & App Structure', items: [{ autogenerate: { directory: 'navigation' } }] },
         { label: 'Async, Performance & Rendering', items: [{ autogenerate: { directory: 'async-and-performance' } }] },
         { label: 'Tooling, Testing & Production', items: [{ autogenerate: { directory: 'tooling-and-production' } }] },
+        { label: 'How Flutter Works', translations: { th: 'Flutter ทำงานอย่างไรข้างใน' }, items: [{ autogenerate: { directory: 'flutter-internals' } }] },
+        { label: 'Reading AI-generated Flutter', translations: { th: 'อ่านโค้ด Flutter ที่ AI เขียน' }, items: [{ autogenerate: { directory: 'reading-flutter' } }] },
+        { label: 'Glossary', translations: { th: 'อภิธานศัพท์' }, link: 'glossary' },
       ],
       }), preact()],
 });
