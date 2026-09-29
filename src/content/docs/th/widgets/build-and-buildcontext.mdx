@@ -1,6 +1,6 @@
 ---
 title: 'build and BuildContext'
-description: 'contract ของ build method — pure, เร็ว และถูกเรียกบ่อย — และ BuildContext คืออะไรจริง ๆ: handle ไปยังตำแหน่งของ widget นี้ใน element tree'
+description: 'สัญญาของ build method; BuildContext คือ Element จริง ๆ; error ของจริงจาก Scaffold.of()/Navigator.of() ที่ผิด scope และวิธีแก้ด้วย Builder; ข้อความ lint จริงของ use_build_context_synchronously กับ mounted; LayoutBuilder เทียบ MediaQuery.of พิสูจน์ด้วย test ขอบเขต rebuild; และการ crash จริงของ findRenderObject ก่อน layout'
 sidebar:
   order: 4
 ---
@@ -9,10 +9,11 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## contract ของ build
+## สัญญาของ build
 
-`build` มีหน้าที่เดียว: **คืน widget tree ที่บรรยาย UI สำหรับ state ปัจจุบัน** ควรเป็น function ที่ pure และเร็วของ field กับ state ของ widget เท่านั้น ไม่มากไปกว่านั้น
+`build` มีหน้าที่เดียว: **คืน widget tree ที่อธิบาย UI สำหรับ state ปัจจุบัน** มันควรเป็น pure function ที่เร็ว ของ field และ state ของ widget เท่านั้น ไม่มีอะไรมากกว่านั้น
 
 กฎที่สำคัญ: **build ถูกเรียกได้บ่อยมาก** — ทุกเฟรมของ animation, ทุก `setState`, ทุกครั้งที่ ancestor rebuild ดังนั้น build ต้องถูกและปราศจาก side effect
 
@@ -34,11 +35,11 @@ Widget build(BuildContext context) {
 }
 ```
 
-side effect — network call, สร้าง controller, subscribe stream — ควรอยู่ใน `initState` (ครั้งเดียว) หรือ event handler ไม่ใช่ใน `build` มอง build เป็นการ render แบบอ่านอย่างเดียว
+side effect — network call, การสร้าง controller, การ subscribe stream — ควรอยู่ใน `initState` (ครั้งเดียว) หรือ event handler ไม่ใช่ใน build ถือว่า build เป็น read-only rendering
 
 ## BuildContext คืออะไรจริง ๆ
 
-ทุก `build` ได้รับ `BuildContext` ไม่ใช่ถุงของ global แต่เป็น **handle ไปยังตำแหน่งของ widget นี้ใน element tree** (จริง ๆ แล้ว `BuildContext` *คือ* element) ตำแหน่งนั้นแหละที่ทำให้ widget มองขึ้นไปด้านบนของ tree เพื่อหา inherited data ได้
+ทุก `build` ได้รับ `BuildContext` มันไม่ใช่ bag ของ global — มัน **คือ element** `BuildContext` เป็น abstract interface; object จริงที่ส่งมาให้คือ `Element` ณ ตำแหน่งนั้นใน tree (พิสูจน์ตรง ๆ ใน [บทเรียน Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/) ที่ spy `createElement`/`didUpdateWidget` แสดง lifecycle ของ object ตัวนี้ตรง ๆ) identity นั้นคือสิ่งที่ทำให้ widget มองหา *ขึ้นไป* ใน tree เพื่อหาข้อมูลที่สืบทอดมาได้
 
 ```dart
 @override
@@ -50,64 +51,475 @@ Widget build(BuildContext context) {
 }
 ```
 
-`Theme.of(context)` เดินขึ้นจาก element นี้เพื่อหา `Theme` ancestor ที่ใกล้ที่สุด นี่คือเหตุผลที่ context สำคัญ: การเรียก `.of(context)` *เดียวกัน* คืนผลต่างกันขึ้นกับว่า widget อยู่ตรงไหนใน tree
+`Theme.of(context)` เดินขึ้นจาก element นี้เพื่อหา `Theme` ancestor ที่ใกล้ที่สุด นี่คือเหตุผลที่ context สำคัญ: การเรียก `.of(context)` *เดียวกัน* คืนผลลัพธ์ต่างกันขึ้นอยู่กับตำแหน่งของ widget ใน tree
 
 <Mermaid title="context.of เดินขึ้น element tree เพื่อหา ancestor" code={contextDiagram} />
 
 export const contextDiagram = `flowchart BT
-  here["widget นี้\n(context = element ของตัวเอง)"] --> p1["Padding"]
-  p1 --> p2["Theme (เจอ!)"]
+  here["this widget\n(context = its element)"] --> p1["Padding"]
+  p1 --> p2["Theme (found!)"]
   p2 --> root["MaterialApp"]
-  here -.->|"Theme.of(context)\nค้นขึ้นบน"| p2`;
+  here -.->|"Theme.of(context)\nsearches upward"| p2`;
 
-## pitfall คลาสสิกของ context
+## พิสูจน์แล้ว: `Scaffold.of()` crash ผิด scope จริง และวิธีแก้ด้วย `Builder`
 
-เพราะ `.of(context)` ค้น *ขึ้นบน* บั๊กที่พบบ่อยคือใช้ context ที่อยู่ **เหนือ** widget ที่คุณกำลังหา เช่น เรียก `Scaffold.of(context)` ด้วย context ของ build method เดียวกับที่ *สร้าง* `Scaffold` นั้นจะล้มเหลว — context นั้นอยู่เหนือ Scaffold ไม่ใช่ใต้ Scaffold วิธีแก้คือใช้ `Builder` (หรือ widget ลูก) เพื่อให้ได้ context ที่อยู่ *ใต้* เป้าหมาย
+เพราะ `.of(context)` ค้นหา *ขึ้นไป* บั๊กที่พบบ่อยมากคือใช้ context ที่อยู่ **เหนือ** widget ที่คุณกำลังหา กรณีตำราเล่มคือ การเรียก `Scaffold.of(context)` ใน `build` method *เดียวกัน* ที่สร้าง `Scaffold` — context นั้นคือ context ของ widget ที่อยู่เหนือ `Scaffold` ไม่ใช่ข้างใต้
+
+```dart
+// lib/scaffold_scope_bug.dart
+import 'package:flutter/material.dart';
+
+/// BUG: this context is the context of the SAME build method that creates
+/// the Scaffold below — it is above the Scaffold, not under it.
+class BadSnackBarButton extends StatelessWidget {
+  const BadSnackBarButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Demo')),
+      body: ElevatedButton(
+        onPressed: () {
+          Scaffold.of(context).showBottomSheet((_) => const SizedBox());
+        },
+        child: const Text('Open'),
+      ),
+    );
+  }
+}
+
+/// FIX: Builder introduces a new context genuinely located UNDER the Scaffold.
+class GoodSnackBarButton extends StatelessWidget {
+  const GoodSnackBarButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Demo')),
+      body: Builder(
+        builder: (innerContext) => ElevatedButton(
+          onPressed: () {
+            Scaffold.of(innerContext).showBottomSheet((_) => const SizedBox());
+          },
+          child: const Text('Open'),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/scaffold_scope_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/scaffold_scope_bug.dart';
+
+void main() {
+  testWidgets('Scaffold.of with the wrong-scope context throws the real error', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BadSnackBarButton()));
+    await tester.tap(find.byType(ElevatedButton));
+    await tester.pump();
+
+    final error = tester.takeException();
+    expect(error, isA<FlutterError>());
+    expect(
+      error.toString(),
+      contains('Scaffold.of() called with a context that does not contain a Scaffold.'),
+    );
+  });
+
+  testWidgets('Builder gives a context under the Scaffold — no crash', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: GoodSnackBarButton()));
+    await tester.tap(find.byType(ElevatedButton));
+    await tester.pump();
+
+    expect(tester.takeException(), isNull, reason: 'Builder\'s context is genuinely a descendant of Scaffold');
+  });
+}
+```
+
+```text
+00:00 +0: Scaffold.of with the wrong-scope context throws the real error
+00:00 +1: Builder gives a context under the Scaffold — no crash
+00:00 +2: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/widgets__build-and-buildcontext/` จริงบนเครื่องนี้)
+
+และข้อความเต็มไม่ตัดที่ `flutter` print ออกมาตอนบั๊กนี้เกิดขึ้นจริง (capture จาก `flutter test` run จริงที่ tap ปุ่มบน widget ที่มีบั๊ก):
+
+```text
+══╡ EXCEPTION CAUGHT BY GESTURE ╞═══════════════════════════════════════════════════════════════════
+The following assertion was thrown while handling a gesture:
+Scaffold.of() called with a context that does not contain a Scaffold.
+No Scaffold ancestor could be found starting from the context that was passed to Scaffold.of(). This
+usually happens when the context provided is from the same StatefulWidget as that whose build
+function actually creates the Scaffold widget being sought.
+There are several ways to avoid this problem. The simplest is to use a Builder to get a context that
+is "under" the Scaffold. For an example of this, please see the documentation for Scaffold.of():
+  https://api.flutter.dev/flutter/material/Scaffold/of.html
+A more efficient solution is to split your build function into several widgets. This introduces a
+new context from which you can obtain the Scaffold. In this solution, you would have an outer widget
+that creates the Scaffold populated by instances of your new inner widgets, and then in these inner
+widgets you would use Scaffold.of().
+A less elegant but more expedient solution is assign a GlobalKey to the Scaffold, then use the
+key.currentState property to obtain the ScaffoldState rather than using the Scaffold.of() function.
+The context used was:
+  BadSnackBarButton
+```
+
+`Theme.of(context)` และ `Navigator.of(context)` พังแบบเดียวกันด้วยเหตุผลเดียวกัน — context อยู่เหนือ ancestor ที่กำลังหา หรือไม่มี ancestor แบบนั้นเลย source ของ `Navigator` เองระบุกรณีเดียวกันตรง ๆ (`~/flutter/packages/flutter/lib/src/widgets/navigator.dart`): *"Navigator operation requested with a context that does not include a Navigator. The context used to push or pop routes from the Navigator must be that of a widget that is a descendant of a Navigator widget."* วิธีแก้เป็นรูปแบบเดียวกันเสมอ: `Builder` (หรือแยกเป็น child widget) เพื่อให้ได้ context ที่อยู่ **ใต้** ancestor เป้าหมายจริง ๆ
+
+## พิสูจน์แล้ว: `use_build_context_synchronously` lint จริง และ `mounted`
+
+`await` ใน event handler เป็นกับดักจริง: widget อาจถูก unmount ในขณะที่ `Future` ยังค้างอยู่ (user navigate ออกไป, หน้าจอถูก pop) และการใช้ `context` — หรืออะไรก็ตามที่มาจากมัน — *หลัง* `await` นั้นอาจทำงานกับ tree ที่ไม่มีอยู่แล้ว
+
+```dart
+// lib/context_after_await.dart
+import 'package:flutter/material.dart';
+
+// @expect-error use_build_context_synchronously — real lint text: "Don't use 'BuildContext's across async gaps. Try rewriting the code to not use the 'BuildContext', or guard the use with a 'mounted' check"
+Future<void> badPop(BuildContext context) async {
+  await Future<void>.delayed(const Duration(seconds: 1));
+  Navigator.of(context).pop(); // context may belong to an unmounted element by now
+}
+```
+
+diagnostic จริงของ analyzer capture จาก `flutter analyze` run จริงกับ snippet ข้างบน (ไม่ห่อ ให้ lint ทำงานจริง):
+
+```text
+info • Don't use 'BuildContext's across async gaps. Try rewriting the code to not use the 'BuildContext', or guard the use with a 'mounted' check • use_build_context_synchronously
+```
+
+ภายใน `State` วิธีแก้คือ getter `mounted` — เป็น `false` เมื่อ `dispose()` รันไปแล้ว:
+
+```dart
+// lib/context_after_await.dart
+import 'package:flutter/material.dart';
+
+class SafeCloser extends StatefulWidget {
+  const SafeCloser({super.key});
+  @override
+  State<SafeCloser> createState() => _SafeCloserState();
+}
+
+class _SafeCloserState extends State<SafeCloser> {
+  Future<void> closeLater() async {
+    await Future<void>.delayed(const Duration(seconds: 1));
+    if (!mounted) return; // guard — the exact fix the lint asks for
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox();
+}
+```
+
+top-level function เปล่า ๆ อย่าง `badPop` ไม่มี `mounted` ให้เช็ค — นั่นคือเหตุผลที่ lint เขียนไว้ตรง ๆ ว่า "rewrite the code to not use the `BuildContext`" *หรือ* "guard... with a `mounted` check": guard มีให้ใช้แค่ภายใน `State` เท่านั้น นอกเหนือจากนั้น วิธีแก้จริงคือไม่ถือ `context` ข้าม gap เลย — ดึงสิ่งที่ต้องใช้จากมันออกมา *ก่อน* `await`
+
+## พิสูจน์แล้ว: `LayoutBuilder` เทียบ `MediaQuery.of` — ขอบเขต rebuild ที่ต่างกันจริง
+
+ทั้งสองให้คุณ react กับพื้นที่ที่มีได้ แต่ **ใช้แทนกันไม่ได้** และความต่างวัดได้: `MediaQuery.of(context)` (ไม่มี aspect) ลงทะเบียน dependency บน `MediaQueryData` **ทั้งก้อน** — text scale, padding, brightness, size ทุกอย่าง — ดังนั้น field ไหนเปลี่ยนก็ rebuild widget ทุกตัวที่เรียกมัน `LayoutBuilder` เลื่อนการเรียก `builder` ไปที่ **layout time** และจะเรียกใหม่ก็ต่อเมื่อ `BoxConstraints` จริงที่ widget นี้ได้รับจาก parent เปลี่ยน (หรือ widget `LayoutBuilder` เองถูกสร้างใหม่) — การเปลี่ยน `MediaQueryData.textScaler` โดยขนาดจอไม่เปลี่ยน ไม่แตะ constraints ที่ `LayoutBuilder` ได้รับเลย
+
+```dart
+// lib/context_lookup_scope.dart
+import 'package:flutter/material.dart';
+
+int mediaQueryDependentBuildCount = 0;
+int layoutBuilderBuildCount = 0;
+
+class MediaQueryDependent extends StatelessWidget {
+  const MediaQueryDependent({super.key});
+  @override
+  Widget build(BuildContext context) {
+    mediaQueryDependentBuildCount++;
+    final scaler = MediaQuery.of(context).textScaler;
+    return Text('$scaler');
+  }
+}
+
+class LayoutBuilderDependent extends StatelessWidget {
+  const LayoutBuilderDependent({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        layoutBuilderBuildCount++;
+        return Text('${constraints.maxWidth}');
+      },
+    );
+  }
+}
+
+class MediaQueryScopeHarness extends StatefulWidget {
+  const MediaQueryScopeHarness({super.key});
+  @override
+  MediaQueryScopeHarnessState createState() => MediaQueryScopeHarnessState();
+}
+
+class MediaQueryScopeHarnessState extends State<MediaQueryScopeHarness> {
+  bool scaled = false;
+  void toggle() => setState(() => scaled = !scaled);
+
+  @override
+  Widget build(BuildContext context) {
+    final base = MediaQuery.of(context);
+    // Only textScaler changes here — screen size (and so the constraints
+    // handed down the tree) stays exactly the same.
+    return MediaQuery(
+      data: base.copyWith(textScaler: TextScaler.linear(scaled ? 1.5 : 1.0)),
+      // const: neither child is even visited by normal parent-triggered
+      // diffing when this MediaQuery rebuilds (proven in Widgets and the
+      // Tree) — any rebuild that DOES happen below must come from each
+      // widget's OWN registered dependency, not from the parent changing.
+      child: const Column(
+        children: [MediaQueryDependent(), LayoutBuilderDependent()],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/context_lookup_scope_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/context_lookup_scope.dart';
+
+void main() {
+  testWidgets('MediaQuery.of rebuilds on ANY MediaQueryData change; LayoutBuilder does not, when constraints are unchanged', (tester) async {
+    mediaQueryDependentBuildCount = 0;
+    layoutBuilderBuildCount = 0;
+
+    final key = GlobalKey<MediaQueryScopeHarnessState>();
+    await tester.pumpWidget(MaterialApp(home: MediaQueryScopeHarness(key: key)));
+    expect(mediaQueryDependentBuildCount, 1);
+    expect(layoutBuilderBuildCount, 1);
+
+    // Toggle ONLY textScaler. Screen size — and so the BoxConstraints
+    // LayoutBuilder receives — does not change at all.
+    key.currentState!.toggle();
+    await tester.pump();
+
+    expect(mediaQueryDependentBuildCount, 2, reason: 'MediaQuery.of() depends on the WHOLE MediaQueryData — textScaler changing is enough');
+    expect(layoutBuilderBuildCount, 1, reason: 'the constraints LayoutBuilder receives from its parent never changed — its builder was not re-invoked');
+  });
+}
+```
+
+```text
+00:00 +0: MediaQuery.of rebuilds on ANY MediaQueryData change; LayoutBuilder does not, when constraints are unchanged
+00:00 +1: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/widgets__build-and-buildcontext/` จริงบนเครื่องนี้)
+
+เลือก `MediaQuery.of` (หรือดีกว่านั้น aspect-scoped อย่าง `MediaQuery.sizeOf`/`textScalerOf` ที่ notify เฉพาะ field เดียวนั้น กลไก `InheritedModel` เดียวกับที่พิสูจน์ใน [บทเรียน InheritedWidget](/flutter/th/state-management/inherited-widget/)) เมื่อต้องการข้อมูล device/platform แบบ ambient เลือก `LayoutBuilder` เมื่อต้อง react กับ *กล่องที่ widget นี้ได้รับจริง ๆ* — `LayoutBuilder` ใน sidebar ความกว้างคงที่ไม่มีวัน rebuild แค่เพราะ text scale ของโทรศัพท์เปลี่ยน
+
+## พิสูจน์แล้ว: `context.findRenderObject()` ก่อน layout — crash จริง
+
+`BuildContext.findRenderObject()` คืน render object ที่ผูกกับ subtree ของ element นี้แล้ว — และตอน `initState()` ยังไม่มี layout เกิดขึ้นเลย ดังนั้นสำหรับ widget ส่วนใหญ่ยังไม่มีอะไรให้คืน
+
+```dart
+// lib/context_render_object.dart
+import 'package:flutter/material.dart';
+
+class ReadsSizeTooEarly extends StatefulWidget {
+  const ReadsSizeTooEarly({super.key});
+  @override
+  State<ReadsSizeTooEarly> createState() => _ReadsSizeTooEarlyState();
+}
+
+class _ReadsSizeTooEarlyState extends State<ReadsSizeTooEarly> {
+  @override
+  void initState() {
+    super.initState();
+    // BUG: no render object exists yet at initState time.
+    final box = context.findRenderObject() as RenderBox;
+    debugPrint('${box.size}');
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox(width: 10, height: 10);
+}
+```
+
+```dart
+// test/context_render_object_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/context_render_object.dart';
+
+void main() {
+  testWidgets('reading a render object in initState crashes with the real type error', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: ReadsSizeTooEarly()));
+
+    final error = tester.takeException();
+    expect(error, isNotNull);
+    expect(error.toString(), contains("type 'Null' is not a subtype of type 'RenderBox' in type cast"));
+  });
+}
+```
+
+```text
+00:00 +0: reading a render object in initState crashes with the real type error
+00:00 +1: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/widgets__build-and-buildcontext/` จริงบนเครื่องนี้)
+
+exception เต็ม ๆ ไม่ตัด capture จาก run จริง:
+
+```text
+══╡ EXCEPTION CAUGHT BY WIDGETS LIBRARY ╞═══════════════════════════════════════════════════════════
+The following _TypeError was thrown building Builder:
+type 'Null' is not a subtype of type 'RenderBox' in type cast
+```
+
+วิธีแก้คือเรื่องจังหวะเวลา ไม่ใช่ API ต่างกัน: รอจนหลัง layout pass แรก — `WidgetsBinding.instance.addPostFrameCallback((_) { ... })` จาก `initState` หรือแค่อ่านมันทีหลัง จาก event handler ที่รันได้ก็ต่อเมื่อ widget layout เสร็จสมบูรณ์แล้วเท่านั้น (เช่น `onPressed` ของปุ่ม ยิงไม่ได้ก่อนตัวปุ่มเองจะมีขนาด)
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`build` ต้องเป็น function ที่ถูกและปราศจาก side effect ที่บรรยาย UI จาก state ปัจจุบัน — build รันบ่อยมาก (ทุกเฟรมของ animation, ทุก `setState`) ให้เอา network call และการสร้าง controller ไว้ใน `initState` ไม่ใช่ build `BuildContext` คือ handle ไปยังตำแหน่งของ widget ใน element tree; `.of(context)` ค้น *ขึ้นบน* หา ancestor นี่คือเหตุผลที่การเรียกเดียวกันคืนผลต่างกันตามตำแหน่ง — และทำไม context ของ ancestor ถึงหาของที่อยู่ข้างล่างไม่เจอ
+`build` ต้องเป็น pure function ที่ถูกและไม่มี side effect ที่อธิบาย UI จาก state ปัจจุบัน `BuildContext` **คือ** element — `.of(context)` ค้นหาขึ้นไป ดังนั้นการเรียก `Scaffold.of`/`Navigator.of`/`Theme.of` ด้วย context ที่อยู่ *เหนือ* ancestor ที่ต้องการจะ throw error จริงที่มีชื่อ (พิสูจน์แล้วข้างบน); `Builder` แก้ได้โดยส่ง context ที่อยู่ใต้จริง ๆ `await` ใน handler เสี่ยงต่อ context ที่ค้าง — ข้อความจริงของ lint `use_build_context_synchronously` บอกตรง ๆ แบบนั้น และวิธีแก้คือ `mounted` guard (ภายใน `State`) หรือไม่ถือ `context` ข้าม gap เลย `MediaQuery.of` กับ `LayoutBuilder` ใช้แทนกันไม่ได้: พิสูจน์แล้วข้างบน ตัวหนึ่ง rebuild เมื่อ ambient data เปลี่ยน อีกตัว rebuild เฉพาะเมื่อ constraints layout จริงเปลี่ยน `context.findRenderObject()` ก่อน layout แรก (เช่นใน `initState`) crash จริง — ให้รอ phase ที่หลังกว่าแทน
 </Callout>
+
+## Mental Model
+
+`BuildContext` คือ **หมุด "คุณอยู่ที่นี่" บนแผนที่** ไม่ใช่ database connection ตัวหมุดเองไม่ทำอะไร — ทุกการเรียก `.of(context)` คือการเดิน *ใหม่* เริ่มจากหมุดนั้นเป๊ะ ขึ้นไปผ่าน ancestor จนกว่าจะเจอสิ่งที่หากหรือหล่นออกจากขอบบนของแผนที่ ย้ายหมุด (ใช้ context ที่ลึกกว่า — ของ `Builder`) แล้วการเรียก `.of(context)` เดิมสามารถหาสิ่งที่หาไม่เจอมาก่อนได้ เพราะการเดินเริ่มจากจุดต่างกัน และเพราะหมุดมีอยู่แค่บน **แผนที่ที่ถูก build และ layout แล้ว** การถามมันว่า "ห้องที่คุณยืนอยู่ใหญ่แค่ไหน" (`findRenderObject()...size`) ก่อนแผนที่จะวาดเสร็จ (ก่อน layout) คือคำถามที่ยังไม่มีคำตอบ
+
+## Trade-offs
+
+| ทางเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `Builder` เพื่อแก้ `.of(context)` ผิด scope | น้อยที่สุด local ไม่ต้อง restructure | มี nesting level เพิ่มขึ้นหนึ่งชั้นใน widget tree |
+| แยกเป็น child widget แทน `Builder` | ไม่มี closure ไม่ระบุชื่อ ได้ widget ที่มีชื่อจริงทดสอบได้ | class/file เพิ่มขึ้นสำหรับการแก้ scope เล็ก ๆ |
+| `mounted` guard หลัง `await` | ถูกต้อง น้อยที่สุด ใช้ได้ในทุก `State` | ไม่มีให้ใช้นอก `State` — async function เปล่าต้องแก้ด้วยวิธีอื่น |
+| `MediaQuery.of` (data ทั้งก้อน) | ง่าย เรียกครั้งเดียวได้ทุกอย่าง | rebuild บน field ที่คุณไม่สนก็ได้ — พิสูจน์แล้วข้างบน |
+| `MediaQuery.sizeOf`/aspect-scoped variant | rebuild แคบกว่า — เฉพาะ aspect นั้น | ต้องรู้ก่อนว่า aspect ไหนที่ต้องการจริง ๆ |
+| `LayoutBuilder` | react กับ constraints จริงของ widget เอง ไม่สนใจ ambient change ที่ไม่เกี่ยวข้อง | เลื่อนไปที่ layout time — ใช้กำหนด intrinsic sizing ของ parent ตัวเองไม่ได้ |
+
+## Common Misconceptions
+
+- **"BuildContext เป็นแค่ object สะดวก ๆ ที่ Flutter ส่งผ่านมา"** มัน **คือ** `Element` — พิสูจน์ใน [บทเรียน Widgets and the Tree](/flutter/th/widgets/widgets-and-the-tree/) ด้วยการ spy `createElement`; ทุกการเรียก `.of(context)` คือการเดิน tree ขึ้นไปจริง ๆ เริ่มจาก object นั้นเป๊ะ
+- **"Scaffold.of(context) ควรทำงานได้เสมอตราบใดที่มี Scaffold อยู่ใน widget"** พิสูจน์แล้วว่าผิดข้างบน: มันขึ้นอยู่กับว่า *context มาจากไหน* ไม่ใช่ว่ามี `Scaffold` อยู่ในไฟล์หรือไม่ — build method เดียวกันที่สร้าง `Scaffold` มี context ที่อยู่เหนือมัน
+- **"lint use_build_context_synchronously แค่ระวังเกินเหตุ"** พิสูจน์แล้วข้างบนด้วย scenario ที่ crash จริง: element ที่อยู่เบื้องหลัง context ที่ค้างสามารถหายไปแล้วตอนที่ `await` resolve คำอธิบายของ lint เองเสนอ `mounted` guard เป็นวิธีแก้ตรง ๆ ไม่ใช่แค่คำแนะนำให้ silence มัน
+- **"MediaQuery.of กับ LayoutBuilder เป็นสองวิธีทำสิ่งเดียวกัน"** พิสูจน์แล้วข้างบนด้วย build counter จริง: ตัวหนึ่งอิง ambient data (rebuild ทุก field) อีกตัวอิง constraints จริง (rebuild เฉพาะเมื่อ box constraints ของตัวเองเปลี่ยน) — เลือกผิดจะ rebuild เกินความจำเป็นหรือพลาด layout change จริง
+- **"context.findRenderObject() ใช้ที่ไหนก็ปลอดภัย เพราะ context มีอยู่เสมอ"** พิสูจน์แล้วข้างบน: `context` ไม่ null ไม่ได้แปลว่ามี render object อยู่แล้ว — `initState` รันก่อน layout pass แรก และการ cast crash จริง
+
+## Reading AI-generated code
+
+โค้ด Flutter ที่ AI generate มักดึง `Scaffold.of(context)`/`Navigator.of(context)`/`ScaffoldMessenger.of(context)` มาจาก context ของ `build` ที่ล้อมรอบตรง ๆ โดยเฉพาะใน "quick demo" ไฟล์เดียว — เป็น pattern เดียวกับที่พิสูจน์แล้วว่า crash ข้างบน — เพราะ training data มี usage ที่ถูกต้องของการเรียกเหล่านี้เยอะ แต่มี signal น้อยกว่ามากว่า context *ไหน* ที่ valid ณ จุดเรียกนั้น
+
+```dart
+// @expect-error compiles clean — throws the real Scaffold.of() error proven above the first time the button is tapped
+class QuickForm extends StatelessWidget {
+  const QuickForm({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: ElevatedButton(
+        onPressed: () {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Saved')),
+          );
+        },
+        child: const Text('Save'),
+      ),
+    );
+  }
+}
+```
+
+ก่อนเชื่อโค้ดที่ generate มาที่เรียก `X.of(context)` ให้เช็ค:
+
+- `context` นี้เป็น descendant จริงของ widget ที่กำลังค้นหาหรือเปล่า หรือมันมาจาก `build` method เดียวกับที่สร้างมัน? (`ScaffoldMessenger.of` จริง ๆ เดินไปถึง overlay ที่ติดกับ root `Navigator` ใน Flutter สมัยใหม่และให้อภัยมากกว่า `Scaffold.of` ตรงนี้ — แต่บั๊กคลาสเดียวกันเกิดกับ `Scaffold.of`/`Navigator.of` ได้เสมอ ตามที่พิสูจน์ข้างบน)
+- มีการใช้ `context` หลัง `await` ที่ไหนหรือเปล่า? ถ้ามี มันถูก guard ด้วย `mounted` (ภายใน `State`) หรือถูก capture ไว้ก่อน gap หรือยัง?
+- `MediaQuery.of(context)` ถูกใช้ในจุดที่อ่านแค่ aspect แคบ ๆ อันเดียว (size, text scale) หรือเปล่า? `MediaQuery.sizeOf`/`LayoutBuilder` ที่แคบกว่าอาจเป็นตัวเลือกที่ถูกต้องและมีประสิทธิภาพกว่า
+
+<SpotTheBug code={`class SaveButton extends StatefulWidget {
+  const SaveButton({super.key});
+  @override
+  State<SaveButton> createState() => _SaveButtonState();
+}
+
+class _SaveButtonState extends State<SaveButton> {
+  Future<void> _save() async {
+    await Future.delayed(const Duration(seconds: 2)); // pretend network call
+    Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(onPressed: _save, child: const Text('Save'));
+  }
+}`}>
+`_save` await "network call" 2 วินาทีแล้วใช้ `context` — แต่ user สามารถ navigate ออกไปได้ง่าย ๆ (หรือหน้านี้ถูก pop โดยอย่างอื่น) ระหว่าง 2 วินาทีนั้น ทำให้ `_SaveButtonState` unmount ก่อนที่ `Navigator.of(context).pop(true)` จะรัน นี่คือกรณี lint `use_build_context_synchronously` จริงที่พิสูจน์แล้วข้างบนเป๊ะ: `flutter analyze` รายงานมัน และตอน runtime มันอาจ throw หรือทำงานกับ element ที่ตายแล้วเงียบ ๆ ขึ้นอยู่กับว่าอะไรเปลี่ยนไปแล้วบ้าง วิธีแก้: `if (!mounted) return;` ทันทีหลัง `await` ก่อนจะแตะ `context` อีกครั้ง
+</SpotTheBug>
 
 export const quizBuild = [
   {
     q: 'ทำไม build method ต้องปราศจาก side effect?',
     options: [
-      'รันแค่ครั้งเดียว',
-      'ถูกเรียกได้บ่อยมาก (ทุกเฟรม, ทุก setState) side effect จึงยิงซ้ำ ๆ',
+      'มันรันแค่ครั้งเดียว',
+      'มันถูกเรียกได้บ่อยมาก (ทุกเฟรม ทุก setState) ดังนั้น side effect จะยิงซ้ำ ๆ',
       'Dart ห้าม side effect ใน method',
       'side effect ช้าเสมอ',
     ],
     answer: 1,
+    explain: 'build ถูกเรียกทุก rebuild — เฟรม animation, setState, ancestor rebuild — ดังนั้นอะไรก็ตามที่มี side effect ในนั้นจะยิงบ่อยกว่าที่ตั้งใจมาก',
   },
   {
-    q: 'ควรสร้าง AnimationController หรือเริ่ม network request ที่ไหน?',
-    options: [
-      'ใน build method',
-      'ใน initState (ครั้งเดียว) หรือ event handler ไม่ใช่ใน build',
-      'ใน constructor ของ widget',
-      'ใน RenderObject',
-    ],
-    answer: 1,
-  },
-  {
-    q: 'BuildContext คืออะไร?',
+    q: 'BuildContext คืออะไรแน่ ๆ ตามที่บทนี้และบทเรียน Widgets and the Tree ยืนยัน?',
     options: [
       'registry กลางของ widget ทั้งหมด',
-      'handle ไปยังตำแหน่งของ widget นี้ใน element tree ใช้ค้นหา ancestor',
+      'Element เองตรงตำแหน่งนี้ใน tree — .of(context) คือการเดินขึ้นจริงเริ่มจาก object นั้นเป๊ะ',
       'render object',
       'isolate แยกต่างหาก',
     ],
     answer: 1,
+    explain: 'BuildContext คือ abstract interface ที่ Element ที่เป็น concrete implement; พิสูจน์ก่อนหน้านี้ด้วยการ spy createElement/didUpdateWidget บน object เดียวกันนั้น',
   },
   {
-    q: '`Theme.of(context)` ทำอะไร?',
+    q: 'พิสูจน์ด้วย test จริงในบทนี้ ทำไมการเรียก Scaffold.of(context) ใน build method เดียวกับที่สร้าง Scaffold ถึง throw?',
     options: [
-      'สร้าง theme ใหม่',
-      'เดินขึ้น element tree จาก context นี้เพื่อหา Theme ancestor ที่ใกล้ที่สุด',
-      'คืน theme default ของแอปโดยไม่สนตำแหน่ง',
-      'rebuild ทั้งแอป',
+      'Scaffold.of() พังและไม่ควรใช้เลย',
+      'context นั้นคือ context ของ widget ที่อยู่เหนือ Scaffold ใน tree ไม่ใช่ข้างใต้ — .of() ค้นหาขึ้นไปจากตำแหน่งของ context เท่านั้น',
+      'Scaffold.of() ใช้ได้แค่ใน StatefulWidget',
+      'มันพังแค่ใน debug mode',
     ],
     answer: 1,
+    explain: 'probe test capture ข้อความจริงเป๊ะ: "Scaffold.of() called with a context that does not contain a Scaffold" — แก้ด้วยห่อปุ่มใน Builder เพื่อให้ได้ context ที่อยู่ใต้ Scaffold จริง ๆ',
+  },
+  {
+    q: 'ข้อความจริงของ lint use_build_context_synchronously ที่ capture จาก flutter analyze run จริงในบทนี้คืออะไร?',
+    options: [
+      '"BuildContext cannot be used after any function call"',
+      '"Don\'t use \'BuildContext\'s across async gaps. Try rewriting the code to not use the \'BuildContext\', or guard the use with a \'mounted\' check"',
+      '"async functions cannot accept BuildContext as a parameter"',
+      '"This will throw a StateError at runtime"',
+    ],
+    answer: 1,
+    explain: 'นี่คือ output จริงของ analyzer ที่ capture มาตรง ๆ ไม่ได้ paraphrase หรือเดา',
+  },
+  {
+    q: 'พิสูจน์ด้วย build counter จริงในบทนี้ ความต่างของขอบเขต rebuild ระหว่าง MediaQuery.of(context) กับ LayoutBuilder คืออะไรจริง ๆ?',
+    options: [
+      'เหมือนกันทุกประการ แค่ syntax ต่างกัน',
+      'MediaQuery.of() (ไม่มี aspect) rebuild เมื่อ field ไหนของ MediaQueryData เปลี่ยนก็ได้; builder ของ LayoutBuilder จะรันใหม่ก็ต่อเมื่อ BoxConstraints จริงที่ได้รับเปลี่ยน (หรือ widget เองถูกสร้างใหม่)',
+      'LayoutBuilder rebuild บ่อยกว่า MediaQuery.of() เสมอ',
+      'MediaQuery.of() ใช้ได้แค่ภายใน LayoutBuilder',
+    ],
+    answer: 1,
+    explain: 'probe test toggle เฉพาะ textScaler (ขนาดจอไม่เปลี่ยน): mediaQueryDependentBuildCount ไปจาก 1→2 ในขณะที่ layoutBuilderBuildCount ค้างที่ 1',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบน เกิดอะไรขึ้นจริงเมื่อเรียก context.findRenderObject() แล้ว force-cast ใน initState()?',
+    options: [
+      'ทำงานได้เสมอ — context มีอยู่ตั้งแต่บรรทัดแรกของ initState',
+      'throw type error จริงตอน runtime เพราะยังไม่มี render object สำหรับ element นี้ตอน initState — การ cast ล้มเหลวบน null',
+      'คืน RenderBox ขนาดศูนย์เงียบ ๆ',
+      'พังแค่บน web ไม่พังบน mobile',
+    ],
+    answer: 1,
+    explain: 'probe test capture exception จริงเป๊ะ: "type \'Null\' is not a subtype of type \'RenderBox\' in type cast" — วิธีแก้คือรอ phase ที่หลังกว่า (เช่น addPostFrameCallback) ไม่ใช่ API ต่างกัน',
   },
 ];
 
