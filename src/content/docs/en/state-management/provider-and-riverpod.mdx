@@ -1,6 +1,6 @@
 ---
 title: 'Provider & Riverpod'
-description: 'The two most common shared-state approaches — Provider as ergonomic InheritedWidget, and Riverpod as compile-safe providers decoupled from the tree.'
+description: 'The two most common shared-state approaches — Provider as ergonomic InheritedWidget, and Riverpod as compile-safe providers decoupled from the tree, with real ProviderScope, @riverpod codegen, and AsyncNotifier proof.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Provider: InheritedWidget with ergonomics
 
@@ -41,7 +42,7 @@ The `watch` vs `read` distinction is the whole game. `context.watch<T>()` subscr
 
 ## Riverpod: providers without the tree
 
-**Riverpod** is a reimagining by the same author that fixes Provider's rough edges. Its key move: providers are **top-level objects, not tied to the widget tree**, which makes them compile-safe (you can't read a provider that isn't there) and easy to test and combine.
+**Riverpod** is a reimagining by the same author ([rrousselGit](https://github.com/rrousselGit)) that fixes Provider's rough edges. Its key move: providers are **top-level objects, not tied to the widget tree**, which makes them compile-safe (you can't read a provider that isn't there) and easy to test and combine.
 
 ```dart
 // A provider declared at top level — not in the widget tree.
@@ -68,13 +69,576 @@ class CounterView extends ConsumerWidget {
 }
 ```
 
-A `Notifier<T>` returns its initial state from `build()` (not a constructor `super(initial)`), and mutating `state` notifies listeners. Notice the same `watch`/`read` split via `ref`. The difference from Provider is structural: no `BuildContext` lookup, no "provider not found" at runtime, and providers compose (one provider can `ref.watch` another).
+A `Notifier<T>` returns its initial state from `build()` (not a constructor `super(initial)`), and mutating `state` notifies listeners. Notice the same `watch`/`read` split via `ref`. The difference from Provider is structural: no `BuildContext` lookup, no "provider not found" at runtime — *unless you forget the one piece of tree wiring Riverpod still needs.* That's next.
 
-For async state, the equivalent is `AsyncNotifier` / `AsyncNotifierProvider`, whose `build()` returns a `Future`. Riverpod also offers a `@riverpod` code-generation style that derives the provider for you from an annotated class or function.
+## `ProviderScope` is not optional — proof
 
-> The older `StateNotifier` / `StateNotifierProvider` and `StateProvider` APIs are now **legacy** (deprecated in Riverpod 3) — you'll still see them in existing code, but new code should use `Notifier` / `NotifierProvider` (or the `@riverpod` codegen).
+Every example above quietly assumed something: a `ProviderScope` sits above the widget tree. Riverpod's `ref.watch`/`ref.read` still need *somewhere* to store provider state — that somewhere is a `ProviderContainer`, and `ProviderScope` is the widget that creates one and makes it reachable. Skip it, and every `ConsumerWidget` throws the moment it tries to read a provider.
 
-## Choosing between them
+```dart
+// lib/no_scope_counter.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+final counterProvider = NotifierProvider<Counter, int>(Counter.new);
+
+class Counter extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void increment() => state++;
+}
+
+class CounterView extends ConsumerWidget {
+  const CounterView({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(counterProvider);
+    return Text('$count');
+  }
+}
+```
+
+```dart
+// test/no_scope_counter_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/no_scope_counter.dart';
+
+void main() {
+  testWidgets('a ConsumerWidget with no ProviderScope ancestor throws', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: CounterView()));
+    final exception = tester.takeException();
+    expect(exception, isA<StateError>());
+    expect(exception.toString(), contains('No ProviderScope found'));
+  });
+
+  testWidgets('wrapping the same tree in ProviderScope fixes it', (tester) async {
+    await tester.pumpWidget(
+      const ProviderScope(child: MaterialApp(home: CounterView())),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.text('0'), findsOneWidget);
+  });
+}
+```
+
+```text
+✓ a ConsumerWidget with no ProviderScope ancestor throws
+✓ wrapping the same tree in ProviderScope fixes it
+
+00:00 +2: All tests passed!
+```
+
+The real exception, captured verbatim from the probe (`flutter_riverpod` 3.4.3): `StateError` with message **"Bad state: No ProviderScope found"**. The fix is the one line the intro examples skipped:
+
+```dart
+void main() {
+  runApp(
+    const ProviderScope(          // <-- wraps the whole app, once, at the root
+      child: MyApp(),
+    ),
+  );
+}
+```
+
+<Callout title="Rule of thumb">
+If a lesson, tutorial, or AI-generated snippet uses `ConsumerWidget`/`ref.watch` and you don't see a `ProviderScope` anywhere in `main()`, it is incomplete — it will crash the instant it runs, not just log a warning.
+</Callout>
+
+## Code generation: `@riverpod`
+
+Hand-writing `NotifierProvider<Counter, int>(Counter.new)` is fine for one provider. For a real app, Riverpod's code generator (`riverpod_generator`, driven by the `@riverpod` annotation from `riverpod_annotation`, via `build_runner`) derives the provider declaration, its generic types, and its `.autoDispose` default for you — you write the logic, it writes the boilerplate.
+
+```yaml
+# pubspec.yaml
+dependencies:
+  riverpod_annotation: ^4.0.7
+
+dev_dependencies:
+  riverpod_generator: ^4.0.9
+  build_runner: ^2.16.1
+```
+
+```dart
+// lib/todos_provider.dart
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+part 'todos_provider.g.dart';
+
+// Function provider — codegen infers `FutureProvider<List<String>>` from the
+// Future return type. `Ref` is the one generic ref type (not a bespoke
+// generated subtype) as of riverpod_generator 3+.
+@riverpod
+Future<List<String>> fetchTodos(Ref ref) async {
+  await Future<void>.delayed(const Duration(milliseconds: 10));
+  return const ['Buy milk', 'Walk the dog'];
+}
+
+// Class provider — codegen infers `NotifierProvider<TodoList, List<String>>`.
+// `_$TodoList` is generated; you extend it instead of `Notifier<List<String>>`.
+@riverpod
+class TodoList extends _$TodoList {
+  @override
+  List<String> build() => const [];
+
+  void add(String todo) => state = [...state, todo];
+}
+```
+
+Run the generator (`dart run build_runner build`, real output from this probe):
+
+```text
+  15s compiling builders/aot
+  0s riverpod_generator on 2 inputs; lib/todos_provider.dart
+  1s riverpod_generator on 2 inputs: 1 output, 1 no-op
+  0s source_gen:combining_builder on 2 inputs: 1 output, 1 no-op
+Built with build_runner/aot in 16s; wrote 2 outputs.
+```
+
+It writes `todos_provider.g.dart` next to your file. **Never hand-edit it** — regenerate it instead. Here is the real, unedited output for the snippet above (riverpod_generator 4.0.9), so `flutter analyze` in this lesson checks it exactly as a real project would ship it:
+
+```dart
+// lib/todos_provider.g.dart
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'todos_provider.dart';
+
+// **************************************************************************
+// RiverpodGenerator
+// **************************************************************************
+
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
+
+@ProviderFor(fetchTodos)
+final fetchTodosProvider = FetchTodosProvider._();
+
+final class FetchTodosProvider
+    extends
+        $FunctionalProvider<
+          AsyncValue<List<String>>,
+          List<String>,
+          FutureOr<List<String>>
+        >
+    with $FutureModifier<List<String>>, $FutureProvider<List<String>> {
+  FetchTodosProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'fetchTodosProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$fetchTodosHash();
+
+  @$internal
+  @override
+  $FutureProviderElement<List<String>> $createElement(
+    $ProviderPointer pointer,
+  ) => $FutureProviderElement(pointer);
+
+  @override
+  FutureOr<List<String>> create(Ref ref) {
+    return fetchTodos(ref);
+  }
+}
+
+String _$fetchTodosHash() => r'933c5de7c7fb4234b76bf0238dbd4eb54724a768';
+
+@ProviderFor(TodoList)
+final todoListProvider = TodoListProvider._();
+
+final class TodoListProvider extends $NotifierProvider<TodoList, List<String>> {
+  TodoListProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'todoListProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$todoListHash();
+
+  @$internal
+  @override
+  TodoList create() => TodoList();
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(List<String> value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<List<String>>(value),
+    );
+  }
+}
+
+String _$todoListHash() => r'eb87d244626b9a25c1e1c380defa23b95f65d968';
+
+abstract class _$TodoList extends $Notifier<List<String>> {
+  List<String> build();
+  @$mustCallSuper
+  @override
+  WhenComplete runBuild() {
+    final ref = this.ref as $Ref<List<String>, List<String>>;
+    final element =
+        ref.element
+            as $ClassProviderElement<
+              AnyNotifier<List<String>, List<String>>,
+              List<String>,
+              Object?,
+              Object?
+            >;
+    return element.handleCreate(ref, build);
+  }
+}
+```
+
+Notice `isAutoDispose: true` baked into both generated providers — confirms the docs' claim directly in generated code: [Riverpod's code-generation docs](https://riverpod.dev/docs/concepts/about_code_generation) state providers are **autoDispose by default** under `@riverpod`; opt out with `@Riverpod(keepAlive: true)`.
+
+```dart
+// test/todos_provider_test.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todos_provider.dart';
+
+void main() {
+  test('fetchTodos (function provider, codegen) resolves to a list', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final todos = await container.read(fetchTodosProvider.future);
+    expect(todos, ['Buy milk', 'Walk the dog']);
+  });
+
+  test('TodoList (class provider, codegen) starts empty and add() appends', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    expect(container.read(todoListProvider), isEmpty);
+    container.read(todoListProvider.notifier).add('Write lesson');
+    expect(container.read(todoListProvider), ['Write lesson']);
+  });
+}
+```
+
+```text
+✓ fetchTodos (function provider, codegen) resolves to a list
+✓ TodoList (class provider, codegen) starts empty and add() appends
+
+00:00 +2: All tests passed!
+```
+
+## Rebuild control: `.autoDispose`, `.family`, `.select`, `ref.listen`
+
+Four tools that separately answer "when does this provider's state get created/destroyed?" and "when does *this widget* rebuild?":
+
+- **`.family`** — one provider instance per argument (e.g. per user id). Without it, a provider can only ever hold one value.
+- **`.autoDispose`** — tears the provider's state down once its last listener unsubscribes, instead of caching it for the app's lifetime. Combine with `.family` for anything scoped to a parameter (a per-item detail screen, a per-user profile) — otherwise you leak one cached instance *per distinct argument ever watched*, forever.
+- **`ref.watch(provider.select((s) => s.field))`** — subscribes to only one derived value. The watching widget rebuilds only when that specific value changes, not on every change to the provider's state.
+- **`ref.listen(provider, (previous, next) { ... })`** — runs a callback on change (for side effects: showing a `SnackBar`, navigating) **without** subscribing the calling widget to rebuilds.
+
+```dart
+// lib/family_and_select.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+// .family + .autoDispose: one FutureProvider instance PER userId, disposed
+// automatically once the last widget watching that userId unmounts.
+final userNameProvider =
+    FutureProvider.autoDispose.family<String, int>((ref, userId) async {
+  await Future<void>.delayed(const Duration(milliseconds: 5));
+  return 'user-$userId';
+});
+
+// A tiny probe for the disposal test below: records disposal via ref.onDispose.
+final disposeProbeProvider = Provider.autoDispose<int>((ref) {
+  ref.onDispose(() => disposeProbeLog.add('disposed'));
+  return 0;
+});
+final disposeProbeLog = <String>[];
+
+class Profile {
+  const Profile({required this.name, required this.age});
+  final String name;
+  final int age;
+}
+
+final profileProvider = NotifierProvider<ProfileNotifier, Profile>(ProfileNotifier.new);
+
+class ProfileNotifier extends Notifier<Profile> {
+  @override
+  Profile build() => const Profile(name: 'Ada', age: 30);
+
+  void birthday() => state = Profile(name: state.name, age: state.age + 1);
+  void rename(String name) => state = Profile(name: name, age: state.age);
+}
+```
+
+```dart
+// test/family_and_select_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/family_and_select.dart';
+
+int nameBuildCount = 0;
+
+class NameOnly extends ConsumerWidget {
+  const NameOnly({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    nameBuildCount++;
+    // select() rebuilds this widget ONLY when the selected field changes.
+    final name = ref.watch(profileProvider.select((p) => p.name));
+    return Text(name);
+  }
+}
+
+class _FakeProfileNotifier extends ProfileNotifier {
+  @override
+  Profile build() => const Profile(name: 'Overridden', age: 99);
+}
+
+void main() {
+  testWidgets('select() skips rebuild when an unrelated field changes', (tester) async {
+    nameBuildCount = 0;
+    await tester.pumpWidget(
+      ProviderScope(child: MaterialApp(home: Scaffold(body: const NameOnly()))),
+    );
+    expect(nameBuildCount, 1);
+
+    final container = ProviderScope.containerOf(tester.element(find.byType(NameOnly)));
+
+    container.read(profileProvider.notifier).birthday(); // age changes, name does not
+    await tester.pump();
+    expect(nameBuildCount, 1, reason: 'age is not selected — no rebuild');
+
+    container.read(profileProvider.notifier).rename('Grace'); // name changes
+    await tester.pump();
+    expect(nameBuildCount, 2, reason: 'name changed — rebuild');
+    expect(find.text('Grace'), findsOneWidget);
+  });
+
+  testWidgets('ref.listen fires a side effect without causing its own rebuild', (tester) async {
+    final events = <int>[];
+    int buildCount = 0;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Consumer(
+            builder: (context, ref, _) {
+              buildCount++;
+              ref.listen<Profile>(profileProvider, (previous, next) {
+                events.add(next.age);
+              });
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      ),
+    );
+    expect(buildCount, 1);
+    expect(events, isEmpty, reason: 'listen does not fire on initial build');
+
+    final container = ProviderScope.containerOf(tester.element(find.byType(Consumer)));
+    container.read(profileProvider.notifier).birthday();
+    await tester.pump();
+
+    expect(events, [31], reason: 'listener fired once with the new state');
+    expect(buildCount, 1, reason: 'ref.listen never rebuilds the widget that registered it');
+  });
+
+  testWidgets('ProviderScope(overrides:) replaces a provider for the whole subtree', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          // Override with a fake Notifier subclass: initial state comes from
+          // build(), never from setting `state` before build() has run.
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+        ],
+        child: MaterialApp(home: Scaffold(body: const NameOnly())),
+      ),
+    );
+    expect(find.text('Overridden'), findsOneWidget);
+  });
+
+  testWidgets('.autoDispose disposes provider state once the last widget watching it unmounts', (tester) async {
+    disposeProbeLog.clear();
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Consumer(
+            builder: (context, ref, _) {
+              ref.watch(disposeProbeProvider);
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      ),
+    );
+    expect(disposeProbeLog, isEmpty, reason: 'still mounted — not disposed yet');
+
+    // Unmount the only widget watching it.
+    await tester.pumpWidget(
+      UncontrolledProviderScope(container: container, child: const SizedBox()),
+    );
+    await tester.pump();
+
+    expect(disposeProbeLog, ['disposed'], reason: 'autoDispose tore the provider down with no watchers left');
+  });
+}
+```
+
+```text
+✓ select() skips rebuild when an unrelated field changes
+✓ ref.listen fires a side effect without causing its own rebuild
+✓ ProviderScope(overrides:) replaces a provider for the whole subtree
+✓ .autoDispose disposes provider state once the last widget watching it unmounts
+
+00:00 +4: All tests passed!
+```
+
+That third test is also the pattern for **unit/widget-testing anything built on Riverpod**: never let a test touch the real provider (a real network call, a real database) — override it inside `ProviderScope(overrides: [...])` (or `UncontrolledProviderScope(container: ...)` for a container you built and want to inspect directly) with a fake that returns known data.
+
+## Async state: `AsyncNotifier` and `AsyncValue.when`
+
+For state loaded asynchronously, `AsyncNotifier<T>`'s `build()` returns a `Future<T>`, and the provider exposes `AsyncValue<T>` — a union of loading/data/error that `.when()` forces you to handle exhaustively (no forgetting the error case, unlike a raw `try`/`catch` sprinkled through the UI).
+
+```dart
+// lib/weather_async_notifier.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+/// Toggle to force the fake fetch to throw, proving the error branch.
+bool weatherShouldFail = false;
+
+final weatherProvider = AsyncNotifierProvider<WeatherNotifier, String>(WeatherNotifier.new);
+
+class WeatherNotifier extends AsyncNotifier<String> {
+  @override
+  Future<String> build() async {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    if (weatherShouldFail) {
+      // Throwing an Error (not Exception) skips Riverpod 3's automatic
+      // retry and settles straight into a terminal AsyncError — see below
+      // for what happens if you throw a plain Exception instead.
+      throw StateError('weather service unavailable');
+    }
+    return 'Sunny, 22°C';
+  }
+}
+
+class WeatherView extends ConsumerWidget {
+  const WeatherView({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final weather = ref.watch(weatherProvider);
+    // AsyncValue.when forces you to handle all three states explicitly.
+    return weather.when(
+      loading: () => const Text('loading'),
+      error: (err, st) => Text('error: $err'),
+      data: (value) => Text('data: $value'),
+    );
+  }
+}
+```
+
+```dart
+// test/weather_async_notifier_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/weather_async_notifier.dart';
+
+void main() {
+  testWidgets('AsyncNotifier: loading, then data', (tester) async {
+    weatherShouldFail = false;
+    await tester.pumpWidget(const ProviderScope(child: MaterialApp(home: WeatherView())));
+    // First frame: the Future hasn't resolved yet.
+    expect(find.text('loading'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('data: Sunny, 22°C'), findsOneWidget);
+  });
+
+  testWidgets('AsyncNotifier: loading, then error', (tester) async {
+    weatherShouldFail = true;
+    addTearDown(() => weatherShouldFail = false);
+    await tester.pumpWidget(const ProviderScope(child: MaterialApp(home: WeatherView())));
+    expect(find.text('loading'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.textContaining('error: Bad state: weather service unavailable'), findsOneWidget);
+  });
+}
+```
+
+```text
+✓ AsyncNotifier: loading, then data
+✓ AsyncNotifier: loading, then error
+
+00:00 +2: All tests passed!
+```
+
+### A gotcha the tests above deliberately dodge: `AsyncNotifier` retries by default
+
+The `WeatherNotifier.build()` above throws a `StateError`, not an `Exception`, on purpose. Riverpod 3 gives every provider an automatic retry policy — reading `ProviderContainer.defaultRetry` directly from the installed `riverpod` 3.4.3 source (`lib/src/core/provider_container.dart`):
+
+```dart
+static Duration? defaultRetry(
+  int retryCount,
+  Object error, {
+  int maxRetries = 10,
+  Duration maxDelay = const Duration(milliseconds: 6400),
+  Duration minDelay = const Duration(milliseconds: 200),
+}) {
+  if (retryCount >= maxRetries) return null;
+  if (error is ProviderException || error is Error) return null;
+
+  final delay = minDelay * math.pow(2, retryCount).toInt();
+  if (delay > maxDelay) return maxDelay;
+
+  return delay;
+}
+```
+
+The condition `error is ProviderException || error is Error` is the whole story: throw a Dart `Error` (`StateError`, `ArgumentError`, an assertion) and Riverpod treats it as unrecoverable — immediate terminal `AsyncError`, exactly what the test above proves. Throw a plain `Exception` instead (the more common instinct for "something failed, like a network call"), and Riverpod retries up to 10 times with exponential backoff (200ms, 400ms, 800ms... capped at 6.4s) *before* ever reaching that terminal error — proven directly against a `ProviderContainer` in this probe, listening to `weatherProvider` after changing `throw StateError(...)` to `throw Exception(...)`:
+
+```text
+LISTENER: AsyncLoading<String>(error: Exception: weather service unavailable, stackTrace: ..., retrying)
+```
+
+Notice the state is still `AsyncLoading` — with an attached `error` and `retrying: true` — not `AsyncError`. `AsyncValue.when()`'s `loading` callback fires, not `error`, for as long as retries are in flight. This is exactly why the `WeatherView` example above stayed on `'loading'` indefinitely the first time this lesson's tests were written against `Exception` — a real trap, not a hypothetical one. If you want a network failure to surface as an error *immediately* in a widget test (rather than after up to ~30+ seconds of retries), either throw an `Error` subtype for genuinely-unrecoverable failures, or pass your own `retry:` callback to `AsyncNotifierProvider`/`@Riverpod(retry: ...)` to opt out.
+
+## `StateNotifier`, `StateProvider`, `ChangeNotifierProvider`: legacy in Riverpod 3
+
+Older Riverpod code (and a lot of tutorials still in circulation) uses APIs that the [official migration guide](https://riverpod.dev/docs/migration/from_state_notifier) now steers you away from:
+
+> "Along with Riverpod 2.0, new classes were introduced: `Notifier` / `AsyncNotifier`. `StateNotifier` is now discouraged in favor of those new APIs."
+>
+> "Since `StateNotifierProvider` is deprecated, `StateProvider` is to be avoided, too. Furthermore, as of now, there is no `StateProvider` equivalent for the new APIs."
+
+| Old API | Status | Replacement |
+| --- | --- | --- |
+| `StateNotifier` / `StateNotifierProvider` | discouraged/deprecated | `Notifier` / `NotifierProvider` (or `@riverpod class`) |
+| `StateProvider` | to be avoided | `Notifier` holding a primitive, or `@riverpod` function provider |
+| `ChangeNotifierProvider` (Riverpod's own, not `package:provider`'s) | transitional only | `AsyncNotifier` / `Notifier` |
+
+Riverpod's own `ChangeNotifierProvider` is a separate thing from `package:provider`'s widget of the same name — the [migration guide](https://riverpod.dev/docs/migration/from_change_notifier) is direct about its purpose: *"Within Riverpod, `ChangeNotifierProvider` is meant to be used to offer a smooth transition from pkg:provider"* — a bridge for porting an existing Provider app, not a pattern to reach for in new Riverpod code.
+
+## Provider vs Riverpod, honestly
 
 <Mermaid title="Provider vs Riverpod at a glance" code={compareDiagram} />
 
@@ -82,10 +646,85 @@ export const compareDiagram = `flowchart TB
   prov["Provider\nInheritedWidget + ChangeNotifier\ntied to the tree, runtime lookup"] --> use1["great for smaller apps,\nteams already using it"]
   rp["Riverpod\ntop-level providers\ncompile-safe, testable, composable"] --> use2["preferred for new apps,\ncomplex or testable state"]`;
 
-Both are excellent. Provider is simpler and ubiquitous; Riverpod is more robust for larger, testable apps and is where the ecosystem is heading. Either one is a fine default over hand-rolled `InheritedWidget` for real shared state.
+Both packages are maintained by the same author (Remi Rousselet, `rrousselGit`) — Riverpod is not a competitor so much as Provider's own sequel, built to remove the two things Provider structurally can't fix without a `BuildContext`: compile-time provider-not-found errors, and providers that don't need a widget tree at all to exist (easy unit testing, providers that depend on other providers). `package:provider` (6.1.5+1 on pub.dev) is **not** officially deprecated — it's simpler, has less to learn, and is still a completely reasonable choice for a small app or a team already fluent in it. What you lose sticking with Provider: no `.autoDispose`/`.family` equivalents, no `ref.listen`/`.select()`-style granular subscriptions, and any "provider not found" mistake is a runtime crash instead of impossible by construction.
+
+| Need | Use |
+| --- | --- |
+| Small app, team already knows Provider, `InheritedWidget`-shaped state | Provider |
+| Compile-safe access, per-parameter caching (`.family`), fine-grained rebuilds (`.select`), first-class async (`AsyncNotifier`) | Riverpod |
+| Testing providers without a widget tree at all | Riverpod (`ProviderContainer` directly) |
+| Migrating an existing Provider app incrementally | Riverpod's own `ChangeNotifierProvider` as a bridge, then move off it |
+
+## Mental Model
+
+Provider is "give `InheritedWidget` a nicer API" — state still physically lives in the tree, found by walking up from a `BuildContext`. Riverpod is "take state *out* of the tree entirely" — providers are plain top-level declarations, `ProviderScope` just holds the one `ProviderContainer` that stores their live state, and `ref` is your handle into that container, resolved by the *provider object itself*, not by walking widgets. That's why a missing `ProviderScope` fails the same way a missing `MaterialApp` around a `Theme.of(context)` call does — the read has nowhere to resolve against — and why Riverpod providers can depend on each other (`ref.watch(otherProvider)` inside a provider) with no widget involved at all.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Provider (`ChangeNotifierProvider` + `context.watch`) | Small API surface, no codegen, ubiquitous | Runtime "provider not found", coarser rebuild control, `BuildContext`-bound |
+| Riverpod, hand-written providers | No codegen step, still compile-safe | You write `NotifierProvider<X, Y>(X.new)` boilerplate yourself |
+| Riverpod + `@riverpod` codegen | Least boilerplate, inferred types, `.autoDispose` by default | `build_runner` in the loop; generated code is real code your analyzer checks |
+| `.family` + `.autoDispose` | No per-parameter memory leak | Must remember to pair them — `.family` alone never disposes |
+| `AsyncNotifier` + `.when()` | Exhaustive loading/data/error handling, no forgotten catch | Default retry-on-`Exception` can hide a failure behind "loading" far longer than expected |
+
+## Common Misconceptions
+
+- **"Riverpod doesn't need any widget at all."** It needs exactly one: `ProviderScope` at the root, to own the `ProviderContainer`. Proven above — remove it and every `ConsumerWidget` throws `Bad state: No ProviderScope found`.
+- **"`.family` alone is enough to avoid memory growth."** `.family` creates state **per argument**; without `.autoDispose` it caches every distinct argument's state forever, for the app's whole lifetime.
+- **".g.dart files are safe to hand-edit for a quick fix."** They're regenerated wholesale on the next `build_runner build`, silently discarding any manual edit — fix the annotated source, not the generated file.
+- **"An `AsyncValue` in `error` state means the request definitely failed."** Only for a genuinely terminal `AsyncError`. A `Exception`-thrown failure can sit in `AsyncLoading(error: ..., retrying: true)` for several retries first — proven above from `ProviderContainer.defaultRetry`'s own source.
+- **"`ref.watch` and `ref.listen` do the same thing."** `watch` subscribes *and* rebuilds the calling widget. `listen` runs a callback for side effects and never rebuilds the widget that registered it — proven above (`buildCount` stayed `1` through a state change).
+
+## Reading AI-generated code
+
+A generator (or an AI assistant) writing `@riverpod` code makes a specific, very common mistake: writing the annotated class or function correctly, but forgetting the file only compiles once codegen has run — a normal state mid-edit, but a real bug if shipped or copy-pasted into a lesson without the `part` directive.
+
+```dart
+// @expect-error missing `part` directive — extends_non_class + undefined_identifier, proven below
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class Counter extends _$Counter {
+  @override
+  int build() => 0;
+
+  void increment() => state++;
+}
+```
+
+Missing `part 'counter.g.dart';` — the real `flutter analyze` output from this exact snippet, run standalone in the probe:
+
+```text
+error • Classes can only extend other classes. Try specifying a different superclass, or removing the extends clause • extends_non_class
+warning • The method doesn't override an inherited method • override_on_non_overriding_member
+error • Undefined name 'state' • undefined_identifier
+```
+
+`_$Counter` doesn't exist without the `part` directive pulling in the generated file that defines it — so the analyzer sees `extends _$Counter` as extending an undefined name, and `state` (which `_$Counter`/`Notifier` would normally provide) as undefined too. Before trusting any AI-generated `@riverpod` snippet, check for:
+
+- A `part '<filename>.g.dart';` line matching the file's own name, immediately after the imports.
+- That the corresponding `.g.dart` actually exists (or a note that `build_runner` still needs to run) — a snippet with the `part` line but no generated file is just as broken until you run it.
+- `.autoDispose`/`@Riverpod(keepAlive: true)` intent matching the provider's real lifetime — codegen defaults to `.autoDispose`, which surprises anyone expecting Riverpod 1/2's non-generated default (which was **not** autoDispose).
+- A caught `Exception` where an `Error` was meant (or vice versa) inside an `AsyncNotifier.build()` — changes whether Riverpod retries silently or fails immediately, proven above.
+
+<SpotTheBug code={`// AI-generated: "add ProviderScope overrides for testing"
+Widget buildTestApp() {
+  return ProviderScope(
+    overrides: [
+      profileProvider.overrideWith(
+        () => ProfileNotifier()..state = const Profile(name: 'Test', age: 1),
+      ),
+    ],
+    child: const MaterialApp(home: NameOnly()),
+  );
+}`}>
+This compiles, but throws at runtime: `ProfileNotifier()..state = ...` sets `state` in the cascade **before** Riverpod has called `build()` on the fresh notifier — the exact "uninitialized state" trap proven in the probe (`Bad state: Tried to use a notifier in an uninitialized state`, with the fix suggestion "move your logic inside the `build` method instead"). The correct override is a Notifier **subclass** whose `build()` returns the desired state: `profileProvider.overrideWith(() => _FakeProfileNotifier())` where `_FakeProfileNotifier extends ProfileNotifier { @override Profile build() => const Profile(name: 'Test', age: 1); }` — exactly the pattern the `ProviderScope(overrides:)` test above uses.
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-**Provider** makes `InheritedWidget` + `ChangeNotifier` ergonomic — the core skill is `context.watch<T>()` (subscribe and rebuild) vs `context.read<T>()` (act without rebuilding). **Riverpod** decouples providers from the widget tree, making them compile-safe, testable, and composable via `ref.watch`/`ref.read`. Both beat hand-rolled InheritedWidget for shared state; Riverpod is the more robust default for new, larger apps.
+**Provider** makes `InheritedWidget` + `ChangeNotifier` ergonomic — the core skill is `context.watch<T>()` vs `context.read<T>()`. **Riverpod** moves providers out of the widget tree entirely, but still needs exactly one widget, `ProviderScope`, at the root — skip it and every `ConsumerWidget` throws `Bad state: No ProviderScope found`, proven above. Prefer `@riverpod` codegen over hand-written providers (it defaults to `.autoDispose` and infers types), pair `.family` with `.autoDispose` to avoid per-parameter leaks, use `.select()`/`ref.listen` to control rebuilds precisely, and remember `AsyncNotifier` retries a thrown `Exception` up to 10 times before settling into a terminal `AsyncError` — throw an `Error` for anything that should fail immediately. `StateNotifier`/`StateProvider` are legacy per Riverpod's own migration guide; `Notifier`/`AsyncNotifier` (or their `@riverpod` codegen forms) are the current default.
 </Callout>
 
 export const quizProvider = [
@@ -98,36 +737,73 @@ export const quizProvider = [
       'watch is only for Riverpod',
     ],
     answer: 1,
+    explain: 'Mixing them up is the most common Provider bug: using watch in a callback causes a rebuild loop risk, using read where you need live updates causes a stale UI.',
   },
   {
-    q: 'What does calling notifyListeners() on a ChangeNotifier do?',
+    q: 'A ConsumerWidget calls ref.watch(someProvider) with no ProviderScope anywhere above it in the tree. What happens, proven in the probe?',
     options: [
-      'Disposes the model',
-      'Tells widgets that are watching it to rebuild',
-      'Navigates to a new screen',
-      'Nothing at runtime',
+      'It silently uses a default empty state',
+      'It throws a StateError: "Bad state: No ProviderScope found"',
+      'It logs a warning but renders normally',
+      'It only fails in release builds',
     ],
     answer: 1,
+    explain: 'Captured verbatim from a widget test in this lesson: tester.takeException() returns a StateError with exactly that message the instant the widget tries to read a provider.',
   },
   {
-    q: 'What is Riverpod\'s key structural difference from Provider?',
+    q: 'Under @riverpod code generation, what is the default disposal behavior?',
     options: [
-      'It does not support state at all',
-      'Providers are top-level objects not tied to the widget tree, making them compile-safe and testable',
-      'It requires no build method',
-      'It runs on a separate isolate',
+      'Providers are kept alive forever by default, like hand-written NotifierProvider',
+      'Providers are autoDispose by default; use @Riverpod(keepAlive: true) to opt out',
+      'Disposal must always be configured manually',
+      'Only .family providers can be autoDispose',
     ],
     answer: 1,
+    explain: 'Confirmed two ways in the lesson: the docs state it directly, and the real generated todos_provider.g.dart shows isAutoDispose: true on both the function and class provider it produced.',
   },
   {
-    q: 'Which is the most common Provider bug?',
+    q: 'Why must .family always be paired with .autoDispose for a provider scoped to a parameter (like a per-user profile)?',
     options: [
-      'Forgetting to import Dart',
-      'Confusing watch and read — causing missed rebuilds or rebuilding too much',
-      'Using const constructors',
-      'Declaring too many widgets',
+      'It is only a style preference',
+      'Without .autoDispose, .family caches one instance PER distinct argument ever watched, for the app\'s entire lifetime — a real memory leak',
+      '.family already implies .autoDispose automatically',
+      '.autoDispose is required syntactically or the code fails to compile',
     ],
     answer: 1,
+    explain: 'The lesson proves autoDispose disposal directly with an onDispose probe; .family without it has no such teardown, so every parameter value ever watched keeps its state cached forever.',
+  },
+  {
+    q: 'What does ref.listen do that ref.watch does not, proven in the probe test?',
+    options: [
+      'Nothing different — they are aliases',
+      'ref.listen runs a callback on state change for side effects, without rebuilding the widget that registered it',
+      'ref.listen rebuilds the widget twice per change',
+      'ref.listen only works outside of build()',
+    ],
+    answer: 1,
+    explain: 'The probe test shows buildCount staying at 1 through a state change while the listen callback still fires with the new value — watch would have rebuilt the widget.',
+  },
+  {
+    q: 'An AsyncNotifier.build() throws a plain Exception (not an Error). What actually happens, per the real ProviderContainer.defaultRetry source quoted in this lesson?',
+    options: [
+      'It immediately becomes a terminal AsyncError',
+      'Riverpod retries up to 10 times with exponential backoff (200ms doubling, capped at 6.4s) before giving up; AsyncValue.when() keeps calling the loading branch, with error/retrying info attached, while retries are in flight',
+      'The app crashes immediately',
+      'Retries only happen in debug mode',
+    ],
+    answer: 1,
+    explain: 'Proven by reading defaultRetry\'s condition (error is ProviderException || error is Error returns null — no retry) directly from the installed riverpod 3.4.3 source, and by listening to a real ProviderContainer that showed AsyncLoading(error: ..., retrying: true) instead of AsyncError.',
+  },
+  {
+    q: 'Per the official Riverpod migration guide quoted in this lesson, what is the status of StateNotifier/StateNotifierProvider/StateProvider in Riverpod 3?',
+    options: [
+      'They remain the recommended default API',
+      'StateNotifier/StateNotifierProvider are discouraged/deprecated, and StateProvider — with no direct replacement — should be avoided too, in favor of Notifier/AsyncNotifier',
+      'Only StateProvider is deprecated; StateNotifier is still recommended',
+      'They were removed entirely and no longer compile',
+    ],
+    answer: 1,
+    explain: 'Quoted directly: "StateNotifier is now discouraged in favor of those new APIs" and "Since StateNotifierProvider is deprecated, StateProvider is to be avoided, too."',
   },
 ];
 

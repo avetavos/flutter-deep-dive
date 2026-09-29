@@ -1,6 +1,6 @@
 ---
 title: 'Provider & Riverpod'
-description: 'สองวิธี shared-state ที่ใช้กันมากที่สุด — Provider คือ InheritedWidget แบบ ergonomic และ Riverpod คือ provider ที่ compile-safe และแยกจาก tree'
+description: 'สองวิธี shared-state ที่ใช้กันมากที่สุด — Provider คือ InheritedWidget แบบ ergonomic และ Riverpod คือ provider ที่ compile-safe และแยกจาก tree พร้อมพิสูจน์ ProviderScope, @riverpod codegen และ AsyncNotifier ของจริง'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Provider: InheritedWidget ที่ ergonomic
 
@@ -41,7 +42,7 @@ context.read<CartModel>().add('Book');         // one-off action, no rebuild
 
 ## Riverpod: provider ที่ไม่ผูกกับ tree
 
-**Riverpod** คือการคิดใหม่โดยผู้เขียนคนเดิมที่แก้จุดหยาบของ Provider หมัดเด็ดของตัวเอง: provider เป็น **top-level object ไม่ผูกกับ widget tree** ซึ่งทำให้ compile-safe (อ่าน provider ที่ไม่มีอยู่ไม่ได้) และ test กับ combine ได้ง่าย
+**Riverpod** คือการคิดใหม่โดยผู้เขียนคนเดิม ([rrousselGit](https://github.com/rrousselGit)) ที่แก้จุดหยาบของ Provider หมัดเด็ดของตัวเอง: provider เป็น **top-level object ไม่ผูกกับ widget tree** ซึ่งทำให้ compile-safe (อ่าน provider ที่ไม่มีอยู่ไม่ได้) และ test กับ combine ได้ง่าย
 
 ```dart
 // A provider declared at top level — not in the widget tree.
@@ -68,24 +69,662 @@ class CounterView extends ConsumerWidget {
 }
 ```
 
-`Notifier<T>` คืน initial state ออกมาจาก `build()` (ไม่ใช่ constructor `super(initial)`) และการแก้ `state` จะ notify listener สังเกตว่ามีความต่าง `watch`/`read` แบบเดียวกันผ่าน `ref` ความต่างจาก Provider เป็นเชิงโครงสร้าง: ไม่มี `BuildContext` lookup, ไม่มี "provider not found" ตอน runtime, และ provider compose กันได้ (provider ตัวหนึ่ง `ref.watch` อีกตัวได้)
+`Notifier<T>` คืน initial state ออกมาจาก `build()` (ไม่ใช่ constructor `super(initial)`) และการแก้ `state` จะ notify listener สังเกตว่ามีความต่าง `watch`/`read` แบบเดียวกันผ่าน `ref` ความต่างจาก Provider เป็นเชิงโครงสร้าง: ไม่มี `BuildContext` lookup, ไม่มี "provider not found" ตอน runtime — *เว้นแต่คุณลืมชิ้นส่วนเดียวที่ Riverpod ยังต้องต่อกับ tree อยู่* นั่นคือหัวข้อถัดไป
 
-สำหรับ async state ตัวเทียบเท่าคือ `AsyncNotifier` / `AsyncNotifierProvider` ที่ `build()` คืน `Future` นอกจากนี้ Riverpod ยังมีสไตล์ code-generation ผ่าน `@riverpod` ที่ generate provider ให้จาก class หรือ function ที่ annotate ไว้
+## `ProviderScope` ไม่ใช่ของ optional — พิสูจน์จริง
 
-> API เดิมอย่าง `StateNotifier` / `StateNotifierProvider` และ `StateProvider` ตอนนี้เป็น **legacy** (deprecated ใน Riverpod 3) — คุณยังเจอใน code เดิมได้ แต่ code ใหม่ควรใช้ `Notifier` / `NotifierProvider` (หรือ `@riverpod` codegen)
+ตัวอย่างทั้งหมดข้างบนแอบสมมติบางอย่างเงียบ ๆ: มี `ProviderScope` อยู่เหนือ widget tree `ref.watch`/`ref.read` ของ Riverpod ยังต้องการ "ที่เก็บ" อยู่ดี — ที่เก็บนั้นคือ `ProviderContainer` และ `ProviderScope` คือ widget ที่สร้างมันขึ้นมาแล้วทำให้เข้าถึงได้ ข้ามมันไป แล้ว `ConsumerWidget` ทุกตัวจะ throw ทันทีที่พยายามอ่าน provider
 
-## เลือกระหว่างสองตัว
+```dart
+// lib/no_scope_counter.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-<Mermaid title="Provider vs Riverpod at a glance" code={compareDiagram} />
+final counterProvider = NotifierProvider<Counter, int>(Counter.new);
+
+class Counter extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void increment() => state++;
+}
+
+class CounterView extends ConsumerWidget {
+  const CounterView({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(counterProvider);
+    return Text('$count');
+  }
+}
+```
+
+```dart
+// test/no_scope_counter_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/no_scope_counter.dart';
+
+void main() {
+  testWidgets('a ConsumerWidget with no ProviderScope ancestor throws', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: CounterView()));
+    final exception = tester.takeException();
+    expect(exception, isA<StateError>());
+    expect(exception.toString(), contains('No ProviderScope found'));
+  });
+
+  testWidgets('wrapping the same tree in ProviderScope fixes it', (tester) async {
+    await tester.pumpWidget(
+      const ProviderScope(child: MaterialApp(home: CounterView())),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.text('0'), findsOneWidget);
+  });
+}
+```
+
+```text
+✓ a ConsumerWidget with no ProviderScope ancestor throws
+✓ wrapping the same tree in ProviderScope fixes it
+
+00:00 +2: All tests passed!
+```
+
+exception ตัวจริง capture มาตรง ๆ จาก probe (`flutter_riverpod` 3.4.3): `StateError` พร้อมข้อความ **"Bad state: No ProviderScope found"** วิธีแก้คือบรรทัดเดียวที่ตัวอย่างช่วง intro ข้ามไป:
+
+```dart
+void main() {
+  runApp(
+    const ProviderScope(          // <-- wraps the whole app, once, at the root
+      child: MyApp(),
+    ),
+  );
+}
+```
+
+<Callout title="กฎง่าย ๆ">
+ถ้าบทเรียน, tutorial, หรือ snippet ที่ AI เขียนใช้ `ConsumerWidget`/`ref.watch` แล้วคุณไม่เห็น `ProviderScope` ที่ไหนใน `main()` เลย แสดงว่ายังไม่ครบ — มันจะ crash ทันทีที่รัน ไม่ใช่แค่ log warning เฉย ๆ
+</Callout>
+
+## Code generation: `@riverpod`
+
+การเขียน `NotifierProvider<Counter, int>(Counter.new)` ด้วยมือโอเคสำหรับ provider เดียว แต่สำหรับ app จริง ตัว code generator ของ Riverpod (`riverpod_generator` ขับเคลื่อนโดย annotation `@riverpod` จาก `riverpod_annotation` ผ่าน `build_runner`) จะสร้างคำประกาศ provider, generic type และค่า default `.autoDispose` ให้เอง — คุณเขียนแค่ logic มันเขียน boilerplate
+
+```yaml
+# pubspec.yaml
+dependencies:
+  riverpod_annotation: ^4.0.7
+
+dev_dependencies:
+  riverpod_generator: ^4.0.9
+  build_runner: ^2.16.1
+```
+
+```dart
+// lib/todos_provider.dart
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+part 'todos_provider.g.dart';
+
+// Function provider — codegen infers `FutureProvider<List<String>>` from the
+// Future return type. `Ref` is the one generic ref type (not a bespoke
+// generated subtype) as of riverpod_generator 3+.
+@riverpod
+Future<List<String>> fetchTodos(Ref ref) async {
+  await Future<void>.delayed(const Duration(milliseconds: 10));
+  return const ['Buy milk', 'Walk the dog'];
+}
+
+// Class provider — codegen infers `NotifierProvider<TodoList, List<String>>`.
+// `_$TodoList` is generated; you extend it instead of `Notifier<List<String>>`.
+@riverpod
+class TodoList extends _$TodoList {
+  @override
+  List<String> build() => const [];
+
+  void add(String todo) => state = [...state, todo];
+}
+```
+
+รัน generator (`dart run build_runner build`, output จริงจาก probe นี้):
+
+```text
+  15s compiling builders/aot
+  0s riverpod_generator on 2 inputs; lib/todos_provider.dart
+  1s riverpod_generator on 2 inputs: 1 output, 1 no-op
+  0s source_gen:combining_builder on 2 inputs: 1 output, 1 no-op
+Built with build_runner/aot in 16s; wrote 2 outputs.
+```
+
+มันเขียน `todos_provider.g.dart` ไว้ข้าง ๆ ไฟล์ของคุณ **ห้ามแก้มือเด็ดขาด** — generate ใหม่แทน นี่คือ output จริงที่ไม่ได้แก้ไขสำหรับ snippet ข้างบน (riverpod_generator 4.0.9) เพื่อให้ `flutter analyze` ในบทนี้ตรวจมันเหมือนโปรเจกต์จริงที่ ship ออกไป:
+
+```dart
+// lib/todos_provider.g.dart
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'todos_provider.dart';
+
+// **************************************************************************
+// RiverpodGenerator
+// **************************************************************************
+
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
+
+@ProviderFor(fetchTodos)
+final fetchTodosProvider = FetchTodosProvider._();
+
+final class FetchTodosProvider
+    extends
+        $FunctionalProvider<
+          AsyncValue<List<String>>,
+          List<String>,
+          FutureOr<List<String>>
+        >
+    with $FutureModifier<List<String>>, $FutureProvider<List<String>> {
+  FetchTodosProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'fetchTodosProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$fetchTodosHash();
+
+  @$internal
+  @override
+  $FutureProviderElement<List<String>> $createElement(
+    $ProviderPointer pointer,
+  ) => $FutureProviderElement(pointer);
+
+  @override
+  FutureOr<List<String>> create(Ref ref) {
+    return fetchTodos(ref);
+  }
+}
+
+String _$fetchTodosHash() => r'933c5de7c7fb4234b76bf0238dbd4eb54724a768';
+
+@ProviderFor(TodoList)
+final todoListProvider = TodoListProvider._();
+
+final class TodoListProvider extends $NotifierProvider<TodoList, List<String>> {
+  TodoListProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'todoListProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$todoListHash();
+
+  @$internal
+  @override
+  TodoList create() => TodoList();
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(List<String> value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<List<String>>(value),
+    );
+  }
+}
+
+String _$todoListHash() => r'eb87d244626b9a25c1e1c380defa23b95f65d968';
+
+abstract class _$TodoList extends $Notifier<List<String>> {
+  List<String> build();
+  @$mustCallSuper
+  @override
+  WhenComplete runBuild() {
+    final ref = this.ref as $Ref<List<String>, List<String>>;
+    final element =
+        ref.element
+            as $ClassProviderElement<
+              AnyNotifier<List<String>, List<String>>,
+              List<String>,
+              Object?,
+              Object?
+            >;
+    return element.handleCreate(ref, build);
+  }
+}
+```
+
+สังเกต `isAutoDispose: true` ฝังอยู่ใน provider ที่ generate มาทั้งสองตัว — ยืนยัน claim ของเอกสารตรง ๆ ใน generated code เลย: [เอกสาร code-generation ของ Riverpod](https://riverpod.dev/docs/concepts/about_code_generation) ระบุว่า provider เป็น **autoDispose by default** ภายใต้ `@riverpod`; ถอนออกด้วย `@Riverpod(keepAlive: true)`
+
+```dart
+// test/todos_provider_test.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/todos_provider.dart';
+
+void main() {
+  test('fetchTodos (function provider, codegen) resolves to a list', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final todos = await container.read(fetchTodosProvider.future);
+    expect(todos, ['Buy milk', 'Walk the dog']);
+  });
+
+  test('TodoList (class provider, codegen) starts empty and add() appends', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    expect(container.read(todoListProvider), isEmpty);
+    container.read(todoListProvider.notifier).add('Write lesson');
+    expect(container.read(todoListProvider), ['Write lesson']);
+  });
+}
+```
+
+```text
+✓ fetchTodos (function provider, codegen) resolves to a list
+✓ TodoList (class provider, codegen) starts empty and add() appends
+
+00:00 +2: All tests passed!
+```
+
+## คุม rebuild: `.autoDispose`, `.family`, `.select`, `ref.listen`
+
+เครื่องมือสี่ตัวที่ตอบคำถามคนละข้อ: "state ของ provider นี้ถูกสร้าง/ทำลายเมื่อไร?" กับ "*widget นี้* rebuild เมื่อไร?"
+
+- **`.family`** — provider หนึ่ง instance ต่อหนึ่ง argument (เช่น ต่อ user id) ถ้าไม่มีอันนี้ provider จะเก็บได้แค่ค่าเดียวตลอดไป
+- **`.autoDispose`** — รื้อ state ของ provider ทิ้งทันทีที่ listener สุดท้าย unsubscribe แทนที่จะ cache ไว้ตลอดอายุ app จับคู่กับ `.family` เสมอสำหรับอะไรก็ตามที่ scope ตาม parameter (หน้ารายละเอียดต่อ item, profile ต่อ user) — ไม่งั้นคุณจะ leak instance ที่ cache ไว้ *ต่อ argument ที่แตกต่างกันทุกตัวที่เคยถูก watch* ตลอดไป
+- **`ref.watch(provider.select((s) => s.field))`** — subscribe แค่ค่าที่ derive มาค่าเดียว widget ที่ watch จะ rebuild ก็ต่อเมื่อค่านั้นเปลี่ยน ไม่ใช่ทุกครั้งที่ state ของ provider เปลี่ยน
+- **`ref.listen(provider, (previous, next) { ... })`** — รัน callback ตอนเปลี่ยน (สำหรับ side effect: โชว์ `SnackBar`, navigate) โดย**ไม่** subscribe widget ที่เรียกให้ rebuild
+
+```dart
+// lib/family_and_select.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+// .family + .autoDispose: one FutureProvider instance PER userId, disposed
+// automatically once the last widget watching that userId unmounts.
+final userNameProvider =
+    FutureProvider.autoDispose.family<String, int>((ref, userId) async {
+  await Future<void>.delayed(const Duration(milliseconds: 5));
+  return 'user-$userId';
+});
+
+// A tiny probe for the disposal test below: records disposal via ref.onDispose.
+final disposeProbeProvider = Provider.autoDispose<int>((ref) {
+  ref.onDispose(() => disposeProbeLog.add('disposed'));
+  return 0;
+});
+final disposeProbeLog = <String>[];
+
+class Profile {
+  const Profile({required this.name, required this.age});
+  final String name;
+  final int age;
+}
+
+final profileProvider = NotifierProvider<ProfileNotifier, Profile>(ProfileNotifier.new);
+
+class ProfileNotifier extends Notifier<Profile> {
+  @override
+  Profile build() => const Profile(name: 'Ada', age: 30);
+
+  void birthday() => state = Profile(name: state.name, age: state.age + 1);
+  void rename(String name) => state = Profile(name: name, age: state.age);
+}
+```
+
+```dart
+// test/family_and_select_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/family_and_select.dart';
+
+int nameBuildCount = 0;
+
+class NameOnly extends ConsumerWidget {
+  const NameOnly({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    nameBuildCount++;
+    // select() rebuilds this widget ONLY when the selected field changes.
+    final name = ref.watch(profileProvider.select((p) => p.name));
+    return Text(name);
+  }
+}
+
+class _FakeProfileNotifier extends ProfileNotifier {
+  @override
+  Profile build() => const Profile(name: 'Overridden', age: 99);
+}
+
+void main() {
+  testWidgets('select() skips rebuild when an unrelated field changes', (tester) async {
+    nameBuildCount = 0;
+    await tester.pumpWidget(
+      ProviderScope(child: MaterialApp(home: Scaffold(body: const NameOnly()))),
+    );
+    expect(nameBuildCount, 1);
+
+    final container = ProviderScope.containerOf(tester.element(find.byType(NameOnly)));
+
+    container.read(profileProvider.notifier).birthday(); // age changes, name does not
+    await tester.pump();
+    expect(nameBuildCount, 1, reason: 'age is not selected — no rebuild');
+
+    container.read(profileProvider.notifier).rename('Grace'); // name changes
+    await tester.pump();
+    expect(nameBuildCount, 2, reason: 'name changed — rebuild');
+    expect(find.text('Grace'), findsOneWidget);
+  });
+
+  testWidgets('ref.listen fires a side effect without causing its own rebuild', (tester) async {
+    final events = <int>[];
+    int buildCount = 0;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Consumer(
+            builder: (context, ref, _) {
+              buildCount++;
+              ref.listen<Profile>(profileProvider, (previous, next) {
+                events.add(next.age);
+              });
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      ),
+    );
+    expect(buildCount, 1);
+    expect(events, isEmpty, reason: 'listen does not fire on initial build');
+
+    final container = ProviderScope.containerOf(tester.element(find.byType(Consumer)));
+    container.read(profileProvider.notifier).birthday();
+    await tester.pump();
+
+    expect(events, [31], reason: 'listener fired once with the new state');
+    expect(buildCount, 1, reason: 'ref.listen never rebuilds the widget that registered it');
+  });
+
+  testWidgets('ProviderScope(overrides:) replaces a provider for the whole subtree', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          // Override with a fake Notifier subclass: initial state comes from
+          // build(), never from setting `state` before build() has run.
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+        ],
+        child: MaterialApp(home: Scaffold(body: const NameOnly())),
+      ),
+    );
+    expect(find.text('Overridden'), findsOneWidget);
+  });
+
+  testWidgets('.autoDispose disposes provider state once the last widget watching it unmounts', (tester) async {
+    disposeProbeLog.clear();
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Consumer(
+            builder: (context, ref, _) {
+              ref.watch(disposeProbeProvider);
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      ),
+    );
+    expect(disposeProbeLog, isEmpty, reason: 'still mounted — not disposed yet');
+
+    // Unmount the only widget watching it.
+    await tester.pumpWidget(
+      UncontrolledProviderScope(container: container, child: const SizedBox()),
+    );
+    await tester.pump();
+
+    expect(disposeProbeLog, ['disposed'], reason: 'autoDispose tore the provider down with no watchers left');
+  });
+}
+```
+
+```text
+✓ select() skips rebuild when an unrelated field changes
+✓ ref.listen fires a side effect without causing its own rebuild
+✓ ProviderScope(overrides:) replaces a provider for the whole subtree
+✓ .autoDispose disposes provider state once the last widget watching it unmounts
+
+00:00 +4: All tests passed!
+```
+
+test ตัวที่สามยังเป็น pattern สำหรับ **test อะไรก็ตามที่สร้างบน Riverpod** ด้วย: อย่าให้ test แตะ provider จริงเด็ดขาด (network call จริง, database จริง) — override มันข้างใน `ProviderScope(overrides: [...])` (หรือ `UncontrolledProviderScope(container: ...)` สำหรับ container ที่คุณสร้างเองและอยาก inspect ตรง ๆ) ด้วยของปลอมที่คืนข้อมูลที่รู้แน่นอน
+
+## Async state: `AsyncNotifier` กับ `AsyncValue.when`
+
+สำหรับ state ที่โหลดแบบ async `build()` ของ `AsyncNotifier<T>` คืน `Future<T>` และ provider จะ expose `AsyncValue<T>` — union ของ loading/data/error ที่ `.when()` บังคับให้คุณจัดการครบทุกเคส (ไม่มีลืม error case แบบที่ `try`/`catch` กระจัดกระจายใน UI ทำได้)
+
+```dart
+// lib/weather_async_notifier.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+/// Toggle to force the fake fetch to throw, proving the error branch.
+bool weatherShouldFail = false;
+
+final weatherProvider = AsyncNotifierProvider<WeatherNotifier, String>(WeatherNotifier.new);
+
+class WeatherNotifier extends AsyncNotifier<String> {
+  @override
+  Future<String> build() async {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    if (weatherShouldFail) {
+      // Throwing an Error (not Exception) skips Riverpod 3's automatic
+      // retry and settles straight into a terminal AsyncError — see below
+      // for what happens if you throw a plain Exception instead.
+      throw StateError('weather service unavailable');
+    }
+    return 'Sunny, 22°C';
+  }
+}
+
+class WeatherView extends ConsumerWidget {
+  const WeatherView({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final weather = ref.watch(weatherProvider);
+    // AsyncValue.when forces you to handle all three states explicitly.
+    return weather.when(
+      loading: () => const Text('loading'),
+      error: (err, st) => Text('error: $err'),
+      data: (value) => Text('data: $value'),
+    );
+  }
+}
+```
+
+```dart
+// test/weather_async_notifier_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/weather_async_notifier.dart';
+
+void main() {
+  testWidgets('AsyncNotifier: loading, then data', (tester) async {
+    weatherShouldFail = false;
+    await tester.pumpWidget(const ProviderScope(child: MaterialApp(home: WeatherView())));
+    // First frame: the Future hasn't resolved yet.
+    expect(find.text('loading'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('data: Sunny, 22°C'), findsOneWidget);
+  });
+
+  testWidgets('AsyncNotifier: loading, then error', (tester) async {
+    weatherShouldFail = true;
+    addTearDown(() => weatherShouldFail = false);
+    await tester.pumpWidget(const ProviderScope(child: MaterialApp(home: WeatherView())));
+    expect(find.text('loading'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.textContaining('error: Bad state: weather service unavailable'), findsOneWidget);
+  });
+}
+```
+
+```text
+✓ AsyncNotifier: loading, then data
+✓ AsyncNotifier: loading, then error
+
+00:00 +2: All tests passed!
+```
+
+### จุดที่ test ข้างบนหลบไปโดยตั้งใจ: `AsyncNotifier` retry เป็น default
+
+`WeatherNotifier.build()` ข้างบน throw `StateError` ไม่ใช่ `Exception` โดยตั้งใจ Riverpod 3 ให้ provider ทุกตัวมี retry policy อัตโนมัติ — อ่าน `ProviderContainer.defaultRetry` ตรง ๆ จาก source ของ `riverpod` 3.4.3 ที่ติดตั้งอยู่ (`lib/src/core/provider_container.dart`):
+
+```dart
+static Duration? defaultRetry(
+  int retryCount,
+  Object error, {
+  int maxRetries = 10,
+  Duration maxDelay = const Duration(milliseconds: 6400),
+  Duration minDelay = const Duration(milliseconds: 200),
+}) {
+  if (retryCount >= maxRetries) return null;
+  if (error is ProviderException || error is Error) return null;
+
+  final delay = minDelay * math.pow(2, retryCount).toInt();
+  if (delay > maxDelay) return maxDelay;
+
+  return delay;
+}
+```
+
+เงื่อนไข `error is ProviderException || error is Error` คือหัวใจทั้งหมด: throw `Error` ของ Dart (`StateError`, `ArgumentError`, assertion) แล้ว Riverpod ถือว่ากู้คืนไม่ได้ — เข้า terminal `AsyncError` ทันที ตรงตามที่ test ข้างบนพิสูจน์ ถ้า throw `Exception` ธรรมดาแทน (สัญชาตญาณที่พบบ่อยกว่าสำหรับ "มีอะไรบางอย่างพัง เช่น network call") Riverpod จะ retry สูงสุด 10 ครั้งด้วย exponential backoff (200ms, 400ms, 800ms... สูงสุด 6.4s) *ก่อน* จะถึง terminal error — พิสูจน์ตรง ๆ กับ `ProviderContainer` ใน probe นี้ โดย listen `weatherProvider` หลังเปลี่ยน `throw StateError(...)` เป็น `throw Exception(...)`:
+
+```text
+LISTENER: AsyncLoading<String>(error: Exception: weather service unavailable, stackTrace: ..., retrying)
+```
+
+สังเกตว่า state ยังเป็น `AsyncLoading` — พ่วง `error` กับ `retrying: true` — ไม่ใช่ `AsyncError` callback `loading` ของ `AsyncValue.when()` จะทำงาน ไม่ใช่ `error` ตราบใดที่ยัง retry อยู่ นี่คือเหตุผลตรง ๆ ว่าทำไมตัวอย่าง `WeatherView` ข้างบนค้างที่ `'loading'` ไม่รู้จบตอนแรกที่ test ของบทนี้เขียนด้วย `Exception` — เป็นกับดักจริง ไม่ใช่สมมติฐาน ถ้าอยากให้ network failure โผล่เป็น error *ทันที* ใน widget test (แทนที่จะรอ retry นานถึง 30+ วินาที) ให้ throw `Error` subtype สำหรับความล้มเหลวที่กู้คืนไม่ได้จริง ๆ หรือส่ง callback `retry:` ของคุณเองให้ `AsyncNotifierProvider`/`@Riverpod(retry: ...)` เพื่อถอน default ออก
+
+## `StateNotifier`, `StateProvider`, `ChangeNotifierProvider`: legacy ใน Riverpod 3
+
+Riverpod code เก่า (และ tutorial จำนวนมากที่ยังหมุนเวียนอยู่) ใช้ API ที่[migration guide ทางการ](https://riverpod.dev/docs/migration/from_state_notifier)ตอนนี้ชี้ให้เลี่ยง:
+
+> "Along with Riverpod 2.0, new classes were introduced: `Notifier` / `AsyncNotifier`. `StateNotifier` is now discouraged in favor of those new APIs."
+>
+> "Since `StateNotifierProvider` is deprecated, `StateProvider` is to be avoided, too. Furthermore, as of now, there is no `StateProvider` equivalent for the new APIs."
+
+| API เดิม | สถานะ | ตัวแทน |
+| --- | --- | --- |
+| `StateNotifier` / `StateNotifierProvider` | discouraged/deprecated | `Notifier` / `NotifierProvider` (หรือ `@riverpod class`) |
+| `StateProvider` | ควรเลี่ยง | `Notifier` ที่ถือ primitive หรือ `@riverpod` function provider |
+| `ChangeNotifierProvider` (ของ Riverpod เอง ไม่ใช่ของ `package:provider`) | ใช้เฉพาะช่วงเปลี่ยนผ่าน | `AsyncNotifier` / `Notifier` |
+
+`ChangeNotifierProvider` ของ Riverpod เองเป็นคนละตัวกับ widget ชื่อเดียวกันใน `package:provider` — [migration guide](https://riverpod.dev/docs/migration/from_change_notifier) พูดตรง ๆ ถึงจุดประสงค์: *"Within Riverpod, `ChangeNotifierProvider` is meant to be used to offer a smooth transition from pkg:provider"* — เป็นสะพานสำหรับย้าย app Provider เดิม ไม่ใช่ pattern ที่ควรใช้ใน Riverpod code ใหม่
+
+## Provider เทียบ Riverpod อย่างตรงไปตรงมา
+
+<Mermaid title="Provider เทียบ Riverpod แบบภาพรวม" code={compareDiagram} />
 
 export const compareDiagram = `flowchart TB
   prov["Provider\nInheritedWidget + ChangeNotifier\nผูกกับ tree, lookup ตอน runtime"] --> use1["ดีสำหรับ app เล็ก,\nทีมที่ใช้อยู่แล้ว"]
   rp["Riverpod\ntop-level provider\ncompile-safe, test ได้, compose ได้"] --> use2["นิยมสำหรับ app ใหม่,\nstate ซับซ้อนหรือต้อง test"]`;
 
-ทั้งคู่ยอดเยี่ยม Provider ง่ายกว่าและมีอยู่ทุกที่; Riverpod ทนทานกว่าสำหรับ app ใหญ่ที่ต้อง test และเป็นทิศทางที่ ecosystem กำลังมุ่งไป ตัวไหนก็เป็น default ที่ดีกว่า `InheritedWidget` ที่เขียนเองสำหรับ shared state จริง
+ทั้งสอง package ดูแลโดยผู้เขียนคนเดิม (Remi Rousselet, `rrousselGit`) — Riverpod ไม่ใช่คู่แข่งของ Provider เท่ากับเป็นภาคต่อของ Provider เอง สร้างมาเพื่อแก้สองอย่างที่ Provider แก้เชิงโครงสร้างไม่ได้ถ้าไม่มี `BuildContext`: compile-time provider-not-found error และ provider ที่ไม่ต้องพึ่ง widget tree เลยเพื่อมีตัวตน (unit test ง่าย, provider ที่ขึ้นกับ provider อื่นได้) `package:provider` (6.1.5+1 บน pub.dev) **ไม่** ถูกประกาศ deprecated อย่างเป็นทางการ — มันง่ายกว่า, เรียนรู้น้อยกว่า และยังเป็นตัวเลือกที่สมเหตุสมผลสำหรับ app เล็กหรือทีมที่คล่อง Provider อยู่แล้ว สิ่งที่เสียไปถ้ายึดกับ Provider: ไม่มีตัวเทียบเท่า `.autoDispose`/`.family`, ไม่มี `ref.listen`/`.select()` แบบ granular subscription และความผิดพลาด "provider not found" คือ runtime crash แทนที่จะเป็นไปไม่ได้โดยโครงสร้าง
+
+| ความต้องการ | ใช้ |
+| --- | --- |
+| App เล็ก, ทีมรู้จัก Provider อยู่แล้ว, state ทรง `InheritedWidget` | Provider |
+| อ่านแบบ compile-safe, cache ต่อ parameter (`.family`), rebuild แบบละเอียด (`.select`), async แบบ first-class (`AsyncNotifier`) | Riverpod |
+| Test provider โดยไม่มี widget tree เลย | Riverpod (`ProviderContainer` ตรง ๆ) |
+| ย้าย app Provider เดิมแบบค่อยเป็นค่อยไป | `ChangeNotifierProvider` ของ Riverpod เองเป็นสะพาน แล้วค่อยย้ายออก |
+
+## Mental Model
+
+Provider คือ "ให้ `InheritedWidget` มี API ที่ดีขึ้น" — state ยังอยู่ใน tree จริง ๆ หาเจอโดยเดินขึ้นจาก `BuildContext` Riverpod คือ "เอา state ออกจาก tree ไปเลย" — provider เป็นแค่คำประกาศ top-level ธรรมดา `ProviderScope` แค่ถือ `ProviderContainer` ตัวเดียวที่เก็บ state ที่ยังมีชีวิตของมัน และ `ref` คือ handle ของคุณเข้าไปใน container นั้น ที่ resolve โดย *ตัว provider object เอง* ไม่ใช่เดิน widget นี่คือเหตุผลที่ `ProviderScope` ที่หายไปพังแบบเดียวกับที่ `Theme.of(context)` พังถ้าไม่มี `MaterialApp` ห่ออยู่ — การอ่านไม่มีที่ resolve ด้วย — และเป็นเหตุผลที่ provider ของ Riverpod ขึ้นกันเองได้ (`ref.watch(otherProvider)` ข้างใน provider อื่น) โดยไม่ต้องมี widget เข้ามาเกี่ยวเลย
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| Provider (`ChangeNotifierProvider` + `context.watch`) | API surface เล็ก, ไม่มี codegen, มีอยู่ทุกที่ | "provider not found" ตอน runtime, คุม rebuild ได้หยาบกว่า, ผูกกับ `BuildContext` |
+| Riverpod, provider เขียนมือ | ไม่มีขั้นตอน codegen, ยัง compile-safe | ต้องเขียน `NotifierProvider<X, Y>(X.new)` boilerplate เอง |
+| Riverpod + `@riverpod` codegen | boilerplate น้อยสุด, type ถูก infer, `.autoDispose` by default | ต้องมี `build_runner` อยู่ใน loop; generated code เป็น code จริงที่ analyzer ตรวจ |
+| `.family` + `.autoDispose` | ไม่ leak memory ต่อ parameter | ต้องจำจับคู่กัน — `.family` เดี่ยว ๆ ไม่มีวัน dispose |
+| `AsyncNotifier` + `.when()` | จัดการ loading/data/error ครบทุกเคส, ไม่มี catch ที่ลืม | default retry-on-`Exception` อาจซ่อน failure ไว้หลัง "loading" นานกว่าที่คาด |
+
+## Common Misconceptions
+
+- **"Riverpod ไม่ต้องใช้ widget เลย"** ต้องใช้อย่างน้อยหนึ่งตัว: `ProviderScope` ที่ root เพื่อถือ `ProviderContainer` พิสูจน์ข้างบนแล้ว — เอาออกแล้ว `ConsumerWidget` ทุกตัว throw `Bad state: No ProviderScope found`
+- **"`.family` เดี่ยว ๆ พอแล้วสำหรับกันหน่วยความจำโต"** `.family` สร้าง state **ต่อ argument**; ถ้าไม่มี `.autoDispose` มันจะ cache ทุก argument ที่ต่างกันไว้ตลอดอายุ app
+- **"ไฟล์ .g.dart แก้มือได้ถ้าจะ fix เร็ว ๆ"** มัน generate ใหม่ทั้งไฟล์ทุกครั้งที่ `build_runner build` รัน ทิ้งการแก้มือแบบเงียบ ๆ — แก้ที่ source ที่ annotate ไว้ ไม่ใช่ generated file
+- **"`AsyncValue` ที่อยู่ใน `error` state แปลว่า request พังแน่นอน"** จริงเฉพาะ `AsyncError` แบบ terminal จริง ๆ เท่านั้น ความล้มเหลวที่ throw ด้วย `Exception` อาจอยู่ใน `AsyncLoading(error: ..., retrying: true)` หลายรอบก่อน — พิสูจน์ข้างบนจาก source ของ `ProviderContainer.defaultRetry` เอง
+- **"`ref.watch` กับ `ref.listen` ทำเหมือนกัน"** `watch` subscribe *และ* rebuild widget ที่เรียก `listen` รัน callback สำหรับ side effect และไม่เคย rebuild widget ที่ลงทะเบียนไว้ — พิสูจน์ข้างบน (`buildCount` ค้างที่ `1` ตลอดที่ state เปลี่ยน)
+
+## Reading AI-generated code
+
+Generator (หรือ AI assistant) ที่เขียน `@riverpod` code มักพลาดจุดหนึ่งที่เจอบ่อยมาก: เขียน class หรือ function ที่ annotate ถูกต้อง แต่ลืมว่าไฟล์จะ compile ได้ก็ต่อเมื่อ codegen รันแล้ว — สถานะปกติตอนแก้ไขกลางทาง แต่เป็น bug จริงถ้า ship ออกไปหรือ copy-paste ลงบทเรียนโดยไม่มี `part` directive
+
+```dart
+// @expect-error missing `part` directive — extends_non_class + undefined_identifier, proven below
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class Counter extends _$Counter {
+  @override
+  int build() => 0;
+
+  void increment() => state++;
+}
+```
+
+ขาด `part 'counter.g.dart';` — output จริงของ `flutter analyze` จาก snippet นี้ รันแยกใน probe:
+
+```text
+error • Classes can only extend other classes. Try specifying a different superclass, or removing the extends clause • extends_non_class
+warning • The method doesn't override an inherited method • override_on_non_overriding_member
+error • Undefined name 'state' • undefined_identifier
+```
+
+`_$Counter` ไม่มีอยู่ถ้าไม่มี `part` directive ดึง generated file ที่นิยามมันเข้ามา — analyzer เลยเห็น `extends _$Counter` เป็นการ extend ชื่อที่ไม่มีนิยาม และ `state` (ที่ `_$Counter`/`Notifier` ปกติจะให้มา) ก็ไม่มีนิยามเช่นกัน ก่อนเชื่อ snippet `@riverpod` ที่ AI generate มา เช็คสิ่งเหล่านี้:
+
+- มีบรรทัด `part '<filename>.g.dart';` ตรงกับชื่อไฟล์เอง อยู่ทันทีหลัง import
+- ไฟล์ `.g.dart` ที่ตรงกันมีอยู่จริง (หรือมีโน้ตว่ายังต้องรัน `build_runner`) — snippet ที่มีบรรทัด `part` แต่ไม่มี generated file ก็พังพอ ๆ กันจนกว่าจะรัน
+- ความตั้งใจ `.autoDispose`/`@Riverpod(keepAlive: true)` ตรงกับอายุจริงของ provider — codegen default เป็น `.autoDispose` ซึ่งทำให้คนที่คาดหวัง default ของ Riverpod 1/2 แบบไม่ generate (ที่**ไม่ใช่** autoDispose) แปลกใจ
+- catch `Exception` ในจุดที่ควรเป็น `Error` (หรือกลับกัน) ข้างใน `AsyncNotifier.build()` — เปลี่ยนว่า Riverpod จะ retry เงียบ ๆ หรือ fail ทันที พิสูจน์ข้างบนแล้ว
+
+<SpotTheBug code={`// AI-generated: "add ProviderScope overrides for testing"
+Widget buildTestApp() {
+  return ProviderScope(
+    overrides: [
+      profileProvider.overrideWith(
+        () => ProfileNotifier()..state = const Profile(name: 'Test', age: 1),
+      ),
+    ],
+    child: const MaterialApp(home: NameOnly()),
+  );
+}`}>
+โค้ดนี้ compile ผ่าน แต่ throw ตอน runtime: `ProfileNotifier()..state = ...` ตั้งค่า `state` ใน cascade **ก่อน** ที่ Riverpod จะเรียก `build()` บน notifier ตัวใหม่ — กับดัก "uninitialized state" ตัวเดียวกับที่พิสูจน์ไว้ใน probe (`Bad state: Tried to use a notifier in an uninitialized state`, พร้อมคำแนะนำแก้ "move your logic inside the `build` method instead") override ที่ถูกต้องคือ Notifier **subclass** ที่ `build()` คืน state ที่ต้องการ: `profileProvider.overrideWith(() => _FakeProfileNotifier())` โดยที่ `_FakeProfileNotifier extends ProfileNotifier { @override Profile build() => const Profile(name: 'Test', age: 1); }` — ตรงกับ pattern ที่ test `ProviderScope(overrides:)` ข้างบนใช้เป๊ะ
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-**Provider** ทำให้ `InheritedWidget` + `ChangeNotifier` ergonomic — ทักษะหลักคือ `context.watch<T>()` (subscribe แล้ว rebuild) เทียบกับ `context.read<T>()` (ทำ action โดยไม่ rebuild) **Riverpod** แยก provider ออกจาก widget tree ทำให้ compile-safe, test ได้ และ compose ได้ผ่าน `ref.watch`/`ref.read` ทั้งคู่ดีกว่า InheritedWidget เขียนเองสำหรับ shared state; Riverpod เป็น default ที่ทนทานกว่าสำหรับ app ใหม่ที่ใหญ่ขึ้น
+**Provider** ทำให้ `InheritedWidget` + `ChangeNotifier` ergonomic — ทักษะหลักคือ `context.watch<T>()` เทียบกับ `context.read<T>()` **Riverpod** ย้าย provider ออกจาก widget tree ทั้งหมด แต่ยังต้องมี widget ตัวเดียว คือ `ProviderScope` ที่ root — ข้ามมันแล้ว `ConsumerWidget` ทุกตัว throw `Bad state: No ProviderScope found` พิสูจน์ไว้ข้างบน เลือก `@riverpod` codegen มากกว่าเขียน provider มือ (default เป็น `.autoDispose` และ infer type ให้) จับคู่ `.family` กับ `.autoDispose` เพื่อกัน leak ต่อ parameter ใช้ `.select()`/`ref.listen` คุม rebuild ให้แม่นยำ และจำไว้ว่า `AsyncNotifier` จะ retry `Exception` ที่ throw สูงสุด 10 ครั้งก่อนจะเข้า `AsyncError` แบบ terminal — throw `Error` สำหรับอะไรที่ควร fail ทันที `StateNotifier`/`StateProvider` เป็น legacy ตาม migration guide ของ Riverpod เอง; `Notifier`/`AsyncNotifier` (หรือรูปแบบ codegen `@riverpod`) คือ default ปัจจุบัน
 </Callout>
 
 export const quizProvider = [
@@ -98,36 +737,73 @@ export const quizProvider = [
       'watch ใช้กับ Riverpod เท่านั้น',
     ],
     answer: 1,
+    explain: 'สลับสองอันนี้คือ bug ที่พบบ่อยที่สุดของ Provider: ใช้ watch ใน callback เสี่ยง rebuild loop, ใช้ read ในจุดที่ต้องการ update สด ๆ ทำให้ UI ค้าง',
   },
   {
-    q: 'การเรียก notifyListeners() บน ChangeNotifier ทำอะไร?',
+    q: 'ConsumerWidget เรียก ref.watch(someProvider) โดยไม่มี ProviderScope อยู่เหนือมันเลยใน tree เกิดอะไรขึ้น ตามที่พิสูจน์ใน probe?',
     options: [
-      'dispose model',
-      'บอก widget ที่ watch อยู่ให้ rebuild',
-      'navigate ไปหน้าใหม่',
-      'ไม่ทำอะไรตอน runtime',
+      'ใช้ default empty state แบบเงียบ ๆ',
+      'throw StateError: "Bad state: No ProviderScope found"',
+      'log warning แต่ render ปกติ',
+      'พังเฉพาะใน release build',
     ],
     answer: 1,
+    explain: 'capture มาตรง ๆ จาก widget test ในบทนี้: tester.takeException() คืน StateError พร้อมข้อความนั้นเป๊ะทันทีที่ widget พยายามอ่าน provider',
   },
   {
-    q: 'ความต่างเชิงโครงสร้างหลักของ Riverpod จาก Provider คืออะไร?',
+    q: 'ภายใต้ code generation @riverpod พฤติกรรม disposal default คืออะไร?',
     options: [
-      'ไม่รองรับ state เลย',
-      'provider เป็น top-level object ไม่ผูกกับ widget tree ทำให้ compile-safe และ test ได้',
-      'ไม่ต้องมี build method',
-      'รันบน isolate แยก',
+      'provider ถูกเก็บไว้ตลอดไป เหมือน NotifierProvider ที่เขียนมือ',
+      'provider เป็น autoDispose by default; ถอนออกด้วย @Riverpod(keepAlive: true)',
+      'ต้องตั้ง disposal เองเสมอ',
+      'มีแค่ provider .family เท่านั้นที่เป็น autoDispose ได้',
     ],
     answer: 1,
+    explain: 'ยืนยันสองทางในบทนี้: เอกสารบอกตรง ๆ และ todos_provider.g.dart ที่ generate จริงก็โชว์ isAutoDispose: true ทั้งใน function provider และ class provider',
   },
   {
-    q: 'อันไหนคือ bug ที่พบบ่อยที่สุดของ Provider?',
+    q: 'ทำไม .family ต้องจับคู่กับ .autoDispose เสมอสำหรับ provider ที่ scope ตาม parameter (เช่น profile ต่อ user)?',
     options: [
-      'ลืม import Dart',
-      'สับสน watch กับ read — ทำให้พลาด rebuild หรือ rebuild มากเกิน',
-      'ใช้ const constructor',
-      'ประกาศ widget มากเกิน',
+      'เป็นแค่สไตล์การเขียน',
+      'ถ้าไม่มี .autoDispose, .family จะ cache instance ต่อ argument ที่แตกต่างกันทุกตัวที่เคยถูก watch ไว้ตลอดอายุ app — leak memory จริง',
+      '.family มี .autoDispose ในตัวอยู่แล้วโดยอัตโนมัติ',
+      '.autoDispose จำเป็นทางไวยากรณ์ ไม่งั้น compile ไม่ผ่าน',
     ],
     answer: 1,
+    explain: 'บทเรียนพิสูจน์ disposal ของ autoDispose ตรง ๆ ด้วย onDispose probe; .family เดี่ยว ๆ ไม่มีการรื้อแบบนั้น ทุก parameter ที่เคย watch จึง cache state ไว้ตลอดไป',
+  },
+  {
+    q: 'ref.listen ทำอะไรที่ ref.watch ไม่ทำ ตามที่พิสูจน์ใน test ของ probe?',
+    options: [
+      'ไม่ต่างกันเลย — เป็น alias กัน',
+      'ref.listen รัน callback ตอน state เปลี่ยนสำหรับ side effect โดยไม่ rebuild widget ที่ลงทะเบียนไว้',
+      'ref.listen rebuild widget สองครั้งต่อการเปลี่ยนหนึ่งครั้ง',
+      'ref.listen ใช้ได้แค่นอก build() เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'test ใน probe โชว์ buildCount ค้างที่ 1 ตลอดที่ state เปลี่ยน แต่ listen callback ยังทำงานพร้อมค่าใหม่ — ถ้าเป็น watch widget จะ rebuild',
+  },
+  {
+    q: 'AsyncNotifier.build() throw Exception ธรรมดา (ไม่ใช่ Error) เกิดอะไรขึ้นจริง ๆ ตาม source ของ ProviderContainer.defaultRetry ที่ quote ไว้ในบทนี้?',
+    options: [
+      'กลายเป็น terminal AsyncError ทันที',
+      'Riverpod retry สูงสุด 10 ครั้งด้วย exponential backoff (200ms เพิ่มเป็นสองเท่า สูงสุด 6.4s) ก่อนจะยอมแพ้; AsyncValue.when() ยังเรียก loading branch ต่อไป พร้อมข้อมูล error/retrying แนบมา ระหว่างที่ยัง retry อยู่',
+      'app crash ทันที',
+      'retry เกิดเฉพาะใน debug mode เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์โดยอ่านเงื่อนไขของ defaultRetry ตรง ๆ (error is ProviderException || error is Error คืน null — ไม่ retry) จาก source ของ riverpod 3.4.3 ที่ติดตั้งจริง และจากการ listen ProviderContainer จริงที่โชว์ AsyncLoading(error: ..., retrying: true) แทนที่จะเป็น AsyncError',
+  },
+  {
+    q: 'ตาม migration guide ทางการของ Riverpod ที่ quote ไว้ในบทนี้ สถานะของ StateNotifier/StateNotifierProvider/StateProvider ใน Riverpod 3 คืออะไร?',
+    options: [
+      'ยังเป็น API default ที่แนะนำอยู่',
+      'StateNotifier/StateNotifierProvider ถูก discourage/deprecate และ StateProvider — ที่ไม่มีตัวแทนตรง ๆ — ก็ควรเลี่ยงเช่นกัน หันไปใช้ Notifier/AsyncNotifier แทน',
+      'มีแค่ StateProvider ที่ deprecate; StateNotifier ยังแนะนำอยู่',
+      'ถูกลบออกทั้งหมดและไม่ compile อีกต่อไป',
+    ],
+    answer: 1,
+    explain: 'quote ตรง ๆ: "StateNotifier is now discouraged in favor of those new APIs" และ "Since StateNotifierProvider is deprecated, StateProvider is to be avoided, too."',
   },
 ];
 
