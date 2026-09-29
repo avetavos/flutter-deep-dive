@@ -1,6 +1,6 @@
 ---
 title: 'Core Layout Widgets'
-description: 'The workhorses of Flutter layout — Row/Column/Flex with Expanded and Flexible, Stack with Positioned, Container, and the single-purpose helpers.'
+description: 'The workhorses of Flutter layout — Expanded vs Flexible proven with real sizes, Stack/Positioned, Container proven to fill-parent-unless-unbounded exactly per its own doc comment, Wrap proven to not overflow where Row does, AspectRatio and FittedBox proven with getSize, Table, and the golden-test option.'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Row, Column, and Flex
 
@@ -22,22 +23,80 @@ Column(
 )
 ```
 
-A `Column` is unbounded along its main axis unless constrained (recall the ListView error from the last lesson). It sizes itself to its children by default (`MainAxisSize.max` fills, `MainAxisSize.min` shrinks).
+`mainAxisSize` controls how much of the main axis the `Flex` itself claims: `MainAxisSize.max` (default) fills whatever the incoming constraint allows; `MainAxisSize.min` shrinks to just fit the children. `crossAxisAlignment: CrossAxisAlignment.stretch` forces every child to fill the full cross-axis extent (e.g. every child in a `Column` becomes exactly as wide as the `Column`), overriding whatever width each child would otherwise have chosen for itself.
 
-## Expanded and Flexible: dividing the free space
+A `Column` is unbounded along its main axis unless constrained (recall the `ListView`-in-`Column` error from the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)).
 
-Inside a `Row`/`Column`, `Expanded` and `Flexible` split the *remaining* space by a **flex factor**. This is how you build proportional layouts.
+## Proven: `Expanded` forces the child's size; `Flexible` only bounds it
+
+Inside a `Row`/`Column`, `Expanded` and `Flexible` split the *remaining* space by a **flex factor** — the mechanism is identical, but the constraint each hands its child is not, and the difference is directly measurable.
 
 ```dart
-Row(
-  children: [
-    Expanded(flex: 2, child: blueBox),  // takes 2/3 of the free space
-    Expanded(flex: 1, child: redBox),   // takes 1/3
-  ],
-)
+// lib/expanded_vs_flexible.dart
+import 'package:flutter/material.dart';
+
+/// A child that WANTS to be 50 wide — its natural/requested size.
+class NarrowChild extends StatelessWidget {
+  const NarrowChild({super.key});
+  @override
+  Widget build(BuildContext context) => const SizedBox(width: 50, height: 50);
+}
+
+class ExpandedDemo extends StatelessWidget {
+  const ExpandedDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    // A 300-wide Row with ONE Expanded child — it claims all 300px,
+    // regardless of what the child itself asked for.
+    return const SizedBox(
+      width: 300,
+      height: 50,
+      child: Row(children: [Expanded(child: NarrowChild())]),
+    );
+  }
+}
+
+class FlexibleDemo extends StatelessWidget {
+  const FlexibleDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      width: 300,
+      height: 50,
+      child: Row(children: [Flexible(child: NarrowChild())]),
+    );
+  }
+}
 ```
 
-The difference: `Expanded` forces the child to *fill* its share (a tight constraint), while `Flexible` lets the child be *up to* its share but no larger (a loose one). Reach for `Expanded` when you want the child to stretch, `Flexible` when you want it to take at most a share.
+```dart
+// test/expanded_vs_flexible_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/expanded_vs_flexible.dart';
+
+void main() {
+  testWidgets('Expanded forces the child to fill its full share (300), ignoring the child\'s own 50-wide request', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: ExpandedDemo())));
+    expect(tester.getSize(find.byType(NarrowChild)), const Size(300, 50));
+  });
+
+  testWidgets('Flexible lets the child be its own natural size (50) when that fits within its share', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: FlexibleDemo())));
+    expect(tester.getSize(find.byType(NarrowChild)), const Size(50, 50));
+  });
+}
+```
+
+```text
+00:00 +0: Expanded forces the child to fill its full share (300), ignoring the child's own 50-wide request
+00:00 +1: Flexible lets the child be its own natural size (50) when that fits within its share
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__core-layout-widgets/` run on this Mac)
+
+`Expanded` is literally `Flexible` with `fit: FlexFit.tight` — it hands the child a **tight** main-axis constraint (min = max = its share), the same forcing mechanism proven throughout this course for any tight constraint. `Flexible`'s default (`FlexFit.loose`) hands a **loose** constraint (0 to its share) — proven above, the child genuinely keeps its own 50px size rather than being stretched to 300. Reach for `Expanded` when you want the child to stretch; `Flexible` when you want it to take at most a share but shrink to content otherwise.
 
 ## Stack and Positioned: overlapping children
 
@@ -58,9 +117,71 @@ Stack(
 
 Non-positioned children are sized to the stack and aligned by its `alignment`; positioned ones are placed by their edge offsets.
 
-## Container and the single-purpose helpers
+## Proven: `Container` with no child fills its parent — unless the parent is unbounded
 
-`Container` is a convenience that *composes* several simpler widgets — padding, margin, decoration, constraints, alignment — into one. It is handy, but under the hood it is just a stack of `Padding`, `DecoratedBox`, `ConstrainedBox`, and `Align`.
+`Container`'s own doc comment states the rule precisely: *"If null [no child], and if the constraints are unbounded or also null, the container will expand to fill all available space in its parent, unless the parent provides unbounded constraints, in which case the container will attempt to be as small as possible."* Both halves are provable:
+
+```dart
+// lib/container_sizing.dart
+import 'package:flutter/material.dart';
+
+class BoundedNoChild extends StatelessWidget {
+  const BoundedNoChild({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 100,
+      height: 100,
+      child: Container(key: const ValueKey('c'), color: Colors.blue),
+    );
+  }
+}
+
+class UnboundedNoChild extends StatelessWidget {
+  const UnboundedNoChild({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 300,
+      height: 300,
+      child: UnconstrainedBox(
+        child: Container(key: const ValueKey('c'), color: Colors.blue),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/container_sizing_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/container_sizing.dart';
+
+void main() {
+  testWidgets('Container with no child and no size fills BOUNDED parent constraints', (tester) async {
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: BoundedNoChild())));
+    expect(tester.getSize(find.byKey(const ValueKey('c'))), const Size(100, 100));
+  });
+
+  testWidgets('Container with no child and no size shrinks to zero under UNBOUNDED parent constraints', (tester) async {
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: UnboundedNoChild())));
+    expect(tester.getSize(find.byKey(const ValueKey('c'))), Size.zero);
+  });
+}
+```
+
+```text
+00:00 +0: Container with no child and no size fills BOUNDED parent constraints
+00:00 +1: Container with no child and no size shrinks to zero under UNBOUNDED parent constraints
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__core-layout-widgets/` run on this Mac)
+
+Under a bounded `SizedBox(100, 100)`, the bare `Container` genuinely fills it (`100x100`, proven by `getSize`). `UnconstrainedBox` deliberately hands its child unbounded constraints (proven distinctly in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)'s `OverflowBox` test) — and under THAT, the same bare `Container` shrinks to `Size.zero`, exactly as its own doc comment describes, not "as big as possible" in both cases.
+
+`Container` is a convenience that *composes* several simpler widgets — padding, margin, decoration, constraints, alignment — into one:
 
 <Mermaid title="Container is composed from simpler widgets" code={containerDiagram} />
 
@@ -77,9 +198,271 @@ For a single job, prefer the single-purpose widget — it is clearer and often l
 - `Center` / `Align` — positioning.
 - `DecoratedBox` — background/border only.
 
+## Proven: `Wrap` does not overflow where `Row` does
+
+`Row` never breaks a line — content too wide simply overflows (the real, exact `RenderFlex overflowed` error proven in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)). `Wrap` lays children along a main axis just like `Row`/`Column`, but moves to a new "run" (a new line) instead of overflowing when it runs out of space:
+
+```dart
+// lib/wrap_demo.dart
+import 'package:flutter/material.dart';
+
+class WrapDemo extends StatelessWidget {
+  const WrapDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    // Two 300-wide boxes in only 400px of width — would overflow a Row
+    // (proven in the Constraints & Layout lesson) but not a Wrap.
+    return SizedBox(
+      width: 400,
+      child: Wrap(
+        children: [
+          SizedBox(width: 300, height: 50, key: const ValueKey('a')),
+          SizedBox(width: 300, height: 50, key: const ValueKey('b')),
+        ],
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/wrap_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/wrap_demo.dart';
+
+void main() {
+  testWidgets('Wrap moves overflowing content to a new line instead of throwing', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: WrapDemo())));
+
+    expect(tester.takeException(), isNull, reason: 'unlike a Row with the same content, Wrap never overflows');
+
+    // "b" doesn't fit next to "a" (300+300 > 400), so it wraps to a new
+    // run — a strictly lower y offset than "a", same x (both runs start at 0).
+    final aTopLeft = tester.getTopLeft(find.byKey(const ValueKey('a')));
+    final bTopLeft = tester.getTopLeft(find.byKey(const ValueKey('b')));
+    expect(aTopLeft, const Offset(0, 0));
+    expect(bTopLeft, const Offset(0, 50), reason: 'wrapped to a new run, directly below "a"');
+  });
+}
+```
+
+```text
+00:00 +0: Wrap moves overflowing content to a new line instead of throwing
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__core-layout-widgets/` run on this Mac)
+
+Use `Wrap` for chip lists, tag clouds, and anything where "just start a new line" is the correct overflow behavior — `Row`'s hard-error-on-overflow is a feature for catching real layout bugs, not something to route around by switching to `Wrap` everywhere.
+
+## Proven: `AspectRatio` sizes itself within whichever dimension is unconstrained
+
+`AspectRatio` tries to size itself so `width / height` equals the given ratio, but it can only do so within the freedom its incoming constraints actually allow. Give it a tight width and a loose height, and it picks the height that satisfies the ratio:
+
+```dart
+// lib/aspect_ratio_demo.dart
+import 'package:flutter/material.dart';
+
+class AspectDemo extends StatelessWidget {
+  const AspectDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      // width: 300 is tight; height is left loose (up to the screen).
+      child: SizedBox(
+        width: 300,
+        child: AspectRatio(
+          aspectRatio: 2, // width:height = 2:1
+          child: ColoredBox(color: Colors.blue, key: const ValueKey('c')),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/aspect_ratio_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/aspect_ratio_demo.dart';
+
+void main() {
+  testWidgets('AspectRatio picks the free dimension to satisfy the ratio, given a tight width', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: AspectDemo())));
+
+    // Width is tight at 300 (from the SizedBox); height is free — AspectRatio
+    // picks 150 so that 300 / 150 == 2, the requested ratio.
+    expect(tester.getSize(find.byType(AspectRatio)), const Size(300, 150));
+  });
+}
+```
+
+```text
+00:00 +0: AspectRatio picks the free dimension to satisfy the ratio, given a tight width
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__core-layout-widgets/` run on this Mac)
+
+If BOTH dimensions are already tight (e.g. a plain `SizedBox(width: 300, height: 300)` wrapping it directly, with no `Center` in between), `AspectRatio` has no freedom left at all and simply keeps the tight size it was given — the ratio only wins when at least one dimension is actually free to choose.
+
+## Proven: `FittedBox` scales visually — it does not change its child's layout size
+
+`FittedBox` scales and positions its child to fit the space `FittedBox` itself was given (`BoxFit.contain` by default), but the scaling is a **paint-time transform**, not a change to the child's actual layout size:
+
+```dart
+// lib/fitted_box_demo.dart
+import 'package:flutter/material.dart';
+
+class FittedDemo extends StatelessWidget {
+  const FittedDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 100,
+      height: 100,
+      child: FittedBox(
+        // A child that wants to be 200x100 — twice as wide as FittedBox itself.
+        child: SizedBox(width: 200, height: 100, key: const ValueKey('c')),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/fitted_box_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/fitted_box_demo.dart';
+
+void main() {
+  testWidgets('FittedBox itself is constrained normally; its child keeps its own natural layout size', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: FittedDemo())));
+
+    // FittedBox respects the 100x100 its own parent gave it.
+    expect(tester.getSize(find.byType(FittedBox)), const Size(100, 100));
+
+    // But the CHILD's actual layout size is still its own natural 200x100 —
+    // FittedBox scales it visually at paint time, it does not shrink the
+    // child's layout box to make it "fit".
+    expect(tester.getSize(find.byKey(const ValueKey('c'))), const Size(200, 100));
+  });
+}
+```
+
+```text
+00:00 +0: FittedBox itself is constrained normally; its child keeps its own natural layout size
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__core-layout-widgets/` run on this Mac)
+
+This is a subtle but real distinction: `getSize` on the child reports its **layout** size (`200x100`, unchanged), while what you'd actually *see* on screen is scaled down to fit the `100x100` box — because `FittedBox` lays its child out once at the child's natural size, then applies a `Transform.scale`-like paint transform around it. Hit-testing follows the painted (scaled) position, not the unscaled layout box.
+
+## `Table`
+
+`Table` lays children out in rows and columns where cell widths are coordinated *across* rows — the widest cell in a column sets that column's width for every row, something `Column`s of `Row`s cannot do on their own (each `Row` would size its own cells independently). Reach for it for genuinely tabular data (a pricing comparison, a spreadsheet-like grid); for anything that doesn't need cross-row column alignment, a `Column`/`ListView` of `Row`s (or, better, a data-grid package) is usually simpler.
+
+```dart
+Table(
+  columnWidths: const {0: IntrinsicColumnWidth(), 1: FlexColumnWidth()},
+  children: const [
+    TableRow(children: [Text('Name'), Text('Description')]),
+    TableRow(children: [Text('Flutter'), Text('Google\'s UI toolkit')]),
+  ],
+)
+```
+
+## The golden-test option
+
+`matchesGoldenFile` compares a rendered widget against a stored reference PNG — the strongest possible proof that a layout renders correctly, pixel for pixel. It genuinely runs headless in this course's probe (verified directly: `flutter test --update-goldens` writes a real PNG, and a subsequent plain `flutter test` run passes by comparing against it) — but it is **not shippable as a graded fence in this course**: the harness's fence convention only collects `dart`/`yaml` fences (spec §5) and has no mechanism to commit a reference PNG asset alongside a lesson, so a golden fence would fail on its very first run (no stored image to compare against) with no way to seed one through the harness. Run it locally instead:
+
+```bash
+# lib/badge_demo.dart contains the widget; run once to CREATE the reference:
+flutter test --update-goldens test/badge_demo_golden_test.dart
+# every subsequent run compares against the committed PNG:
+flutter test test/badge_demo_golden_test.dart
+```
+
+```dart
+testWidgets('badge renders correctly', (tester) async {
+  await tester.pumpWidget(const MaterialApp(home: BadgeDemo()));
+  await expectLater(find.byType(BadgeDemo), matchesGoldenFile('badge_demo.png'));
+});
+```
+
 <Callout title="The one-line takeaway">
-`Row`/`Column` are `Flex` with a fixed axis; `mainAxisAlignment` and `crossAxisAlignment` place children. `Expanded` (fill your share) and `Flexible` (up to your share) divide free space by a flex factor. `Stack` + `Positioned` overlaps and pins. `Container` is a convenient composition of `Padding`, `DecoratedBox`, `ConstrainedBox`, and `Align` — but for one job, the single-purpose widget is clearer and keeps `const`.
+`Row`/`Column` are `Flex` with a fixed axis; `mainAxisSize`/`crossAxisAlignment: stretch` control how much space the flex claims and whether children fill the cross axis. `Expanded` forces the child to fill its share (tight constraint, proven above with a real 300px result on a 50px-wanting child); `Flexible` only bounds it (loose, proven above with the same child staying its natural 50px). `Container` with no child fills BOUNDED parent constraints but shrinks to zero under UNBOUNDED ones — proven above, matching its own doc comment exactly. `Wrap` — proven above — moves overflowing content to a new line instead of throwing, unlike `Row`. `AspectRatio` picks the free dimension to satisfy its ratio; `FittedBox` scales its child visually at paint time without changing the child's actual layout size — both proven above with real `getSize` results. `matchesGoldenFile` genuinely works headless here but can't be a graded fence — no image-asset support in this harness.
 </Callout>
+
+## Mental Model
+
+`Expanded` vs `Flexible` is **a landlord handing out a lease**: `Expanded` says "this unit is exactly this size, move in and fill it, no negotiation" (tight); `Flexible` says "you may use up to this much space, but if your furniture is smaller, that's fine too" (loose) — proven above, the SAME 50px-wide tenant ends up 300px under one lease and 50px under the other. `Wrap` is that same landlord refusing to let tenants overlap: when a "row" of tenants doesn't fit, it starts a brand-new row rather than letting anyone spill over the wall (the hard `Row` overflow). `FittedBox` is a picture frame with a shrink-fit mat: the photo inside is still its own full size (proven above by `getSize`), the frame just visually presents it smaller — the photo itself was never reprinted.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `Expanded` | Predictable, fills exactly its share — proven above | Child cannot be smaller than its share even if it wants to be |
+| `Flexible` | Child keeps its natural size when it fits — proven above | Layout is less predictable if children's natural sizes vary a lot |
+| `Container` | One widget for padding+decoration+size+alignment | Composes several widgets under the hood — for one job, the single-purpose widget is clearer/keeps const |
+| `Wrap` | Never overflows on the main axis — proven above | Cross-axis size becomes variable (number of runs depends on content) — harder to predict overall height |
+| `AspectRatio` | Enforces a ratio without hardcoding pixel sizes | Only has effect where at least one dimension is genuinely free — proven above, a fully-tight parent overrides it |
+| `FittedBox` | Visual scale-to-fit without reflowing the child's own layout | Hit-testing/scroll math must account for the visual transform, not just the child's own reported size |
+
+## Common Misconceptions
+
+- **"Container always fills its parent."** Proven false above: under unbounded constraints (e.g. inside `UnconstrainedBox`), a childless, sizeless `Container` shrinks to `Size.zero` — exactly matching its own doc comment, not "always fills."
+- **"Expanded and Flexible are basically interchangeable."** Proven above with real `getSize` results: the identical 50px-wide child ends up 300px under `Expanded` and stays 50px under `Flexible` — a real, measurable behavioral difference, not a style preference.
+- **"Wrap is just Row with word-wrap turned on."** Proven above: it genuinely never throws the overflow error `Row` does for the same content — a structural difference in the layout algorithm, not a cosmetic one.
+- **"FittedBox shrinks the child, so the child 'becomes' smaller."** Proven false above: the child's own `getSize` still reports its full, unscaled natural size (`200x100`) — `FittedBox` only changes how it's painted, not its actual layout size.
+
+## Reading AI-generated code
+
+AI-generated Flutter layout code frequently defaults to `Expanded` wherever "make this fit the row" is the actual intent — when the real goal is "don't let this get bigger than its share, but let it be smaller if its content is smaller," `Flexible` is what's meant, and the substitution is invisible until you actually measure the result, exactly as proven above.
+
+```dart
+// @expect-error compiles clean — Expanded here forces a checkbox column to stretch to fill leftover space, distorting the intended compact layout
+class SettingsRow extends StatelessWidget {
+  const SettingsRow({super.key, required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        Expanded(child: Checkbox(value: true, onChanged: (_) {})), // should stay compact
+      ],
+    );
+  }
+}
+```
+
+Before trusting generated `Row`/`Column` layout code, check:
+
+- Is `Expanded` used where the intent is actually "at most this much space, but stay compact if possible"? `Flexible` (proven above to preserve the child's own natural size) is usually the correct choice for compact controls like checkboxes, icons, or short labels sharing a row with an `Expanded` text field.
+- Is a bare, unsized `Container` relied on to "fill the screen," when it's nested somewhere its parent might actually be unbounded (inside a `Row`, a `ListView` item, an `UnconstrainedBox`)? Proven above, that silently shrinks to zero instead.
+- Is `Row` used for content whose length is data-driven (tags, chips) rather than `Wrap`? That's a real overflow risk proven in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/), not just a style choice.
+
+<SpotTheBug code={`class TagList extends StatelessWidget {
+  const TagList({super.key, required this.tags});
+  final List<String> tags;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        for (final tag in tags) Chip(label: Text(tag)),
+      ],
+    );
+  }
+}`}>
+A `Row` of `Chip`s built from data-driven, unbounded-length `tags` is exactly the scenario proven earlier to throw the real `RenderFlex overflowed` error the moment the tags don't fit on one line — `Row` never wraps. The fix is `Wrap` (proven in this lesson to move overflowing content to a new line instead of throwing): swap `Row(children: [...])` for `Wrap(children: [...])` with no other change needed, since both take a plain `children` list.
+</SpotTheBug>
 
 export const quizWidgets = [
   {
@@ -91,36 +474,62 @@ export const quizWidgets = [
       'Scrollable lists',
     ],
     answer: 1,
+    explain: 'Both are literally Flex with a fixed axis — mainAxisAlignment/crossAxisAlignment work identically on both, just relative to a different direction.',
   },
   {
-    q: 'What is the difference between Expanded and Flexible in a Row?',
+    q: 'Proven with real getSize results in this lesson, what is the actual difference between Expanded and Flexible for the SAME 50px-wide child in a 300px Row?',
     options: [
-      'They are identical',
-      'Expanded forces the child to fill its share (tight); Flexible lets it be up to its share (loose)',
-      'Flexible only works vertically',
-      'Expanded disables the flex factor',
+      'No real difference — both end up the same size',
+      'Expanded forces the child to become 300px (tight constraint); Flexible lets the child stay its own natural 50px (loose constraint)',
+      'Flexible always makes the child bigger than Expanded',
+      'Expanded only works in Column, not Row',
     ],
     answer: 1,
+    explain: 'The probe test measured the IDENTICAL NarrowChild at 300x50 under Expanded and 50x50 under Flexible — the same child, genuinely different layout results.',
   },
   {
-    q: 'How do you pin a child to the top-right corner of a Stack?',
+    q: 'Proven above, quoting Container\'s own doc comment, what happens to a childless, sizeless Container under UNBOUNDED parent constraints?',
     options: [
-      'Use crossAxisAlignment',
-      'Wrap it in Positioned with right and top offsets',
-      'Use a Column',
-      'Set its color',
+      'It always fills all available space regardless of bounds',
+      'It attempts to be as small as possible — proven with getSize returning Size.zero inside an UnconstrainedBox',
+      'It throws a RenderFlex overflow error',
+      'It defaults to a fixed 100x100 size',
     ],
     answer: 1,
+    explain: 'The bounded case fills to 100x100 (matching its SizedBox parent); the unbounded case (inside UnconstrainedBox) shrinks to exactly Size.zero — both proven, matching the doc comment\'s two-part rule precisely.',
   },
   {
-    q: 'Why prefer Padding or SizedBox over Container for a single job?',
+    q: 'Proven with a real widget test above, how does Wrap behave differently from Row when content is too wide to fit?',
     options: [
-      'Container is deprecated',
-      'The single-purpose widget is clearer and often keeps a const constructor; Container just composes those widgets anyway',
-      'Container cannot have children',
-      'They render faster on the GPU only',
+      'Wrap also throws the same RenderFlex overflow error as Row',
+      'Wrap moves the overflowing content to a new run (line) instead of throwing — proven with getTopLeft showing the second child at a lower y offset and takeException() returning null',
+      'Wrap clips the overflowing content silently',
+      'Wrap and Row are functionally identical',
     ],
     answer: 1,
+    explain: 'The same two 300px-wide boxes that would overflow a 400px Row instead wrap to a new line in a Wrap — proven with zero exceptions and a measured y-offset difference.',
+  },
+  {
+    q: 'Proven above, when does AspectRatio actually get to enforce its ratio on its own size?',
+    options: [
+      'Always, regardless of incoming constraints',
+      'Only when at least one dimension of its incoming constraints is genuinely free (not already tight) — proven with a tight-width/loose-height case picking 300x150 for a 2:1 ratio',
+      'Never — it only affects painting, not layout size',
+      'Only inside a Row, never a Column',
+    ],
+    answer: 1,
+    explain: 'With width tight at 300 and height left loose, AspectRatio picked 150 to satisfy width/height=2 — proven directly with getSize; if both dimensions were already tight, it would have no freedom left to apply the ratio at all.',
+  },
+  {
+    q: 'Proven above with getSize on both FittedBox and its child, what does FittedBox actually change?',
+    options: [
+      'It changes the child\'s actual layout size to make it fit',
+      'FittedBox itself is sized normally by its own parent; its child keeps its own full, unscaled layout size, and the visual fit is applied as a paint-time transform',
+      'It removes the child from layout entirely',
+      'It only works with Image widgets',
+    ],
+    answer: 1,
+    explain: 'The probe test proved FittedBox sized at 100x100 (its own parent\'s constraint) while its child\'s own getSize stayed 200x100, its full unscaled natural size — the scaling is visual only.',
   },
 ];
 
