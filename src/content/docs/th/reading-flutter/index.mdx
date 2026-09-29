@@ -1,8 +1,190 @@
 ---
-title: 'reading-flutter'
-description: 'placeholder — being written'
+title: วิธีอ่านโค้ด Flutter ที่คุณไม่ได้เขียนเอง
+description: 'ลำดับการอ่านโค้ด Flutter ที่ AI สร้าง -- เริ่มจาก pubspec และข้อจำกัดของ SDK ก่อน ตามด้วยแนวทาง state, รูปทรงของ widget tree, lifecycle กับ async gap, layout constraints, navigation, platform กับ isolate แล้วจบที่ test/lint/release config -- เพราะสิ่งที่ทำให้โค้ด Flutter ที่ AI สร้างผิดพลาดส่วนใหญ่ render ได้ปกติบน emulator แล้วพังตอนหมุนจอ, rebuild, หรือตอน release'
 sidebar:
   order: 0
 ---
 
-Placeholder.
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ทุกโมดูลก่อนหน้านี้สอนให้คุณ *เขียน* widget, state, navigation, และโค้ด platform ส่วนโมดูลนี้สอนอีกครึ่งหนึ่ง: การอ่าน `StatefulWidget`, `ConsumerWidget`, ค่า config ของ `go_router`, หรือทั้งฟีเจอร์ที่คนอื่น -- หรือ AI -- เขียนไว้ แล้วตัดสินว่ามันถูกต้องจริงหรือไม่ AI assistant ยื่นหน้าจอที่ render ได้สวยงามตั้งแต่รันครั้งแรก และความสำเร็จนั้นแหละคือกับดัก: **emulator แสดงผลถูกต้อง, `flutter analyze` เงียบสนิท, และ demo ทำงานได้** -- ในขณะที่โค้ดแอบสมมติว่า widget จะไม่มีวัน dispose กลางคัน, list จะไม่มีวันสลับลำดับ, isolate boundary จะไม่มีวันเจอ `BuildContext`, หรือ route หนึ่งจะไม่มีวันถูกเข้าก่อน sibling ของมัน เครื่องมือของ Flutter แทบไม่ตรวจสอบ *พฤติกรรม* เลย `flutter analyze` พิสูจน์แค่ว่า type ตรงกัน มันไม่มีความเห็นว่า `setState` หลัง `await` ปลอดภัยหรือไม่, ขาด key หรือเปล่า, หรือ `ListView` มีที่ให้วางความสูงหรือไม่
+
+มีสามอย่างที่ทำให้เรื่องนี้แย่ลงเฉพาะกับ Flutter สามอย่าง อย่างแรก Flutter และ Dart เปลี่ยนรูปแบบจริง ๆ กลางช่วงข้อมูลฝึกสอน: `WillPopScope` ถูก deprecate ไปเป็น `PopScope`, `StateNotifierProvider`/`StateProvider` ย้ายไปอยู่หลัง import `legacy.dart` ของ Riverpod, class modifiers กับ sealed class เปลี่ยนวิธีเขียน state union ไปเลย และ `material_ui`/`cupertino_ui` เริ่มแยกตัวออกจาก `package:flutter/material.dart` -- ทำให้ snippet Flutter ที่ "ทันสมัย" จำนวนมากบนอินเทอร์เน็ตอธิบาย API ที่ compile ได้บน SDK เก่า แต่ขึ้น diagnostic จริงบน Flutter 3.47.5 / Dart 3.13 ที่คอร์สนี้ pin ไว้ อย่างที่สอง ตัวอย่าง Flutter สาธารณะจำนวนมากเป็นระดับ demo -- หน้าจอเดียวที่ปรับให้ "render ได้ครั้งเดียว" ไม่ใช่แอปจริงที่ปรับให้ "รอดจากการหมุนจอ, rebuild, และ widget ที่ถูก dispose กลาง `await`" -- ดังนั้น pattern ที่ไม่เป็นอันตรายใน gist 30 บรรทัด (ไม่มีการเช็ค `mounted`, ไม่มี key, สร้าง `Future` ใหม่ใน `build()`) จึงถูกก็อปไปแปะในโค้ดที่รับความเสี่ยงนี้ไม่ได้ อย่างที่สาม ทางแก้ที่เร็วที่สุดที่ AI assistant มักเลือกหลังจาก layout crash มักเป็นทางที่ใกล้ที่สุด ไม่ใช่ทางที่ถูกต้อง -- เช่นห่อด้วย `Expanded` เพราะข้อความ error พูดถึงคำนั้น โดยไม่เช็คว่ามี `Flex` ให้มันเป็นลูกหรือเปล่า
+
+<Mermaid title="ลำดับการอ่านโค้ด Flutter ที่คุณไม่ได้เขียนเอง" code={readingOrderDiagram} />
+
+export const readingOrderDiagram = `flowchart TD
+  A["1. pubspec &amp; ข้อจำกัด SDK<br/>สมมติ Flutter/Dart เวอร์ชันไหน, package เวอร์ชันไหน?"] --> B["2. แนวทาง State<br/>Provider, Riverpod, Bloc, setState -- และต่อสายไว้จริงหรือเปล่า (ProviderScope)?"]
+  B --> C["3. รูปทรง widget tree<br/>key บน children ที่สลับลำดับได้, โอกาสใช้ const, การใช้ GlobalKey"]
+  C --> D["4. Lifecycle &amp; async gap<br/>setState หลัง dispose, setState ระหว่าง build, ขาด mounted"]
+  D --> E["5. Layout constraints<br/>ความสูงไม่มีขอบเขต, Expanded นอก Flex, overflow"]
+  E --> F["6. Navigation<br/>ลำดับ route ของ go_router, go เทียบกับ push, redirect + refreshListenable"]
+  F --> G["7. Platform &amp; isolate<br/>dart:io บน web, MissingPluginException, compute() + BuildContext"]
+  G --> H["8. Test, lint &amp; release config<br/>lint อะไรทำงานจริง, print ใน release, --wasm, coverage"]
+`;
+
+## 1. pubspec & ข้อจำกัดของ SDK
+
+ก่อนดูอะไรเกี่ยวกับตัวโค้ด ให้เช็คก่อนว่าโค้ดนี้สมมติ SDK และ package เวอร์ชันอะไร -- เพราะ API ของ Flutter เอง (`PopScope`, `material_ui`, การแยก `legacy.dart` ของ Riverpod) และพฤติกรรมการจับคู่ route ของ go_router เปลี่ยนไปตามเวอร์ชันที่คอร์สนี้ใช้ตรง ๆ และ snippet ที่เขียนบน SDK เก่ากว่าอาจยัง parse หรือแม้แต่ analyze ผ่านได้ แต่พอเจอ SDK 3.47.5 จริง ๆ กลับเจอ deprecation หรือชื่อที่หาไม่เจอ
+
+- **สิ่งที่ต้องมองหา:** `environment: sdk:` ใน `pubspec.yaml` รองรับ Dart 3.13 จริงหรือเปล่า (หรือดูเหมือนก็อปมาจากโปรเจกต์ Dart 2 หรือ Dart 3 รุ่นแรก ๆ)? โค้ด import `package:flutter_riverpod/flutter_riverpod.dart` แล้วเรียก `StateProvider`/`StateNotifierProvider` ตรง ๆ หรือเปล่า -- ทั้งที่ API พวกนี้ย้ายไปอยู่หลัง import แยก `legacy.dart` ใน Riverpod 3 แล้ว? `pubspec.yaml` pin `custom_lint` กับ `riverpod_lint` คู่กันโดยไม่เช็คว่า resolve ได้จริงหรือเปล่า (บ่อยครั้งไม่ได้ -- พิสูจน์แล้วใน **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)**)?
+- **คำถามที่ควรถาม:** import นี้, named parameter นี้, class นี้ จะ resolve ได้จริงบน SDK และ package เวอร์ชันที่ประกาศไว้จริงหรือเปล่า -- หรือแค่ดูสมเหตุสมผลเพราะรูปร่างของ API ไม่ได้เปลี่ยนแม้ว่า entry point จะเปลี่ยนไปแล้ว?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม State & lifecycle ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** สำหรับ diagnostic จริง `undefined_function` ที่ `StateProvider` สร้างขึ้นโดยไม่มี `legacy.dart`; **[Project and Tooling](/flutter/th/tooling-and-production/project-and-tooling/)** สำหรับโครงสร้าง `pubspec.yaml` แบบเต็ม
+
+## 2. แนวทาง State
+
+เมื่อยืนยัน SDK แล้ว ให้เช็คว่าโค้ดอ้างว่าใช้แนวทาง state-management แบบไหน และต่อสายไว้จริงหรือเปล่า -- ความล้มเหลวที่พบบ่อยที่สุดของ Riverpod ไม่ใช่คำตอบผิด แต่คือ crash ทันทีที่ `ConsumerWidget` พยายามอ่านอะไรก็ตาม เพราะ widget ตัวเดียวที่ทำให้ state อ่านได้เลยไม่เคยถูกเพิ่มเข้ามา
+
+- **สิ่งที่ต้องมองหา:** มี `ProviderScope` อยู่เหนือ `ConsumerWidget`/`ref.watch` ตัวแรกหรือเปล่า? provider แบบ `.family` จับคู่กับ `.autoDispose` หรือเปล่า (`.family` ที่ไม่จับคู่จะรั่วสร้าง controller ทีละตัวต่อค่าพารามิเตอร์ ตลอดไป)? `ref.read` ถูกเรียกใน `build()` (ไม่ reactive แบบเงียบ ๆ) หรือ `ref.watch` ถูกเรียกใน callback (throw)? โค้ดหยิบ `StateNotifierProvider`/`StateProvider` จาก tutorial Riverpod 2 มาใช้ ทั้งที่ Riverpod 3 ของคอร์สนี้ย้ายทั้งคู่ไปไว้หลัง import `legacy.dart` แบบชัดเจนแล้วหรือเปล่า?
+- **คำถามที่ควรถาม:** ถ้า widget ตัวนี้เป็น `ConsumerWidget` ตัวแรกที่ build หลัง `runApp()` มีอะไรอยู่เหนือมันในต้นไม้ที่สร้าง `ProviderContainer` ที่ `ref` ของมันต้องการจริง ๆ หรือเปล่า -- หรือมันทำงานได้เพราะบังเอิญเท่านั้น เพราะหน้าจอบรรพบุรุษบางหน้าเผอิญเพิ่ม scope ไว้แล้ว?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม State & lifecycle ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** (ขาด `ProviderScope`, `StateProvider` แบบ legacy) และ **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** สำหรับผลลัพธ์จริงของ `riverpod_lint` rule `missing_provider_scope`; **[Provider and Riverpod](/flutter/th/state-management/provider-and-riverpod/)** สำหรับกลไกแบบเต็ม
+
+## 3. รูปทรงของ widget tree: key และ const
+
+เมื่อยืนยันว่า state ต่อสายไว้แล้ว ให้เช็ครูปทรงของ widget tree เอง -- Flutter จับคู่ widget กับ `State` ของมันด้วย type และตำแหน่ง เว้นแต่จะบอกเป็นอย่างอื่น และ AI assistant ที่ไม่เคยต้อง debug list ที่สลับลำดับ จะไม่มีสัญชาตญาณว่าเมื่อไหร่ค่า default นี้จะแอบผูก state ผิดแถวแบบเงียบ ๆ
+
+- **สิ่งที่ต้องมองหา:** list ของ stateful widget ที่สร้างด้วย `for`/`.map()` มี `key` หรือเปล่า ในเมื่อลำดับของมันเปลี่ยนได้ (ลาก-เรียงใหม่, sort, filter)? `GlobalKey` ตัวเดียวกันถูกใช้ซ้ำข้าม sibling widget แทนที่จะใช้ `UniqueKey()`/`ValueKey` ต่อรายการหรือเปล่า? widget ที่เป็นค่าคงที่ตอน compile ถูกทำเครื่องหมาย `const` จริงหรือเปล่า -- และชุด lint ของโปรเจกต์จับตัวที่ไม่ใช่ const ได้หรือเปล่า (`flutter_lints` 6 **ไม่มี** rule `prefer_const_constructors` แบบทั่วไป มีแค่ตัวแคบกว่าคือ `_in_immutables`)?
+- **คำถามที่ควรถาม:** ถ้าลำดับของ list นี้เปลี่ยนใน frame ถัดไป -- เรียงใหม่, ลบ, filter -- state ท้องถิ่นของแต่ละแถว (checkbox, สถานะขยาย/ยุบ, ตำแหน่ง cursor ของ text field) เดินทางไป *พร้อมกับ* ข้อมูลของมันหรือเปล่า หรือติดอยู่กับตำแหน่งบนจอแล้วไปจบที่แถวผิด?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Widget tree & keys ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** พิสูจน์ด้วย test การเรียงใหม่จริงและ `FlutterError` จริงข้อความ `Duplicate keys found`; **[Keys](/flutter/th/widgets/keys/)** สำหรับกลไกแบบเต็ม
+
+## 4. Lifecycle & async gap
+
+บั๊กประเภทที่พบบ่อยที่สุดของโค้ด Flutter ที่ AI สร้างไม่ใช่คำตอบผิดเลย -- แต่เป็นคำตอบที่ *ถูกต้อง* ซึ่งคำนวณเสร็จหลังจาก widget ที่ขอมันหายไปแล้ว เพราะไม่มีอะไรเช็ค `mounted` ระหว่าง `await` กับ `setState`
+
+- **สิ่งที่ต้องมองหา:** ทุก `setState` ที่เข้าถึงได้จาก `.then()`, การทำงานต่อหลัง `await`, `Timer`, หรือ `Stream` listener เช็ค `mounted` ก่อนหรือเปล่า? `build()` ของ widget หนึ่งเรียก `setState` บน widget *อื่น* แบบ synchronous จากภายใน `build()` ของตัวมันเองหรือเปล่า (กับดัก "cross-sibling")? field แบบ `late` เคยถูกอ่านบน code path ที่ method ซึ่งกำหนดค่าให้มันอาจยังไม่ทำงานหรือเปล่า?
+- **คำถามที่ควรถาม:** ถ้า user นำทางออกไป, เลื่อน widget นี้ออกจาก list ที่สร้างแบบ lazy, หรือ dispose `State` object นี้ *ก่อน* ที่ `Future`/`Stream` event ที่ค้างอยู่พอดีจะ resolve มีอะไรหยุด callback ที่ตามมาไม่ให้แตะ `State` ที่ไม่มีอยู่แล้วหรือเปล่า?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม State & lifecycle ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** พิสูจน์ด้วย error จริง `setState() called after dispose()` และ `setState() or markNeedsBuild() called during build` ที่จับสด ๆ สำหรับโมดูลนี้; **[setState and Lifecycle](/flutter/th/state-management/setstate-and-lifecycle/)** สำหรับลำดับ lifecycle แบบเต็ม
+
+## 5. Layout constraints
+
+Layout crash ของ Flutter เกือบทั้งหมดมีรูปแบบเดียวกันเมื่อรู้กติกาแล้ว -- แกนที่อยากมีขนาดเท่ากับเนื้อหาของมันถูกวางไว้ในที่ที่ให้พื้นที่ไม่จำกัดในแกนเดียวกันนั้น -- และโค้ดที่ AI สร้างมักหยิบทางแก้แรกที่พูดถึงชื่อ widget ที่ถูกต้อง (`Expanded`) โดยไม่เช็คว่ามี `Flex` ให้มันเป็นลูกหรือเปล่า
+
+- **สิ่งที่ต้องมองหา:** `ListView`/`GridView`/scrollable อื่นถูกวางตรง ๆ ใน `Column`/`Row` โดยไม่มีอะไรจำกัดขนาดแกนหลักของมันหรือเปล่า? (ในทางกลับกัน -- `Column` *ข้างใน* `ListView` ไม่ต้องการอะไรเพิ่ม; scrollable ให้ children ของมัน cross-axis ที่มีขอบเขตและ main-axis ที่ไม่มีขอบเขตอยู่แล้ว ซึ่งตรงกับที่ `Column` ที่มีขนาดตามธรรมชาติต้องการพอดี) `Expanded`/`Flexible` ถูกใช้เป็นลูกของสิ่งที่ไม่ใช่ `Row`/`Column`/`Flex` หรือเปล่า? `Row` ของ children ที่มีความกว้างคงที่ไม่มี `Expanded`/`Flexible`/scrolling เป็นทางออกสำหรับเนื้อหาที่กว้างกว่า viewport หรือเปล่า?
+- **คำถามที่ควรถาม:** เดินจาก widget นี้ขึ้นไปหาบรรพบุรุษที่ใกล้ที่สุดที่ให้ constraint แบบมีขอบเขตในแกนที่ overflow หรือ crash มีอยู่จริงหรือเปล่า -- และถ้าขนาดตามธรรมชาติของ widget นี้เกินกว่าที่มีอยู่จริง มี flex factor, scrollable, หรือ clip คั่นอยู่ระหว่างพวกมันหรือเปล่า?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Layout ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** พิสูจน์ด้วย error จริง `Vertical viewport was given unbounded height`, `Incorrect use of ParentDataWidget`, และ `RenderFlex overflowed`; **[Constraints and Layout](/flutter/th/layout-and-rendering/constraints-and-layout/)** สำหรับโมเดล constraints-down-sizes-up แบบเต็ม
+
+## 6. Navigation
+
+การจับคู่ route ของ go_router ไวต่อลำดับการประกาศในแบบที่ type system ไม่จับได้เลย และ callback `redirect` ของมัน default จะทำงานซ้ำเฉพาะตอนเกิด navigation event เท่านั้น -- ทั้งสองอย่างเป็นจุดที่ config การ routing ที่ AI สร้าง compile ได้, รันได้, แล้วทำผิดแบบเงียบ ๆ
+
+- **สิ่งที่ต้องมองหา:** route ที่มีพารามิเตอร์ (`/pets/:id`) ถูกประกาศ *ก่อน* route แบบ static ที่เฉพาะเจาะจงกว่าในระดับ segment เดียวกัน (`/pets/new`) หรือเปล่า? `context.go()` ถูกใช้ในจุดที่ user ต้องกดย้อนกลับได้หรือเปล่า (มันแทนที่ stack ไม่ใช่ push เข้าไป)? callback `redirect` อ่าน state ภายนอก (auth flag) โดยไม่ได้ชี้ `refreshListenable` ของ router ไปที่สิ่งที่แจ้งเตือนเมื่อ state นั้นเปลี่ยนหรือเปล่า?
+- **คำถามที่ควรถาม:** สำหรับตาราง route นี้ ในลำดับการประกาศนี้ route ไหน match กับ `/pets/new` ก่อนจริง ๆ -- และถ้าค่าที่ `redirect` นี้อ่านเปลี่ยนไปโดยไม่มี navigation event เกิดขึ้นพร้อมกัน มีอะไรบอกให้ router ประเมินใหม่หรือเปล่า?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Navigation ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** พิสูจน์ด้วย test route-order ที่ misroute จริง, การเปรียบเทียบความลึกของ stack ระหว่าง `go`/`push` จริง, และ test `redirect` ที่ค้างหน้า login จริง; **[Declarative Routing](/flutter/th/navigation/declarative-routing/)** และ **[Navigator and Routes](/flutter/th/navigation/navigator-and-routes/)** สำหรับทั้งสองกลไกแบบเต็ม
+
+## 7. Platform & isolate
+
+โค้ดที่ต้องรันเหมือนกันทั้งบนมือถือ, desktop, *และ* web หรือที่ offload งานไป isolate แยก คือจุดที่โมเดลความคิด "Dart เดียว, runtime เดียว" ของ AI assistant พังชัดเจนที่สุด -- บั๊กบางส่วนเกิดตอน compile ส่วนใหญ่เงียบจนกว่าจะเจอ platform เฉพาะหรือค่าที่ถูก capture เฉพาะ
+
+- **สิ่งที่ต้องมองหา:** `dart:io`/`Platform.isIOS`/`File` ถูกใช้แบบไม่มีเงื่อนไขในโค้ดที่ต้อง build สำหรับ web ด้วยหรือเปล่า (มัน compile ผ่านสำหรับ web ได้สบาย -- ทุก member แค่ throw `UnsupportedError` ทันทีที่มันรันจริง)? การเรียก `MethodChannel.invokeMethod` สมมติว่ามี native handler ลงทะเบียนไว้ทุก platform ที่แอป ship ไปหรือเปล่า? closure ของ `compute()` capture `BuildContext`, `Zone`, หรืออะไรก็ตามที่ผูกกับ binding ของ isolate นี้เองหรือเปล่า (ข้อมูลล้วน ๆ และแม้แต่บาง closure ก็ข้าม isolate boundary ได้สำเร็จใน Dart รุ่นปัจจุบัน -- แต่อะไรที่เข้าถึงได้จาก Element tree ยังทำไม่ได้อยู่ดี)?
+- **คำถามที่ควรถาม:** ถ้า function นี้รันบน platform เดียว (หรือ isolate เดียว) ที่ไม่เคยถูกทดสอบจริง ๆ มาก่อน ทุกค่าที่มันแตะยังมีความหมายอยู่ที่นั่นหรือเปล่า -- หรือมันทำงานได้แค่เพราะทุก environment ที่โค้ดนี้ถูกเขียนและทดสอบด้วยบังเอิญมีสมมติฐานร่วมกันที่โค้ดไม่เคยระบุไว้?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Platform ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** พิสูจน์ด้วย `flutter build web --release` จริงที่ compile `dart:io` ผ่านสบาย, `MissingPluginException` จริง, และข้อความ `Illegal argument in isolate message: object is unsendable` จริงที่จับได้จาก closure ของ `compute()` ที่ capture `BuildContext`; **[Platform Channels](/flutter/th/navigation/platform-channels/)** และ **[Isolates and compute()](/flutter/th/async-and-performance/isolates-and-compute/)** สำหรับทั้งสองกลไกแบบเต็ม
+
+## 8. Test, lint & release config
+
+ช่วงสุดท้ายคือการเช็คว่า tooling ของโปรเจกต์เองจับสิ่งข้างต้นได้จริงหรือเปล่า -- `flutter analyze` สีเขียวพิสูจน์น้อยกว่าที่มันดูเหมือนจะพิสูจน์มาก และ `print()` ที่ "แน่นอนว่า" ต้องถูกตัดออกจาก release build ก็ไม่ได้เป็นแบบนั้น
+
+- **สิ่งที่ต้องมองหา:** lint package อะไรถูก include จริง (`flutter_lints` 6 แคบกว่าชื่อเสียงของมัน -- ไม่มี `prefer_const_constructors` แบบทั่วไป เป็นต้น) และ `riverpod_lint`/`custom_lint` resolve คู่กันได้จริงที่เวอร์ชันที่ pin ไว้หรือเปล่า (บ่อยครั้งไม่ได้ ตามที่คอร์สนี้เช็คเอง)? มีอะไรใน release pipeline ตัด `print()` ออกหรือเปล่า (ไม่มี โดย default -- มันรอดเข้าไปใน release web bundle แบบคำต่อคำ พิสูจน์แล้วสำหรับโมดูลนี้)? `flutter build web --wasm` เคยถูกใช้เป็น portability gate หรือเปล่า หรือมีแค่ default build แบบ JS?
+- **คำถามที่ควรถาม:** ถ้า CI ของโปรเจกต์นี้รันแค่ `flutter analyze` แล้วถือว่าจบ บั๊กที่โมดูลนี้พิสูจน์แล้วข้อไหนจะยัง ship ออกไปอยู่ดี -- และ `analysis_options.yaml` ของโปรเจกต์ enable rule ตามที่ README ของมันอ้างจริงหรือเปล่า?
+- **บทที่อธิบายเรื่องนี้:** กลุ่ม Tooling & release ใน **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** พิสูจน์ด้วยการเทียบ lint package ของ `flutter_lints` 6 จริง และ string `print()` จริงที่พบคำต่อคำใน `main.dart.js` ของ release build; **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** สำหรับบันไดเครื่องมือแบบเต็มและสิ่งที่แต่ละตัวพิสูจน์ได้จริง; **[Testing](/flutter/th/tooling-and-production/testing/)**, **[Build and Release](/flutter/th/tooling-and-production/build-and-release/)**, และ **[Production Concerns](/flutter/th/tooling-and-production/production-concerns/)** สำหรับแต่ละหัวข้อแบบเต็ม
+
+## โมดูลนี้มีอะไรต่อ
+
+- **[The AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** -- pattern เฉพาะเจาะจง แต่ละอันมีโค้ดที่ AI มักเขียน, ผลลัพธ์จริงที่จับสดสำหรับโมดูลนี้ (analyzer diagnostic, `flutter test` ที่ fail, หรือ runtime error), และทางแก้
+- **[Review Checklist](/flutter/th/reading-flutter/review-checklist/)** -- pattern เดียวกันในรูปแบบ checklist หน้าเดียวแปดกลุ่ม เรียงตามลำดับการอ่านนี้ แต่ละบรรทัดลิงก์ไปยัง catalog entry และเครื่องมือที่พิสูจน์มัน
+- **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** -- บันไดเครื่องมือจริง: `flutter analyze`, โหมดเข้มของ `analysis_options.yaml`, `flutter_lints`/`riverpod_lint`/`custom_lint` (พร้อมข้อค้นพบเรื่อง version resolution จริงและเป็นปัจจุบัน), `dart fix --dry-run`, `flutter test` (`--coverage`, golden test), `flutter build web --wasm` เป็น portability gate, DevTools, DartPad, และ harness ของคอร์สนี้เอง
+- Worked review สามบท -- **[Worked Review 1](/flutter/th/reading-flutter/worked-review-1/)**, **[Worked Review 2](/flutter/th/reading-flutter/worked-review-2/)**, **[Worked Review 3](/flutter/th/reading-flutter/worked-review-3/)** -- นำลำดับการอ่านนี้ไปใช้กับฟีเจอร์เต็ม ๆ ที่ AI สร้าง (แอป todo แบบ Riverpod codegen กับ `StatefulShellRoute` ของ `go_router`, แอปสื่อที่ครอบคลุม sliver/isolate/chunked upload, และแอปข้ามแพลตฟอร์มที่ครอบคลุม `dart:io`/web, platform channel, และ release build) บทเหล่านี้เขียนและดูแลแยกจากบทนี้ -- ถ้าลิงก์ด้านล่าง 404 ระหว่างที่งานนั้นยังไม่เสร็จ ลำดับการอ่านและ catalog ด้านบนยังใช้ได้ด้วยตัวเอง
+- ทุกบท Phase 3 ก่อนหน้านี้ในคอร์สมี section **`## Reading AI-generated code`** ของตัวเองพร้อม `<SpotTheBug>` อยู่แล้ว -- catalog ของโมดูลนี้ไม่ซ้ำกับสิ่งเหล่านั้น มันรวบรวม pattern ชุดใหม่ที่กว้างกว่ารอบลำดับการอ่านเดียวกัน เริ่มจาก **[สารบัญคอร์ส](/flutter/th/)** ถ้าต้องการเส้นทางแบบบทต่อบทแบบเต็มแทน
+
+## Mental Model
+
+```text
+ลำดับการอ่านโค้ด Flutter ที่คุณไม่ได้เขียนเอง:
+
+1. pubspec & ข้อจำกัด SDK      -> Flutter/Dart เวอร์ชันไหน, package เวอร์ชันไหน?
+2. แนวทาง State                -> Provider/Riverpod/Bloc -- ต่อสายไว้จริงหรือเปล่า?
+3. รูปทรง widget tree           -> key บน children ที่สลับลำดับได้, const, GlobalKey
+4. Lifecycle & async gap        -> setState หลัง dispose, setState ระหว่าง build
+5. Layout constraints           -> ความสูงไม่มีขอบเขต, Expanded นอก Flex
+6. Navigation                   -> ลำดับ route ของ go_router, go เทียบ push, redirect
+7. Platform & isolate           -> dart:io บน web, MissingPluginException, compute()
+8. Test, lint & release         -> lint อะไรทำงานจริง, print ใน release, --wasm
+
+"มัน render ได้ดีบน emulator" ตอบคำถามพวกนี้แทบไม่ได้เลย -- catalog entry ส่วนใหญ่
+ของโมดูลนี้ render ได้สะอาดแล้วพังตอนหมุนจอ, rebuild, เรียงใหม่, navigate, หรือ release
+```
+
+## ความเข้าใจผิดที่พบบ่อย
+
+- **"ถ้า `flutter analyze` สะอาด แสดงว่าโค้ดถูกต้อง"** พิสูจน์แล้วตลอดทั้ง catalog ของโมดูลนี้: `ConsumerWidget` ที่ไม่มี `ProviderScope` อยู่เหนือมัน, `ListView` ที่กำลังจะ overflow constraint ของมัน, และ closure ของ `compute()` ที่กำลังจะพังตอน runtime ล้วน analyze ผ่านสะอาดหมด -- `flutter analyze` พิสูจน์แค่ว่า type และ import resolve ได้ ไม่เคยพิสูจน์ว่า runtime invariant คงอยู่
+- **"มัน render ถูกต้องครั้งหนึ่งแล้ว แสดงว่าบั๊กแก้แล้ว"** ตรงกันข้ามต่างหากที่ใกล้ความจริงกว่าสำหรับโมดูลนี้ส่วนใหญ่: การขาดเช็ค `mounted`, การขาด key, และความผิดพลาดเรื่องลำดับ route ล้วน render *ถูกต้อง* ในรอบแรกสุด -- มันแสดงราคาที่ต้องจ่ายก็ต่อเมื่อมีการหมุนจอ, เรียงใหม่, navigate รอบที่สอง, หรือ widget ถูก dispose กลางคัน
+- **"โค้ด Flutter ที่ AI สร้างแค่ต้องการ prompt ที่ใหม่กว่า"** ปัญหาไม่ใช่แค่ความล้าสมัย -- `StateProvider` ยังมีอยู่จริงใน Riverpod 3 แค่อยู่หลัง import ที่ต่างออกไป โค้ดที่ล้มเหลวมักจะ *อธิบาย API จริงที่ยังมีอยู่* แค่ไม่ใช่ตัวที่มันคิดว่ากำลังใช้อยู่
+- **"ความสำเร็จแบบเงียบ ๆ ปลอดภัยกว่า error"** ตรงกันข้ามต่างหากที่ใกล้ความจริงกว่าใน catalog นี้: `dart:io` บน web compile ผ่านโดยไม่มี warning สักอันและ throw ก็ต่อเมื่อการเช็ค `Platform.isIOS` รันจริงในเบราว์เซอร์ -- build ที่ปฏิเสธการ compile ไปเลยจะเป็นความล้มเหลวที่ปลอดภัยกว่า
+
+<Callout title="สรุปในบรรทัดเดียว">
+อ่านโค้ด Flutter ตามลำดับนี้ -- pubspec และข้อจำกัด SDK, แนวทาง state, รูปทรง widget tree, lifecycle กับ async gap, layout constraints, navigation, platform กับ isolate แล้วจบที่ test/lint/release config -- เพราะ tooling ของแต่ละชั้นตรวจสอบน้อยกว่าที่มันดูเหมือนจะตรวจสอบมาก และ "มัน render ได้ดี" บอกแค่ว่า emulator กับโค้ด agree กันใน frame เดียว ไม่เคยบอกว่ามันจะยัง agree กันหลังจากหมุนจอ, rebuild, หรือ release build
+</Callout>
+
+export const quizReadingFlutterIndex = [
+  {
+    q: "ทำไมโมดูลนี้ถึงเช็ค pubspec กับข้อจำกัดของ SDK ก่อนเช็คอะไรก็ตามเกี่ยวกับ state management หรือ widget?",
+    options: [
+      "เพราะ pubspec.yaml เป็นไฟล์ที่สั้นที่สุดให้อ่านเสมอ",
+      "เพราะ API ที่ย้ายข้าม SDK เวอร์ชัน (เช่น StateProvider ของ Riverpod ที่ย้ายไปหลัง import legacy.dart แยก) ทำให้ snippet ที่ดูเหมือนถูกต้อง compile ไม่ผ่านด้วยเหตุผลที่ไม่เกี่ยวกับตัว logic ของ widget เลย -- คำถามทุกข้อถัดไปไม่มีความหมายถ้าโค้ด import ผิดตั้งแต่แรกสำหรับ SDK นี้",
+      "เพราะ widget ไม่เคยขึ้นกับเวอร์ชัน SDK",
+      "ลำดับไม่สำคัญ",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วในกลุ่ม State & lifecycle ของ AI Bug Catalog: `StateProvider` ที่ใช้ผ่าน import หลักของ flutter_riverpod.dart สร้าง diagnostic จริง `undefined_function` บน Riverpod 3.4.3 ที่คอร์สนี้ pin ไว้ -- ทางแก้คือ import ที่ต่างออกไป ไม่ใช่ logic ที่ต่างออกไป",
+  },
+  {
+    q: "```text\nAnalyzing h1_prefer_const.dart...\nNo issues found!\n```\nนี่คือผลลัพธ์จริงของ `flutter analyze` สำหรับไฟล์ที่มี Text widget ที่ขาด `const` ทั้งที่ใส่ได้ ผลลัพธ์ที่สะอาดนี้พิสูจน์อะไรได้บ้างจริง ๆ?",
+    options: [
+      "ว่า widget นี้ไม่สามารถเป็น const ได้จริง ๆ",
+      "ไม่พิสูจน์อะไรเกี่ยวกับ const ที่ขาดไปโดยเฉพาะ -- พิสูจน์แล้วตรง ๆ: flutter_lints 6.0.0 มีแค่ prefer_const_constructors_in_immutables (const ภายใน build ของ class ที่เป็น @immutable เอง) ไม่มี rule prefer_const_constructors แบบทั่วไปที่จะจับ call site นี้ได้",
+      "ว่า flutter_lints ไม่ถูก apply จริง",
+      "ว่าไฟล์นี้ไม่มี lint rule เปิดใช้งานเลย",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ: การเพิ่ม `prefer_const_constructors: true` เข้า analysis_options.yaml อย่างชัดเจนแล้วรันซ้ำกับไฟล์เดียวกันสร้าง diagnostic ระดับ info จริงที่บรรทัดเดียวกัน -- rule นี้มีอยู่จริงและทำงานได้ แค่ไม่ได้อยู่ในชุด default ของ flutter_lints 6",
+  },
+  {
+    q: "ทำไมโมดูลนี้ถึงบอกว่า widget ที่ 'render ได้ดีบน emulator' ไม่ใช่หลักฐานว่ากลุ่ม lifecycle/async-gap สะอาด?",
+    options: [
+      "Emulator ไม่น่าเชื่อถือสำหรับการทดสอบเสมอ",
+      "การขาดเช็ค mounted, การใช้ GlobalKey ซ้ำ, หรือความผิดพลาดเรื่องลำดับ route ล้วนสำเร็จตั้งแต่การ render ครั้งแรกสุด -- มันจะล้มเหลวก็ต่อเมื่อเกิดเหตุการณ์บางอย่างในภายหลัง (dispose กลาง await, การเรียงใหม่, navigate รอบที่สอง) ซึ่งการ render สำเร็จครั้งเดียวไม่มีวันตัดออกได้",
+      "Emulator รัน StatefulWidget ไม่ถูกต้อง",
+      "เรื่องนี้สำคัญแค่กับ release build เท่านั้น",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตลอดทั้ง catalog: entry ของ setState-after-dispose และ setState-during-build ทั้งคู่ต้องการลำดับเหตุการณ์ที่เฉพาะเจาะจง (mount แล้ว dispose แล้ว resolve) ที่การ pump สำเร็จครั้งแรกไม่มีวันทดสอบ -- บั๊กมีอยู่จริงตั้งแต่บรรทัดแรกของโค้ด แต่มองไม่เห็นจนกว่าลำดับนั้นจะเกิดขึ้น",
+  },
+  {
+    q: "ขั้นตอนไหนในลำดับการอ่านที่ถามโดยเฉพาะว่า closure ของ compute() capture อะไรที่เข้าถึงได้จาก Element tree หรือเปล่า แทนที่จะถามแค่ 'closure นี้ capture ตัวแปรภายนอกหรือเปล่า'?",
+    options: [
+      "รูปทรง widget tree",
+      "Layout constraints",
+      "Platform & isolate",
+      "Test, lint & release config",
+    ],
+    answer: 2,
+    explain: "พิสูจน์แล้วตรง ๆ ในกลุ่ม Platform ของ AI Bug Catalog: closure ของ compute() ที่ capture int ธรรมดา และแม้แต่ตัวที่ capture instance method ที่ bind ไว้ ทั้งคู่ข้าม isolate boundary สำเร็จบน Dart 3.13.4 ที่คอร์สนี้ pin ไว้ -- มีแค่ closure ที่ capture BuildContext จริง ๆ ที่สร้าง error จริง `Illegal argument in isolate message: object is unsendable` เพราะ BuildContext เข้าถึง Zone ได้ทางอ้อม ซึ่ง unsendable จริง ๆ",
+  },
+  {
+    q: "ทำไมโมดูลนี้ถึงมองว่าลำดับการประกาศของตาราง route เป็นสิ่งที่ต้องเช็คโดยเฉพาะ แทนที่จะเชื่อว่า go_router จะจับคู่ route ที่ 'เฉพาะเจาะจงที่สุด' เสมอ?",
+    options: [
+      "go_router ไม่รองรับ route ที่มีพารามิเตอร์",
+      "go_router จับคู่ route ตามลำดับที่ประกาศไว้ ไม่ใช่ตามความเฉพาะเจาะจง -- route ที่มีพารามิเตอร์ (/pets/:id) ที่ประกาศก่อน route แบบ static (/pets/new) ในระดับ segment เดียวกันจะ match กับ /pets/new ก่อน โดยที่ id เท่ากับ string 'new' ตรง ๆ",
+      "เรื่องนี้สำคัญแค่เมื่อมี route มากกว่า 10 ตัว",
+      "ลำดับ route ถูกสุ่มใหม่ทุกครั้งที่ rebuild",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ ด้วย widget test จริง: การ navigate ไป /pets/new กับ router ที่ประกาศ /pets/:id ก่อน render 'pet id=new' ไม่ใช่ฟอร์มเพิ่มสัตว์เลี้ยงใหม่ -- การสลับลำดับสอง GoRoute (route แบบ static ก่อน) แก้ได้โดยไม่ต้องเปลี่ยนอะไรอื่นเลย",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/index" questions={quizReadingFlutterIndex} />
+
+<ProgressTracker client:visible id="reading-flutter/index" />
