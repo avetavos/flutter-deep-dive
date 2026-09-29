@@ -1,6 +1,6 @@
 ---
 title: 'Widgets and the Tree'
-description: 'สาม tree ที่อยู่เบื้องหลังทุกแอป Flutter — widget เป็น immutable config, element เป็น living instance และ render object ที่ทำงานจริง'
+description: 'สาม tree ที่อยู่เบื้องหลังทุกแอป Flutter — พิสูจน์ด้วย test ที่ spy `createElement`/`didUpdateWidget`, ทำไม `const` widget ถึงข้าม rebuild ทั้งหมด และสถานะจริงของ `package:flutter/material.dart` ใน 3.47'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## composition ไม่ใช่ inheritance
 
@@ -30,11 +31,11 @@ Widget build(BuildContext context) {
 }
 ```
 
-นี่คือ composition over inheritance แบบสุดโต่ง: widget เล็ก ๆ จำนวนมาก แต่ละตัวทำสิ่งเดียว nest กันจนเป็นภาพรวม `Center`, `Padding`, `Column` ไม่ใช่ของประดับ — widget เหล่านี้ *คือ* layout
+นี่คือ composition over inheritance แบบสุดโต่ง: widget เล็ก ๆ จำนวนมาก แต่ละตัวทำสิ่งเดียว nest กันจนเป็นภาพรวม `Center`, `Padding`, `Column` ไม่ใช่ของประดับ — widget เหล่านี้ *คือ* layout ไม่มี "ภาษา layout" แยกต่างหากให้เรียน (เทียบกับ [Flutter layout → React CSS mental map](/flutter/th/layout-and-rendering/core-layout-widgets/) ถ้ามาจากฝั่งเว็บ): widget tree **คือ** stylesheet เอง
 
 ## สาม tree
 
-นี่คือ model ที่อธิบายเกือบทุกอย่างเกี่ยวกับ behavior และ performance ของ Flutter ไม่ได้มี tree เดียว — มี **สาม tree** ที่ถูก sync ให้ตรงกัน:
+นี่คือ model ที่อธิบายเกือบทุกอย่างเกี่ยวกับ behavior และ performance ของ Flutter ไม่ได้มี tree เดียว — มี **สาม tree** ที่ถูก sync ให้ตรงกัน บทนี้พิสูจน์ claim หลักด้วย test จริง; ส่วนกลไกเต็ม ๆ — `Element.update`, `BuildOwner.buildScope`, `RenderObject.markNeedsLayout` ตรงจาก source `flutter/flutter` — ดูที่ [Flutter Internals: the Three Trees](/flutter/th/flutter-internals/three-trees/)
 
 <Mermaid title="Widget, Element และ Render tree ทำงานคู่ขนานกัน" code={treesDiagram} />
 
@@ -51,25 +52,269 @@ export const treesDiagram = `flowchart LR
   W -.creates.-> E
   E -.creates.-> R`;
 
-- **Widget** — description ที่ immutable ที่คุณเขียน rebuild ตลอดและทิ้งไป ถูก
-- **Element** — *living instance* ของ widget ณ ตำแหน่งหนึ่งใน tree element อยู่ต่อเนื่องข้าม rebuild, ถือ `State` ของ stateful widget และตัดสินว่า widget ใหม่จะ update element นี้ได้ หรือต้องสร้างใหม่แทน
+- **Widget** — description ที่ immutable ที่คุณเขียน rebuild ตลอดและทิ้งไป ถูก `createElement()` คือ method เดียวของทุก widget ที่สร้างสิ่งที่อยู่ต่อเนื่องจริง ๆ
+- **Element** — *living instance* ของ widget ณ ตำแหน่งหนึ่งใน tree element อยู่ต่อเนื่องข้าม rebuild, ถือ `State` ของ stateful widget และตัดสินว่า widget ใหม่จะ update element นี้ในที่เดิมได้ (`update`/`didUpdateWidget`) หรือต้องรื้อแล้วสร้างใหม่ (`unmount` + `createElement` รอบใหม่)
 - **RenderObject** — ทำ layout, paint และ hit-testing จริง นี่คือ layer ที่แพง Flutter จึงพยายามอย่างหนักที่จะนำ render object กลับมาใช้ซ้ำ
+
+## พิสูจน์แล้ว: type เดิม + ไม่มี key → element (และ createElement) ถูกใช้ซ้ำ
+
+claim ข้างบน — "type และ key เดียวกันแปลว่า element ถูก update ในที่เดิม" — พิสูจน์ได้ตรง ๆ: spy `createElement` (เรียกครั้งเดียวตอนสร้าง element ครั้งแรก) และ `didUpdateWidget` (เรียกทุกครั้งที่ element เดิมได้รับ widget ใหม่ type เดียวกัน)
+
+```dart
+// lib/element_spy.dart
+import 'package:flutter/material.dart';
+
+int createElementCount = 0;
+int didUpdateWidgetCount = 0;
+
+/// A StatefulWidget that counts every time Flutter actually creates a NEW
+/// element for it (via createElement) versus reuses the existing one and
+/// just hands it new data (via didUpdateWidget).
+class SpyWidget extends StatefulWidget {
+  const SpyWidget({super.key, required this.value});
+  final int value;
+
+  @override
+  StatefulElement createElement() {
+    createElementCount++;
+    return super.createElement();
+  }
+
+  @override
+  State<SpyWidget> createState() => _SpyWidgetState();
+}
+
+class _SpyWidgetState extends State<SpyWidget> {
+  @override
+  void didUpdateWidget(covariant SpyWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    didUpdateWidgetCount++;
+  }
+
+  @override
+  Widget build(BuildContext context) => Text('${widget.value}');
+}
+```
+
+```dart
+// test/element_spy_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/element_spy.dart';
+
+void main() {
+  testWidgets('same type, no key: createElement runs once, didUpdateWidget runs on every rebuild', (tester) async {
+    createElementCount = 0;
+    didUpdateWidgetCount = 0;
+
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(value: 1)));
+    expect(createElementCount, 1, reason: 'first mount creates exactly one element');
+    expect(didUpdateWidgetCount, 0, reason: 'no update yet — this was a fresh mount');
+
+    // New SpyWidget instance, SAME type, SAME position, no key — Flutter
+    // must reuse the existing element rather than create a new one.
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(value: 2)));
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(value: 3)));
+
+    expect(createElementCount, 1, reason: 'the element was REUSED — createElement never ran again');
+    expect(didUpdateWidgetCount, 2, reason: 'the reused element was updated twice, once per rebuild');
+    expect(find.text('3'), findsOneWidget);
+  });
+
+  testWidgets('a different key forces a new element: createElement runs again', (tester) async {
+    createElementCount = 0;
+    didUpdateWidgetCount = 0;
+
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(key: ValueKey('a'), value: 1)));
+    expect(createElementCount, 1);
+
+    // Same type, but a DIFFERENT key at the same position — Flutter treats
+    // this as a different identity: tear down the old element, mount a new one.
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(key: ValueKey('b'), value: 2)));
+
+    expect(createElementCount, 2, reason: 'different key at the same slot — old element torn down, new one created');
+    expect(didUpdateWidgetCount, 0, reason: 'no update happened because there was no reuse — it was a fresh mount');
+  });
+}
+```
+
+```text
+00:00 +0: same type, no key: createElement runs once, didUpdateWidget runs on every rebuild
+00:00 +1: a different key forces a new element: createElement runs again
+00:00 +2: All tests passed!
+```
+
+(ตัดจากผล `flutter test test/lessons/widgets__widgets-and-the-tree/` จริงบนเครื่องนี้ — ผลเต็มมีบรรทัด `loading <path>` ต่อไฟล์ด้วย ตัดออกตรงนี้)
+
+นี่คือเรื่องราวของ reconciliation ทั้งหมด ในเชิงกลไก: `createElement` คือต้นทุน *แพง* ตอนแรก (มันคือสิ่งที่สุดท้ายไปสร้าง `RenderObject` ด้วย) และเมื่อ element มีอยู่แล้ว การ rebuild แบบ type เดิม key เดิม จ่ายแค่ `didUpdateWidget` บวก `build()` — ไม่เคยต้อง element ใหม่หรือ render object ใหม่เลย
+
+## พิสูจน์แล้ว: `const` widget ข้าม rebuild ของตัวเองทั้งหมด
+
+`const` ไม่ใช่แค่ "allocation น้อยลง" expression ของ `const` widget คือ object เดียวที่ถูก canonicalize — instance *เดียวกัน* ทุกครั้งที่บรรทัดโค้ดนั้นรัน เส้นทาง update element ของ Flutter short-circuit ที่ `identical(oldWidget, newWidget)` ดังนั้น const child จึงไม่ถูก diff เลยด้วยซ้ำ นับประสาอะไรกับ rebuild ในขณะที่ sibling ที่ไม่ใช่ const rebuild ทุกครั้งที่ parent rebuild
+
+```dart
+// lib/const_rebuild.dart
+import 'package:flutter/material.dart';
+
+int constLeafBuildCount = 0;
+int dynamicLeafBuildCount = 0;
+
+/// Always constructed as `const ConstLeaf()` by the parent below — every
+/// "rebuild" produces the identical object, not a new one.
+class ConstLeaf extends StatelessWidget {
+  const ConstLeaf({super.key});
+  @override
+  Widget build(BuildContext context) {
+    constLeafBuildCount++;
+    return const SizedBox(width: 10, height: 10);
+  }
+}
+
+/// Constructed fresh (non-const, because it carries a changing value) on
+/// every parent rebuild.
+class DynamicLeaf extends StatelessWidget {
+  const DynamicLeaf({super.key, required this.tick});
+  final int tick;
+  @override
+  Widget build(BuildContext context) {
+    dynamicLeafBuildCount++;
+    return SizedBox(width: 10, height: 10 + tick.toDouble());
+  }
+}
+
+class RebuildingParent extends StatefulWidget {
+  const RebuildingParent({super.key});
+  @override
+  RebuildingParentState createState() => RebuildingParentState();
+}
+
+// Public (not private) so the test below can drive it via a typed GlobalKey.
+class RebuildingParentState extends State<RebuildingParent> {
+  int tick = 0;
+  void bump() => setState(() => tick++);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const ConstLeaf(), // identical instance every build
+        DynamicLeaf(tick: tick), // new instance every build
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/const_rebuild_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/const_rebuild.dart';
+
+void main() {
+  testWidgets('const child never rebuilds; non-const sibling rebuilds every time', (tester) async {
+    constLeafBuildCount = 0;
+    dynamicLeafBuildCount = 0;
+
+    final key = GlobalKey<RebuildingParentState>();
+    await tester.pumpWidget(MaterialApp(home: RebuildingParent(key: key)));
+    expect(constLeafBuildCount, 1);
+    expect(dynamicLeafBuildCount, 1);
+
+    key.currentState!.bump();
+    await tester.pump();
+    key.currentState!.bump();
+    await tester.pump();
+    key.currentState!.bump();
+    await tester.pump();
+
+    expect(constLeafBuildCount, 1, reason: 'const ConstLeaf() is the identical instance every rebuild — build() never runs again');
+    expect(dynamicLeafBuildCount, 4, reason: 'DynamicLeaf is a new instance each build — its build() runs every time');
+  });
+}
+```
+
+```text
+00:00 +0: const child never rebuilds; non-const sibling rebuilds every time
+00:00 +1: All tests passed!
+```
+
+(ตัดแบบเดียวกัน — run จริง ตัดบรรทัด `loading <path>` ออก)
+
+<Callout title="package:flutter/material.dart frozen แล้ว — สถานะจริง Flutter 3.47">
+การรับ contribution ให้ `package:flutter/material.dart` และ `package:flutter/cupertino.dart` **ภายใน core SDK ถูก freeze ตั้งแต่ Flutter 3.44** และ in-framework design library เหล่านี้ **กำหนดไว้แล้วว่าจะ deprecate อย่างเป็นทางการใน stable release รอบต่อ ๆ ไป** — แต่ใน 3.47 มันยังใช้งานได้ปกติ การ migrate เป็นแบบ opt-in ในช่วงเปลี่ยนผ่านนี้ ([docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui](https://docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui)) ตัวแทนคือ pub.dev package จริงที่ versioning แยกต่างหาก — `material_ui` และ `cupertino_ui` — ที่ถูก decouple ออกมาเพื่อให้ Material/Cupertino ออกเวอร์ชันเป็นรายสัปดาห์ได้เอง แทนที่จะรอ SDK release รายไตรมาส คอร์สนี้ยังคงเขียน `import 'package:flutter/material.dart'` ตลอดทั้งคอร์ส (เป็นสิ่งที่โค้ด Flutter เกือบทั้งหมดและ training data ของ AI ใช้อยู่ทุกวันนี้ และมันไม่ได้พัง) แต่ถ้าคุณเห็น `import 'package:material_ui/material_ui.dart'` ในโค้ดที่ generate มาใหม่ ๆ นั่นคือเหตุผล — และ `dart fix --apply --code=migrate_design_widgets` คือ migration อัตโนมัติที่เป็นทางการเมื่อพร้อมจะย้าย probe ของคอร์สนี้เอง resolve `material_ui` เป็น transitive pub.dev dependency จริงวันนี้ ยืนยันว่า package มีอยู่จริงและถูก publish แล้ว ไม่ใช่แค่ประกาศไว้
+</Callout>
 
 ## ทำไม rebuild ถึงยังถูก
 
-เมื่อคุณ rebuild Flutter จะเดิน widget tree ใหม่และเทียบ widget ใหม่แต่ละตัวกับ element ที่มีอยู่ ถ้า widget ใหม่มี **type และ key เดียวกัน** กับตัวเก่า element จะถูก *update ในที่เดิม* — render object ถูกใช้ซ้ำ อัปเดตเฉพาะ property ที่เปลี่ยน เฉพาะเมื่อ type หรือ key ต่างเท่านั้น Flutter จึงรื้อ element กับ render object แล้ว build ใหม่
+เอาสองข้อพิสูจน์มารวมกัน "ทำไม rebuild ถึงถูก" ก็ไม่ใช่แค่คำขวัญอีกต่อไป: การใช้ type-เดิม-key-เดิมซ้ำ หลีกเลี่ยง element ใหม่ *และ* render object ใหม่ (พิสูจน์ด้วย `createElementCount` ที่ไม่ขยับ) และ `const` ไปไกลกว่านั้นอีกขั้นด้วยการข้าม rebuild call ทั้งหมด (พิสูจน์ด้วย `constLeafBuildCount` ที่ไม่ขยับ) Key (บทเรียนถัดไป) มีไว้ควบคุมการ match type/key เมื่อการ match ตามตำแหน่ง default ทำผิด — ที่พบบ่อยที่สุดคือการ reorder list ของ stateful children
+
+## Mental Model
+
+คิดว่าสาม tree เป็น **blueprint, contractor และ building** widget tree คือ blueprint ใหม่ที่วาดขึ้นทุกครั้งที่ requirement เปลี่ยน — วาดง่าย ทิ้งทันทีหลังใช้ element tree คือ contractor ที่อ่าน blueprint ใหม่แต่ละใบแล้วตัดสิน ห้องต่อห้องว่า "ห้องเดิม จุดประสงค์เดิม → แก้เฉพาะที่เปลี่ยน" หรือ "ห้องนี้ไม่มีใน plan เก่า → รื้อแล้วสร้างใหม่" render tree คือตัวอาคารจริง — ผนัง สายไฟ ท่อน้ำ — และงานทั้งหมดของ contractor คือหลีกเลี่ยงการรื้ออาคารมากกว่าที่ blueprint ต้องการจริง ๆ `const` คือการยื่นรูปถ่ายให้ contractor แทน blueprint: มันไม่ใช่แม้แต่ห้องใหม่ที่ต้องเทียบ มันคือหลักฐานว่าไม่มีอะไรในห้องนั้นเปลี่ยนเลย
+
+## Trade-offs
+
+| ทางเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| Composition ลึก (widget เล็ก ๆ จำนวนมาก) | reuse ได้ ทดสอบได้ แต่ละชิ้นคิดเรื่องเดียว | class/file เยอะกว่า `build()` ก้อนเดียว — ปกติคุ้ม |
+| พึ่ง type/key matching (default) | ไม่ต้องเขียนโค้ดเพิ่ม ถูกต้องเกือบทุกกรณีที่ไม่ใช่ list | พังเงียบ ๆ กับการ reorder list ของ stateful widget (บทถัดไป) |
+| ใส่ `const` ให้ widget ทุกที่ที่ทำได้ | ข้าม rebuild ทั้งหมด — แข็งแรงกว่า manual memoization ใด ๆ | ช่วยได้เฉพาะที่ input เป็น compile-time constant จริง ๆ widget ที่ถือ runtime value ทำ const ไม่ได้ |
+| ใช้ `package:flutter/material.dart` ต่อไป | ไม่มีต้นทุน migration ตรงกับโค้ด/tutorial ที่มีอยู่เกือบทั้งหมดวันนี้ | frozen ตั้งแต่ 3.44 — ฟีเจอร์ Material ใหม่ลง `material_ui` ก่อน |
+
+## Common Misconceptions
+
+- **"Widget คือ UI จริงบนจอ"** มันคือ description ที่ immutable ที่ rebuild ตลอดและทิ้งไป — `RenderObject` ต่างหากที่อยู่บนจอจริง และเป็น layer ที่ Flutter พยายามรักษาความคงที่มากที่สุดข้าม rebuild
+- **"Widget rebuild แปลว่ามี element ใหม่ถูกสร้าง"** พิสูจน์แล้วว่าผิดข้างบน: `createElementCount` ค้างที่ `1` ตลอดสอง rebuild ของ `SpyWidget` type เดิม ไม่มี key — มีแค่ `didUpdateWidgetCount` ที่ขยับ
+- **"`const` แค่ประหยัด allocation นิดหน่อย ไม่ค่อยมีผล"** พิสูจน์แล้วข้างบน: `build()` ของ const child ไม่รันอีกเลย ไม่ใช่ "รันแต่เร็ว" แต่ข้ามจริง ๆ เพราะ `identical(oldWidget, newWidget)` short-circuit ก่อนที่ `build` จะถูกเรียกด้วยซ้ำ
+- **"`package:flutter/material.dart` deprecated ไปแล้วตอนนี้ เลิกใช้เถอะ"** ไม่ถูกสำหรับ 3.47: มัน frozen (ไม่รับ contribution ใหม่) และ *กำหนดไว้* ว่าจะ deprecate แต่วันนี้ยังใช้งานได้ปกติ และคอร์สนี้ (เหมือนโค้ดส่วนใหญ่วันนี้) ก็ยังใช้อยู่
+
+## Reading AI-generated code
+
+โค้ด Flutter ที่ AI generate มักใช้ `const` ไม่เต็มที่ — มันเป็น optional ทาง syntax ดังนั้น model ที่ train จากโค้ดผสมทั้งที่ const-correct และ const-สะเพร่า มักจะลืมใส่บน leaf ที่เป็น constant ชัด ๆ ทำให้เสียการข้าม rebuild ฟรี ๆ ที่พิสูจน์ไว้ข้างบนไปเงียบ ๆ
 
 ```dart
-// Rebuild produces a new Text widget every time...
-Text(counter.toString())
-// ...but the TextElement and RenderParagraph underneath are REUSED.
-// Only the changed string is pushed down. That's why setState is cheap.
+// @expect-error not a real analyzer error — a missed-const performance bug, not a compile error
+class StatusBadge extends StatelessWidget {
+  const StatusBadge({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.check_circle, color: Colors.green), // missing const — rebuilds every time
+        SizedBox(width: 4), // missing const too
+        Text('Active'), // missing const too
+      ],
+    );
+  }
+}
 ```
 
-การ reconciliation นี้ — widget ใหม่ที่ immutable ถูก diff กับ element ที่อยู่ต่อเนื่อง — คือห้องเครื่องของ Flutter Key (บทเรียนถัดไป) มีไว้ควบคุมการ reconcile นี้เมื่อการ match ด้วย type แบบ default ทำผิด
+ก่อนเชื่อโค้ด widget ที่ generate มา ให้เช็ค:
+
+- ทุก leaf ที่ argument ของ constructor เป็น compile-time constant ล้วน (ไม่มีตัวแปร runtime) — เขียนเป็น `const Icon(...)`, `const SizedBox(...)`, `const Text('...')` หรือยัง? ถ้าไม่ มันจะ rebuild ทุกครั้งที่ parent rebuild ฟรี ๆ โดยไม่จำเป็น ตามที่พิสูจน์ข้างบน
+- `StatefulWidget` `build()` สร้าง controller, subscribe stream หรือทำงานที่ควรเกิดครั้งเดียวหรือเปล่า? (บทถัดไปคุยเรื่องนี้)
+- callback closure ถูกสร้างใหม่เหมือนเดิมทุก build ในจุดที่ `const` หรือ reference ที่ hoist ไว้แล้วน่าจะพอหรือเปล่า?
+
+<SpotTheBug code={`class PriceTag extends StatelessWidget {
+  const PriceTag({super.key, required this.price});
+  final double price;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.attach_money, size: 16),
+        Text(price.toStringAsFixed(2)),
+      ],
+    );
+  }
+}`}>
+`Icon(Icons.attach_money, size: 16)` มี argument ทุกตัวเป็น compile-time constant แต่ขาด `const` — ทุกครั้งที่ `PriceTag` rebuild (เช่น parent list rebuild ด้วยเหตุผลอื่นที่ไม่เกี่ยวกัน) icon นี้ถูกสร้างและ diff ใหม่โดยไม่จำเป็น `Text(price.toStringAsFixed(2))` ถูกปล่อยเป็น non-const อย่างถูกต้อง เพราะ `price` เป็น field runtime และเป็น compile-time constant ไม่ได้ วิธีแก้: `const Icon(Icons.attach_money, size: 16)` — พิสูจน์แล้วข้างบนว่าจะทำให้ Flutter ข้าม rebuild ของ subtree นั้นผ่าน fast path ที่ identical instance แทนที่จะแค่ "สร้างเร็วขึ้น"
+</SpotTheBug>
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Flutter สร้าง UI ด้วยการ **compose** widget เล็ก ๆ ไม่ใช่ subclass ข้างล่างมีสาม tree ทำงานคู่ขนาน: **widget** ที่ทิ้งได้ (description), **element** ที่อยู่ต่อเนื่อง (living instance ที่ถือ state) และ **render object** ที่แพง (layout และ paint) การ rebuild ถูกเพราะ Flutter นำ element และ render object กลับมาใช้ซ้ำทุกที่ที่ widget ใหม่ตรงกับตัวเก่าด้วย type และ key
+Flutter สร้าง UI ด้วยการ **compose** widget เล็ก ๆ ไม่ใช่ subclass ข้างล่างมีสาม tree ทำงานคู่ขนาน: **widget** ที่ทิ้งได้ (description), **element** ที่อยู่ต่อเนื่อง (living instance ที่ถือ state — พิสูจน์ข้างบน: `createElement` รันครั้งเดียว, `didUpdateWidget` ทุก rebuild type เดิม) และ **render object** ที่แพง (layout และ paint) `const` widget ข้าม rebuild ของตัวเองทั้งหมด พิสูจน์ด้วย build counter ที่ไม่ขยับเลย `package:flutter/material.dart` frozen ตั้งแต่ 3.44 และกำหนดจะ deprecate แต่ยังใช้งานได้ใน 3.47 — `material_ui`/`cupertino_ui` คือตัวสืบทอดจริงที่ publish แล้ว
 </Callout>
 
 export const quizTree = [
@@ -77,31 +322,56 @@ export const quizTree = [
     q: 'Flutter เพิ่ม behavior อย่าง padding ให้ widget อย่างไร?',
     options: [
       'ด้วยการ subclass widget',
-      'ด้วย composition — wrap ด้วย widget อีกตัว (เช่น Padding)',
+      'ด้วย composition — wrap ด้วย widget อีกตัว (เช่น `Padding`)',
       'ด้วยการแก้ render object โดยตรง',
       'ด้วย mixin เท่านั้น',
     ],
     answer: 1,
+    explain: 'Flutter เน้น composition เป็นหลัก: คุณ nest widget (Padding wrap child) แทนที่จะ subclass เพื่อเพิ่ม behavior',
   },
   {
-    q: 'tree ไหนในสาม tree ที่อยู่ต่อเนื่องข้าม rebuild และถือ State?',
+    q: 'พิสูจน์ในบทนี้ด้วย createElement/didUpdateWidget spy เกิดอะไรขึ้นเมื่อ widget type เดิม rebuild ที่ตำแหน่งเดิมโดยไม่เปลี่ยน key?',
     options: [
-      'widget tree',
-      'element tree',
-      'render tree',
-      'ไม่มี — ทั้งหมด rebuild ทุกเฟรม',
+      'createElement รันใหม่ทุกครั้ง',
+      'createElement รันครั้งเดียว (element ถูกใช้ซ้ำ); didUpdateWidget รันทุก rebuild ถัดไป',
+      'ทั้งสอง method ไม่รันอีกเลย',
+      'มีแค่ createElement ที่รัน ไม่เคยมี didUpdateWidget',
     ],
     answer: 1,
+    explain: 'probe test แสดง createElementCount ค้างที่ 1 ตลอดสอง rebuild ในขณะที่ didUpdateWidgetCount เพิ่มเป็น 2 — element ถูกใช้ซ้ำ ไม่ได้สร้างใหม่',
   },
   {
-    q: 'เมื่อไร Flutter นำ element (และ render object) กลับมาใช้ซ้ำระหว่าง rebuild?',
+    q: 'ใน probe test เกิดอะไรกับ createElementCount เมื่อ key เปลี่ยนระหว่าง rebuild (type เดิม ตำแหน่งเดิม)?',
     options: [
-      'ไม่เคย — สร้างใหม่หมดทุกอย่าง',
-      'เมื่อ widget ใหม่มี type และ key เดียวกับตัวเก่าที่ตำแหน่งนั้น',
-      'เฉพาะกับ StatelessWidget',
-      'เฉพาะตอน build ครั้งแรก',
+      'ค้างเท่าเดิม — key ถูกละเลยในการ match element',
+      'เพิ่มขึ้น — key ต่างกันแปลว่า identity ต่างกัน element เก่าจึงถูกรื้อและสร้างใหม่',
+      'reset กลับเป็น 0',
+      'test throw exception',
     ],
     answer: 1,
+    explain: 'createElementCount เพิ่มจาก 1 เป็น 2 เมื่อมีแค่ key เปลี่ยน พิสูจน์ว่า key ไม่ตรงบังคับให้รื้อ + createElement รอบใหม่ เหมือนกับ type ไม่ตรง',
+  },
+  {
+    q: 'พิสูจน์ด้วย build counter จริงในบทนี้ เกิดอะไรกับ build() ของ `const` widget เมื่อ parent rebuild?',
+    options: [
+      'รันอีกแต่เร็วกว่า widget ที่ไม่ const',
+      'ไม่รันอีกเลย — const instance เดิมทำให้ short-circuit การ update ก่อนที่ build จะถูกเรียกด้วยซ้ำ',
+      'รันอีกครั้งเดียวพอดี แล้วหยุด',
+      'const ไม่มีผลต่อ rebuild มีผลแค่กับ memory',
+    ],
+    answer: 1,
+    explain: 'constLeafBuildCount ค้างที่ 1 ตลอด 3 ครั้งของ setState ที่ดัน dynamicLeafBuildCount จาก 1 เป็น 4 — build() ของ const child ไม่ถูกเรียกอีกจริง ๆ',
+  },
+  {
+    q: 'สถานะจริงของ package:flutter/material.dart ใน Flutter 3.47 ตาม docs.flutter.dev คืออะไร?',
+    options: [
+      'ถูกลบออกทั้งหมดใน 3.47',
+      'frozen สำหรับ contribution ใหม่ตั้งแต่ 3.44 และกำหนดจะ deprecate ในอนาคต แต่ยังทำงานได้เต็มที่วันนี้; material_ui/cupertino_ui คือ package สืบทอดจริงที่ publish แล้ว',
+      'มันเป็น pub.dev package แยกต่างหากมาตลอด ไม่มีอะไรเปลี่ยน',
+      'deprecated แล้วและ throw runtime warning ทุกครั้งที่ใช้',
+    ],
+    answer: 1,
+    explain: 'เอกสาร breaking-changes ชัดเจน: frozen ตั้งแต่ 3.44 กำหนดจะ deprecate อย่างเป็นทางการใน release ถัดไป แต่ยังไม่ deprecated — migrate ผ่าน material_ui/cupertino_ui หรือ dart fix --apply --code=migrate_design_widgets เป็น opt-in',
   },
   {
     q: 'layer ไหนที่ทำ layout และ paint จริง?',
@@ -112,6 +382,7 @@ export const quizTree = [
       'BuildContext',
     ],
     answer: 2,
+    explain: 'RenderObject คือ layer ที่แพงที่ทำ layout, paint, hit-testing จริง ส่วน widget และ element มีไว้เพื่ออธิบายและจัดการมันอย่างประหยัด',
   },
 ];
 

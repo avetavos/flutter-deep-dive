@@ -1,6 +1,6 @@
 ---
 title: 'Widgets and the Tree'
-description: 'The three trees behind every Flutter app — widgets as immutable config, elements as the living instances, and render objects that do the real work.'
+description: 'The three trees behind every Flutter app — proven with a test that spies createElement/didUpdateWidget, why const widgets skip rebuild entirely, and the real 3.47 status of package:flutter/material.dart.'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Composition, not inheritance
 
@@ -30,11 +31,11 @@ Widget build(BuildContext context) {
 }
 ```
 
-This is composition over inheritance taken to the extreme: many tiny widgets, each doing one thing, nested to form the whole. `Center`, `Padding`, `Column` are not visual chrome — they *are* the layout.
+This is composition over inheritance taken to the extreme: many tiny widgets, each doing one thing, nested to form the whole. `Center`, `Padding`, `Column` are not visual chrome — they *are* the layout. There is no separate "layout language" to learn (compare the [Flutter layout → React CSS mental map](/flutter/en/layout-and-rendering/core-layout-widgets/) if you're coming from the web): the widget tree **is** the stylesheet.
 
 ## The three trees
 
-Here is the model that explains almost everything about Flutter's behavior and performance. There is not one tree — there are **three**, kept in sync:
+Here is the model that explains almost everything about Flutter's behavior and performance. There is not one tree — there are **three**, kept in sync. This lesson proves the headline claims with real tests; for the full mechanism — `Element.update`, `BuildOwner.buildScope`, `RenderObject.markNeedsLayout` straight from the `flutter/flutter` source — see [Flutter Internals: the Three Trees](/flutter/en/flutter-internals/three-trees/).
 
 <Mermaid title="Widget, Element, and Render trees run in parallel" code={treesDiagram} />
 
@@ -51,25 +52,271 @@ export const treesDiagram = `flowchart LR
   W -.creates.-> E
   E -.creates.-> R`;
 
-- **Widget** — the immutable description you write. Rebuilt constantly and thrown away. Cheap.
-- **Element** — the *living instance* of a widget at a position in the tree. It persists across rebuilds, holds the `State` for stateful widgets, and decides whether a new widget can update it or must replace it.
+- **Widget** — the immutable description you write. Rebuilt constantly and thrown away. Cheap. `createElement()` is the one method every widget has that actually makes something durable.
+- **Element** — the *living instance* of a widget at a position in the tree. It persists across rebuilds, holds the `State` for stateful widgets, and decides whether a new widget can update it in place (`update`/`didUpdateWidget`) or must tear it down and replace it (`unmount` + a fresh `createElement`).
 - **RenderObject** — does the actual layout, painting, and hit-testing. This is the expensive layer, and Flutter works hard to reuse it.
+
+## Proven: same type + no key → the element (and createElement) is reused
+
+The claim above — "same type and key means the element is updated in place" — is provable directly: spy on `createElement` (called once, when the element is first created) and `didUpdateWidget` (called every time an existing element is handed a new widget of the same type).
+
+```dart
+// lib/element_spy.dart
+import 'package:flutter/material.dart';
+
+int createElementCount = 0;
+int didUpdateWidgetCount = 0;
+
+/// A StatefulWidget that counts every time Flutter actually creates a NEW
+/// element for it (via createElement) versus reuses the existing one and
+/// just hands it new data (via didUpdateWidget).
+class SpyWidget extends StatefulWidget {
+  const SpyWidget({super.key, required this.value});
+  final int value;
+
+  @override
+  StatefulElement createElement() {
+    createElementCount++;
+    return super.createElement();
+  }
+
+  @override
+  State<SpyWidget> createState() => _SpyWidgetState();
+}
+
+class _SpyWidgetState extends State<SpyWidget> {
+  @override
+  void didUpdateWidget(covariant SpyWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    didUpdateWidgetCount++;
+  }
+
+  @override
+  Widget build(BuildContext context) => Text('${widget.value}');
+}
+```
+
+```dart
+// test/element_spy_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/element_spy.dart';
+
+void main() {
+  testWidgets('same type, no key: createElement runs once, didUpdateWidget runs on every rebuild', (tester) async {
+    createElementCount = 0;
+    didUpdateWidgetCount = 0;
+
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(value: 1)));
+    expect(createElementCount, 1, reason: 'first mount creates exactly one element');
+    expect(didUpdateWidgetCount, 0, reason: 'no update yet — this was a fresh mount');
+
+    // New SpyWidget instance, SAME type, SAME position, no key — Flutter
+    // must reuse the existing element rather than create a new one.
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(value: 2)));
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(value: 3)));
+
+    expect(createElementCount, 1, reason: 'the element was REUSED — createElement never ran again');
+    expect(didUpdateWidgetCount, 2, reason: 'the reused element was updated twice, once per rebuild');
+    expect(find.text('3'), findsOneWidget);
+  });
+
+  testWidgets('a different key forces a new element: createElement runs again', (tester) async {
+    createElementCount = 0;
+    didUpdateWidgetCount = 0;
+
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(key: ValueKey('a'), value: 1)));
+    expect(createElementCount, 1);
+
+    // Same type, but a DIFFERENT key at the same position — Flutter treats
+    // this as a different identity: tear down the old element, mount a new one.
+    await tester.pumpWidget(const MaterialApp(home: SpyWidget(key: ValueKey('b'), value: 2)));
+
+    expect(createElementCount, 2, reason: 'different key at the same slot — old element torn down, new one created');
+    expect(didUpdateWidgetCount, 0, reason: 'no update happened because there was no reuse — it was a fresh mount');
+  });
+}
+```
+
+```text
+00:00 +0: same type, no key: createElement runs once, didUpdateWidget runs on every rebuild
+00:00 +1: a different key forces a new element: createElement runs again
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__widgets-and-the-tree/` run on this Mac — the untrimmed output also prints a `loading <path>` line per file, elided here)
+
+That is the whole reconciliation story, mechanically: `createElement` is the *expensive* first-time cost (it is what eventually creates the `RenderObject` too), and once an element exists, same-type same-key rebuilds only ever pay for `didUpdateWidget` plus a `build()` call — never a fresh element or a fresh render object.
+
+## Proven: a `const` widget skips its own rebuild entirely
+
+`const` is not just "fewer allocations." A `const` widget expression is a single canonicalized object — the *same instance* every time that line of code runs. Flutter's element-update path short-circuits on `identical(oldWidget, newWidget)`, so a `const` child is never even diffed, let alone rebuilt, while its non-const sibling rebuilds on every parent rebuild.
+
+```dart
+// lib/const_rebuild.dart
+import 'package:flutter/material.dart';
+
+int constLeafBuildCount = 0;
+int dynamicLeafBuildCount = 0;
+
+/// Always constructed as `const ConstLeaf()` by the parent below — every
+/// "rebuild" produces the identical object, not a new one.
+class ConstLeaf extends StatelessWidget {
+  const ConstLeaf({super.key});
+  @override
+  Widget build(BuildContext context) {
+    constLeafBuildCount++;
+    return const SizedBox(width: 10, height: 10);
+  }
+}
+
+/// Constructed fresh (non-const, because it carries a changing value) on
+/// every parent rebuild.
+class DynamicLeaf extends StatelessWidget {
+  const DynamicLeaf({super.key, required this.tick});
+  final int tick;
+  @override
+  Widget build(BuildContext context) {
+    dynamicLeafBuildCount++;
+    return SizedBox(width: 10, height: 10 + tick.toDouble());
+  }
+}
+
+class RebuildingParent extends StatefulWidget {
+  const RebuildingParent({super.key});
+  @override
+  RebuildingParentState createState() => RebuildingParentState();
+}
+
+// Public (not private) so the test below can drive it via a typed GlobalKey.
+class RebuildingParentState extends State<RebuildingParent> {
+  int tick = 0;
+  void bump() => setState(() => tick++);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const ConstLeaf(), // identical instance every build
+        DynamicLeaf(tick: tick), // new instance every build
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/const_rebuild_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/const_rebuild.dart';
+
+void main() {
+  testWidgets('const child never rebuilds; non-const sibling rebuilds every time', (tester) async {
+    constLeafBuildCount = 0;
+    dynamicLeafBuildCount = 0;
+
+    final key = GlobalKey<RebuildingParentState>();
+    await tester.pumpWidget(MaterialApp(home: RebuildingParent(key: key)));
+    expect(constLeafBuildCount, 1);
+    expect(dynamicLeafBuildCount, 1);
+
+    key.currentState!.bump();
+    await tester.pump();
+    key.currentState!.bump();
+    await tester.pump();
+    key.currentState!.bump();
+    await tester.pump();
+
+    expect(constLeafBuildCount, 1, reason: 'const ConstLeaf() is the identical instance every rebuild — build() never runs again');
+    expect(dynamicLeafBuildCount, 4, reason: 'DynamicLeaf is a new instance each build — its build() runs every time');
+  });
+}
+```
+
+```text
+00:00 +0: const child never rebuilds; non-const sibling rebuilds every time
+00:00 +1: All tests passed!
+```
+
+(trimmed the same way — real run, `loading <path>` line elided)
+
+`constLeafBuildCount` never moves past `1` no matter how many times the parent rebuilds; `dynamicLeafBuildCount` moves in lockstep with every `setState`. This is strictly stronger than manual memoization: the compiler, not you, guarantees the instance is identical, so there is nothing to get wrong.
+
+<Callout title="package:flutter/material.dart is frozen — real status, Flutter 3.47">
+Contributions to `package:flutter/material.dart` and `package:flutter/cupertino.dart` **inside the core SDK were frozen starting in Flutter 3.44**, and the in-framework design libraries are **scheduled for formal deprecation in an upcoming stable release** — but as of 3.47 they still work, and migration is opt-in during this transition ([docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui](https://docs.flutter.dev/release/breaking-changes/material-ui-and-cupertino-ui)). The replacements are real, independently-versioned pub.dev packages — `material_ui` and `cupertino_ui` — decoupled so Material/Cupertino can ship on their own weekly cadence instead of waiting for a quarterly SDK release. This course still writes `import 'package:flutter/material.dart'` throughout (it is what almost all existing Flutter code and AI training data uses today, and it is not broken), but if you see `import 'package:material_ui/material_ui.dart'` in newer generated code, that is why — and `dart fix --apply --code=migrate_design_widgets` is the official automated migration when you're ready to move. This course's own probe resolves `material_ui` as a real transitive pub.dev dependency today, confirming the package exists and is published, not just announced.
+</Callout>
 
 ## Why rebuilds stay cheap
 
-When you rebuild, Flutter walks the new widget tree and compares each new widget to the element already there. If the new widget has the **same type and key** as the old one, the element is *updated in place* — the render object is reused, only changed properties applied. Only when the type or key differs does Flutter tear down the element and its render object and build fresh.
+Put the two proofs together and "why rebuilds are cheap" stops being a slogan: same-type-same-key reuse avoids a new element *and* a new render object (proven by `createElementCount` staying flat), and `const` goes one step further and skips the rebuild call entirely (proven by `constLeafBuildCount` staying flat). Keys (the next lesson) exist to control the type/key matching when the default position-based matching gets it wrong — most commonly, reordering a list of stateful children.
+
+## Mental Model
+
+Think of the three trees as **blueprint, contractor, and building**. The widget tree is a fresh blueprint drawn up every time requirements change — cheap to draw, thrown away immediately after use. The element tree is the contractor who reads each new blueprint and decides, room by room, "same room, same purpose → touch up what changed" versus "this room doesn't exist in the old plan → demolish and build fresh." The render tree is the actual building — walls, wiring, plumbing — and the contractor's entire job is to avoid tearing down more of it than the blueprint actually requires. `const` is handing the contractor a photograph instead of a blueprint: it's not even a new room to compare, it's proof nothing in that room changed.
+
+## Trade-offs
+
+| Approach | Benefit | Cost |
+| --- | --- | --- |
+| Deep composition (many small widgets) | Reusable, testable, each piece reasons about one thing | More classes/files than one giant `build()` — usually worth it |
+| Relying on type/key matching (default) | Zero extra code, correct for almost every non-list case | Breaks silently for reordering lists of stateful widgets (next lesson) |
+| Marking widgets `const` wherever possible | Skips rebuild entirely — stronger than any manual memoization | Only helps where inputs are genuinely compile-time constant; a widget holding a runtime value can't be `const` |
+| Staying on `package:flutter/material.dart` | Zero migration cost, matches nearly all existing code/tutorials today | Frozen since 3.44 — new Material features land in `material_ui` first |
+
+## Common Misconceptions
+
+- **"Widgets are the actual UI on screen."** They're immutable descriptions rebuilt constantly and thrown away — the `RenderObject` is what's actually on screen, and it's the layer Flutter works hardest to keep stable across rebuilds.
+- **"A widget rebuilding means a new element is created."** Proven false above: `createElementCount` stayed at `1` across two rebuilds of the same-typed, unkeyed `SpyWidget` — only `didUpdateWidgetCount` moved.
+- **"`const` just saves a tiny allocation, so it barely matters."** Proven above: a `const` child's `build()` never runs again, period — not "runs but is fast," genuinely skipped, because `identical(oldWidget, newWidget)` short-circuits the update before `build` is ever called.
+- **"`package:flutter/material.dart` is deprecated right now, stop using it."** Not accurate for 3.47: it's frozen (no new contributions) and *scheduled* for deprecation, but it still works today and this course (like almost all current code) keeps using it.
+
+## Reading AI-generated code
+
+AI-generated Flutter code frequently under-uses `const` — it's syntactically optional, so a model trained on a mix of const-correct and const-sloppy code will often drop it on obviously-constant leaves, silently giving up the free rebuild-skip proven above.
 
 ```dart
-// Rebuild produces a new Text widget every time...
-Text(counter.toString())
-// ...but the TextElement and RenderParagraph underneath are REUSED.
-// Only the changed string is pushed down. That's why setState is cheap.
+// @expect-error not a real analyzer error — a missed-const performance bug, not a compile error
+class StatusBadge extends StatelessWidget {
+  const StatusBadge({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.check_circle, color: Colors.green), // missing const — rebuilds every time
+        SizedBox(width: 4), // missing const too
+        Text('Active'), // missing const too
+      ],
+    );
+  }
+}
 ```
 
-This reconciliation — new immutable widgets diffed against persistent elements — is the engine room of Flutter. Keys (a later lesson) exist to control it when the default type-matching gets it wrong.
+Before trusting generated widget code, check:
+
+- Every leaf whose constructor arguments are all compile-time constants (no runtime variables) — is it written as `const Icon(...)`, `const SizedBox(...)`, `const Text('...')`? If not, it rebuilds on every parent rebuild for free, for nothing, exactly as proven above.
+- Does a `StatefulWidget`'s `build()` create a controller, subscribe to a stream, or otherwise do work that should only happen once? (Covered in the next lesson.)
+- Is a callback closure being recreated identically every build where a `const` or hoisted reference would do?
+
+<SpotTheBug code={`class PriceTag extends StatelessWidget {
+  const PriceTag({super.key, required this.price});
+  final double price;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.attach_money, size: 16),
+        Text(price.toStringAsFixed(2)),
+      ],
+    );
+  }
+}`}>
+`Icon(Icons.attach_money, size: 16)` has every argument as a compile-time constant, yet it's missing `const` — every rebuild of `PriceTag` (e.g. from a parent list rebuilding for an unrelated reason) reconstructs and re-diffs this icon for nothing. `Text(price.toStringAsFixed(2))` is correctly left non-const, since `price` is a runtime field and can't be a compile-time constant. The fix: `const Icon(Icons.attach_money, size: 16)` — proven above, this makes Flutter skip that subtree's rebuild via the identical-instance fast path instead of just "constructing it quickly."
+</SpotTheBug>
 
 <Callout title="The one-line takeaway">
-Flutter builds UI by **composing** small widgets, not subclassing. Underneath, three trees run in parallel: disposable **widgets** (descriptions), persistent **elements** (living instances that hold state), and expensive **render objects** (layout and paint). Rebuilds are cheap because Flutter reuses elements and render objects wherever the new widget matches the old by type and key.
+Flutter builds UI by **composing** small widgets, not subclassing. Underneath, three trees run in parallel: disposable **widgets** (descriptions), persistent **elements** (living instances that hold state — proven above: `createElement` runs once, `didUpdateWidget` on every same-type rebuild), and expensive **render objects** (layout and paint). `const` widgets skip their own rebuild entirely, proven with a build counter that never moves. `package:flutter/material.dart` is frozen since 3.44 and scheduled for deprecation, but still works in 3.47 — `material_ui`/`cupertino_ui` are the real, published successors.
 </Callout>
 
 export const quizTree = [
@@ -77,31 +324,56 @@ export const quizTree = [
     q: 'How does Flutter add behavior like padding to a widget?',
     options: [
       'By subclassing the widget',
-      'By composition — wrapping it in another widget (e.g. Padding)',
+      'By composition — wrapping it in another widget (e.g. `Padding`)',
       'By editing the render object directly',
       'By mixins only',
     ],
     answer: 1,
+    explain: 'Flutter is composition-first: you nest widgets (Padding wraps a child) rather than subclassing to add behavior.',
   },
   {
-    q: 'Which of the three trees persists across rebuilds and holds State?',
+    q: 'Proven in this lesson with createElement/didUpdateWidget spies, what happens when the SAME widget type is rebuilt at the same position with no key change?',
     options: [
-      'The widget tree',
-      'The element tree',
-      'The render tree',
-      'None — all are rebuilt every frame',
+      'createElement runs again every time',
+      'createElement runs once (element reused); didUpdateWidget runs on each subsequent rebuild',
+      'Neither method runs again',
+      'Only createElement runs, never didUpdateWidget',
     ],
     answer: 1,
+    explain: 'The probe test shows createElementCount staying at 1 across two rebuilds while didUpdateWidgetCount increases to 2 — the element is reused, not recreated.',
   },
   {
-    q: 'When does Flutter reuse an element (and its render object) during a rebuild?',
+    q: 'In the probe test, what happens to createElementCount when the key changes between rebuilds (same widget type, same position)?',
     options: [
-      'Never — everything is recreated',
-      'When the new widget has the same type and key as the old one at that position',
-      'Only for StatelessWidgets',
-      'Only on the first build',
+      'It stays the same — keys are ignored for element matching',
+      'It increments — a different key means a different identity, so the old element is torn down and a new one is created',
+      'It resets to 0',
+      'The test throws an exception',
     ],
     answer: 1,
+    explain: 'createElementCount went from 1 to 2 when only the key changed, proving key mismatch forces teardown + a fresh createElement, exactly like a type mismatch would.',
+  },
+  {
+    q: 'Proven with a real build counter in this lesson, what happens to a `const` widget\'s build() method when its parent rebuilds?',
+    options: [
+      'It runs again but faster than a non-const widget',
+      'It never runs again — the identical const instance short-circuits the update before build is even called',
+      'It runs exactly once more, then stops',
+      'const has no effect on rebuilds, only on memory',
+    ],
+    answer: 1,
+    explain: 'constLeafBuildCount stayed at 1 through three setState calls that pushed dynamicLeafBuildCount from 1 to 4 — the const child\'s build() was genuinely never called again.',
+  },
+  {
+    q: 'What is the REAL status of package:flutter/material.dart in Flutter 3.47, per docs.flutter.dev?',
+    options: [
+      'It was removed entirely in 3.47',
+      'Frozen for new contributions since 3.44 and scheduled for future deprecation, but still fully functional today; material_ui/cupertino_ui are the real published successor packages',
+      'It has always been a separate pub.dev package, nothing changed',
+      'It is deprecated and throws a runtime warning on every use',
+    ],
+    answer: 1,
+    explain: 'The breaking-changes doc is explicit: frozen since 3.44, scheduled for formal deprecation in an upcoming release, but not deprecated yet — migration via material_ui/cupertino_ui or dart fix --apply --code=migrate_design_widgets is opt-in.',
   },
   {
     q: 'Which layer does the actual layout and painting?',
@@ -112,6 +384,7 @@ export const quizTree = [
       'The BuildContext',
     ],
     answer: 2,
+    explain: 'RenderObject is the expensive layer that performs real layout, painting, and hit-testing; widgets and elements exist to describe and manage it cheaply.',
   },
 ];
 
