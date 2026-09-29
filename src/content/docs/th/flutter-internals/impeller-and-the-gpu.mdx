@@ -80,7 +80,7 @@ $ flutter run --help -v
 
 > *"The UI thread executes Dart code in the Dart VM. This includes code from your application as well as the Flutter framework. When your app creates and displays a scene, the UI thread creates a layer tree, a lightweight object containing device-agnostic painting commands, and sends the layer tree to the raster thread to be rendered on the device."*
 >
-> *"The raster thread executes graphics code from the Flutter Engine. This thread takes the layer tree and displays it by talking to the GPU (graphic processing unit)... Skia, the graphics library, runs on this thread. [Impeller](/perf/impeller) also uses this thread."*
+> *"The raster thread executes graphics code from the Flutter Engine. This thread takes the layer tree and displays it by talking to the GPU (graphic processing unit)... Skia, the graphics library, runs on this thread. [Impeller](https://docs.flutter.dev/perf/impeller) also uses this thread."*
 
 สอง thread ที่แยกกันจริง ๆ ตรงตามที่คำอธิบาย `showPerformanceOverlay` จริงของ [Production Concerns](/flutter/th/tooling-and-production/production-concerns/) เองแสดงไว้ถูกต้องแล้ว (สองกราฟแยกกัน — "the UI thread's per-frame time... and the raster thread's per-frame time") Impeller เปลี่ยน**สิ่งที่รันบน raster thread** (PSO ที่ precompile และการส่ง command buffer แทน compile shader แบบ runtime ของ Skia) — มันไม่ได้เปลี่ยนการแบ่ง thread เอง
 

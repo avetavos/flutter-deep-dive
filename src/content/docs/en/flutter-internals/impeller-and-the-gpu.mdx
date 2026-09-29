@@ -80,7 +80,7 @@ Both are real, documented keys the embedding reads at startup -- distinct from t
 
 > *"The UI thread executes Dart code in the Dart VM. This includes code from your application as well as the Flutter framework. When your app creates and displays a scene, the UI thread creates a layer tree, a lightweight object containing device-agnostic painting commands, and sends the layer tree to the raster thread to be rendered on the device."*
 >
-> *"The raster thread executes graphics code from the Flutter Engine. This thread takes the layer tree and displays it by talking to the GPU (graphic processing unit)... Skia, the graphics library, runs on this thread. [Impeller](/perf/impeller) also uses this thread."*
+> *"The raster thread executes graphics code from the Flutter Engine. This thread takes the layer tree and displays it by talking to the GPU (graphic processing unit)... Skia, the graphics library, runs on this thread. [Impeller](https://docs.flutter.dev/perf/impeller) also uses this thread."*
 
 Two genuinely separate threads, exactly as [Production Concerns](/flutter/en/tooling-and-production/production-concerns/)'s own real `showPerformanceOverlay` description already shows correctly (two separate graphs -- "the UI thread's per-frame time... and the raster thread's per-frame time"). Impeller changed **what runs on the raster thread** (precompiled PSOs and command-buffer submission instead of Skia's runtime shader compilation) -- it did not change the thread split itself.
 

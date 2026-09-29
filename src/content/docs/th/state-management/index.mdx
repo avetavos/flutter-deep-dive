@@ -22,7 +22,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 การแบ่งที่มีประโยชน์ที่สุดไม่ใช่ "ใช้ package ไหน" แต่เป็น **state เข้าถึงได้ไกลแค่ไหน**:
 
-<Mermaid title="Ephemeral state vs app state" code={splitDiagram} />
+<Mermaid title="ephemeral state กับ app state" code={splitDiagram} />
 
 export const splitDiagram = `flowchart TB
   eph["Ephemeral state\n(widget เดียว: checkbox,\ntext field, animation)"] --> local["setState\nอยู่ใน State object เดียว"]
