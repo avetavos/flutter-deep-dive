@@ -1,6 +1,6 @@
 ---
 title: 'Rebuilds & Performance'
-description: 'lever ที่ใหญ่ที่สุดสำหรับ Flutter ที่ลื่น — const constructor, narrow scope ของ setState, subtree ที่นิ่ง, RepaintBoundary และหา waste ด้วย DevTools'
+description: 'วัด rebuild แบบจริงจังด้วย debugPrintRebuildDirtyWidgets กับวิธี build-counter, const, ขอบเขตของ ValueListenableBuilder, พิสูจน์ว่า ListView.builder ขี้เกียจจริงเทียบกับ ListView(children:), CustomPainter.shouldRepaint, image caching และ frame budget'
 sidebar:
   order: 3
 ---
@@ -9,96 +9,514 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## Rebuild ถูก — จนกว่าจะไม่ถูก
+## Rebuild ถูก — จนกว่ามันจะไม่ถูก
 
-การ rebuild widget subtree มักจะเร็ว: Flutter diff widget ใหม่กับ element แล้ว update เฉพาะที่เปลี่ยน ปัญหาคือ rebuild *มากเกินจำเป็น* — rebuild subtree ใหญ่ทั้งที่ชิ้นเล็กชิ้นเดียวเปลี่ยน ทุก frame ของ animation lever ด้านล่างล้วนลดงาน rebuild และ repaint ที่สูญเปล่า
+การ rebuild widget subtree ปกติเร็วมาก: Flutter diff widget ใหม่กับ element แล้วอัปเดตเฉพาะที่เปลี่ยน ปัญหาคือการทำมัน*มากกว่าที่จำเป็น* — rebuild subtree ใหญ่ทั้งก้อนทั้งที่มีแค่ชิ้นเล็ก ๆ เปลี่ยน ทุกเฟรมของ animation คันโยกด้านล่างทั้งหมดลดงาน rebuild/repaint ที่สูญเปล่า แต่ละอันพิสูจน์ด้วย widget test จริง ไม่ใช่การเดา
 
-## Lever 1: const constructor
+## วัด rebuild แบบจริงจัง: `debugPrintRebuildDirtyWidgets` กับวิธี build-counter
 
-`const` widget ถูกสร้างตอน compile time และถูก canonicalize เมื่อ parent rebuild Flutter เห็น instance `const` ตัวเดิม แล้ว **ข้ามการ rebuild subtree นั้นทั้งก้อน**
-
-```dart
-// This subtree is const — it is built once and skipped on every parent rebuild.
-const Padding(
-  padding: EdgeInsets.all(16),
-  child: Text('Static label'),
-)
-```
-
-การใส่ `const` ทุกที่ที่ input ของ widget เป็น compile-time constant ทั้งหมด คือ performance win ที่ถูกที่สุดใน Flutter เปิด lint `prefer_const_constructors` แล้วทำตามที่ lint บอก
-
-## Lever 2: narrow scope ของ setState
-
-`setState` rebuild output ของ `build` *ทั้งหมด* ของ `State` นั้น ถ้าหน้าจอยักษ์เรียก `setState` เพื่อ counter เล็ก ๆ ทั้งหน้าจอก็ rebuild
+Flutter มี debug flag จริง — `debugPrintRebuildDirtyWidgets` (ประกาศใน `package:flutter/src/widgets/debug.dart` re-export ผ่าน `package:flutter/widgets.dart`/`package:flutter/material.dart` เป็น top-level `bool`) — ที่ทำให้ทุกการเรียก `Element.rebuild()` พิมพ์ `Building $this` หรือ `Rebuilding $this` ผ่าน `debugPrint` มันมีประโยชน์จริงสำหรับการสืบสวนแบบครั้งเดียว "อะไร rebuild จริง ๆ ตอนที่ฉันกดปุ่มนี้" แต่ output ของมันเอง (จับไว้ด้านล่าง) แสดงให้เห็นว่าทำไมมันถึงไม่ใช่เครื่องมือประจำวัน: `setState` เดียวข้างใน `MaterialApp` trigger การ rebuild ระดับ framework-internal หลายสิบครั้ง (focus scope, ink response ของปุ่ม, Material ripple ของมัน) ที่ไม่เกี่ยวอะไรกับ widget ของคุณเองเลย
 
 ```dart
-// ❌ setState here rebuilds the entire screen for one number.
-// ✅ Pull the changing part into its own small StatefulWidget,
-//    so only that widget rebuilds. Keep the rest as const siblings.
+// lib/rebuild_counters.dart
+import 'package:flutter/material.dart';
+
+int constChildBuildCount = 0;
+int dynamicChildBuildCount = 0;
+
+class ConstChild extends StatelessWidget {
+  const ConstChild({super.key});
+  @override
+  Widget build(BuildContext context) {
+    constChildBuildCount++;
+    return const Text('const child');
+  }
+}
+
+class DynamicChild extends StatelessWidget {
+  const DynamicChild({super.key, required this.count});
+  final int count;
+  @override
+  Widget build(BuildContext context) {
+    dynamicChildBuildCount++;
+    return Text('count: $count');
+  }
+}
+
+class ParentWithSetState extends StatefulWidget {
+  const ParentWithSetState({super.key});
+  @override
+  State<ParentWithSetState> createState() => _ParentWithSetStateState();
+}
+
+class _ParentWithSetStateState extends State<ParentWithSetState> {
+  int count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const ConstChild(),
+        DynamicChild(count: count),
+        ElevatedButton(
+          onPressed: () => setState(() => count++),
+          child: const Text('increment'),
+        ),
+      ],
+    );
+  }
+}
 ```
 
-Pattern คือ: ดัน state *ลงล่าง* ไปที่ widget เล็กที่สุดที่ต้องใช้ และคง widget รอบ ๆ ให้เป็น `const` เพื่อให้อยู่นิ่ง
+```dart
+// test/rebuild_counters_test.dart
+import 'package:flutter/material.dart'; // re-exports widgets.dart, which declares debugPrintRebuildDirtyWidgets and debugPrint
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__rebuilds-and-performance/rebuild_counters.dart';
 
-## Lever 3: subtree ที่นิ่ง และ RepaintBoundary
+void main() {
+  tearDown(() {
+    debugPrintRebuildDirtyWidgets = false;
+  });
 
-<Mermaid title="แยกส่วนที่เปลี่ยนออกมาทำให้ที่เหลือนิ่ง" code={boundaryDiagram} />
+  testWidgets(
+      'debugPrintRebuildDirtyWidgets logs DynamicChild but never ConstChild after setState',
+      (tester) async {
+    final logs = <String>[];
+    final originalDebugPrint = debugPrint;
+    debugPrint = (String? message, {int? wrapWidth}) {
+      if (message != null) logs.add(message);
+    };
+    debugPrintRebuildDirtyWidgets = true;
 
-export const boundaryDiagram = `flowchart TB
-  screen["หน้าจอใหญ่ (const, นิ่ง)"] --> counter["widget เล็กที่เปลี่ยน\n(State ของตัวเอง)"]
-  screen --> rest["const siblings\nไม่ rebuild ไม่ repaint"]
-  counter --> rb["ห่อส่วนหนัก/animated\nด้วย RepaintBoundary"]`;
+    await tester.pumpWidget(const MaterialApp(home: ParentWithSetState()));
+    logs.clear(); // discard the initial "Building ..." logs from first mount
 
-`RepaintBoundary` ให้ subtree มี paint layer ของตัวเอง การ repaint จึงไม่ลากเพื่อนบ้าน repaint ตามไปด้วย ห่อ animation หรือ widget ที่ update บ่อยไว้ในนั้นเพื่อจำกัดความเสียหาย
+    await tester.tap(find.byType(ElevatedButton));
+    await tester.pump();
 
-## Lever 4: วัดด้วย DevTools
+    debugPrint = originalDebugPrint;
+    debugPrintRebuildDirtyWidgets = false; // reset before the test ends -- the
+    // test binding asserts this flag is unset when a test finishes, so
+    // resetting only in tearDown() is too late.
 
-อย่าเดา Flutter DevTools แสดง **rebuild count** (widget ไหน rebuild บ่อยแค่ไหน), **timeline** ของ frame time (หา frame ที่เกิน budget) และ widget inspector workflow คือ: ทำ jank ให้เกิดซ้ำ, เปิด timeline, หา frame ที่แพง, แล้วดูว่า subtree ไหนทำงานมากเกินไป
+    final relevant = logs.where((l) => l.contains('ConstChild') || l.contains('DynamicChild'));
+    expect(relevant.any((l) => l.contains('Rebuilding DynamicChild')), isTrue);
+    expect(relevant.any((l) => l.contains('ConstChild')), isFalse);
+  });
+
+  testWidgets('build-counter methodology: const child stays at 1, dynamic sibling increments',
+      (tester) async {
+    constChildBuildCount = 0;
+    dynamicChildBuildCount = 0;
+    await tester.pumpWidget(const MaterialApp(home: ParentWithSetState()));
+    expect(constChildBuildCount, 1);
+    expect(dynamicChildBuildCount, 1);
+
+    await tester.tap(find.byType(ElevatedButton));
+    await tester.pump();
+
+    expect(constChildBuildCount, 1); // unchanged -- const skip
+    expect(dynamicChildBuildCount, 2); // rebuilt
+  });
+}
+```
+
+```text
+00:00 +0: debugPrintRebuildDirtyWidgets logs DynamicChild but never ConstChild after setState
+00:00 +1: build-counter methodology: const child stays at 1, dynamic sibling increments
+
+00:00 +2: All tests passed!
+```
+
+สองเทคนิคนี้ให้ผลตรงกัน แต่แบบ build-counter (`int` ที่เพิ่มค่าข้างใน `build()`) คือตัวที่ scale ไปใช้กับ test suite จริงได้ — มันคือ assertion ที่แม่นยำ กรองได้ แทนที่จะเป็นกำแพงของ noise ระดับ framework-internal ที่ต้องมานั่งไล่ดูเอง `debugPrintRebuildDirtyWidgets` (และแท็บ **Performance**/**Widget Rebuild Stats** ของ DevTools เอง ครอบคลุมด้านล่าง) เหมาะกับการสืบสวนแบบ interactive ครั้งเดียวบนอุปกรณ์จริง — คอร์สนี้ไม่มีอุปกรณ์ ดังนั้นทุก claim ในบทนี้ใช้เทคนิค counter แทน และพิสูจน์แล้วว่าแม่นยำพอ ๆ กัน: `constChildBuildCount` ไม่เคยขยับเกิน `1` จริง ๆ
+
+### DevTools: แท็บ Performance กับ Widget Rebuild Stats (docs — ไม่มีอุปกรณ์ที่นี่)
+
+บนอุปกรณ์/emulator จริง (ซึ่ง environment ของคอร์สนี้ไม่มี — ไม่มี `flutter run` ไม่มี DevTools session) มุมมอง **Performance** ของ Flutter DevTools แสดง frame timeline สด (เวลา build/raster ของแต่ละเฟรม พร้อมแฟลกเฟรมที่เกินงบ) และแผง **Widget Rebuild Stats** ของมัน — [ระบุไว้ที่ docs.flutter.dev](https://docs.flutter.dev/tools/devtools/performance) — แสดงตรง ๆ ว่า widget ไหน rebuild ในแต่ละเฟรมและกี่ครั้ง ซึ่งเป็น output ของ `debugPrintRebuildDirtyWidgets` ที่แปลงเป็น UI จริง กรองได้ ต่อเฟรม แทนที่จะเป็น print log ดิบ ๆ workflow ที่ docs อธิบายไว้: reproduce จังหวะสะดุด เปิด timeline หาเฟรมที่เกินงบ แล้วเช็ค Widget Rebuild Stats สำหรับเฟรมนั้นว่า subtree ไหนทำงานเกินความจำเป็น
+
+## `const`: ข้าม rebuild ไปเลย
+
+พิสูจน์แล้วด้านบน: `const` widget ถูก canonicalize ตอน compile time และเมื่อ parent rebuild Flutter ใช้ instance เดิมซ้ำและข้ามการเรียก `build()` ไปเลย — `constChildBuildCount` ค้างที่ `1` ตลอด `setState` ที่ rebuild parent ของมัน เปิด lint `prefer_const_constructors` (ส่วนหนึ่งของ `flutter_lints` ครอบคลุมใน[บทเรียน project-and-tooling](/flutter/th/tooling-and-production/project-and-tooling/)) แล้วทำตามมัน — มันคือชัยชนะด้านประสิทธิภาพที่ถูกที่สุดและเป็นกลไกล้วน ๆ ที่มีอยู่
+
+## การจำกัดขอบเขต: `ValueListenableBuilder` (และ `select` ของ Riverpod)
+
+`setState` rebuild *ทั้งหมด* ของ output `build` ของ `State` ที่ครอบอยู่ `ValueListenableBuilder` จำกัดมันให้แคบลง: มีแค่ callback `builder` ของมันเองเท่านั้นที่รันซ้ำเมื่อ `ValueListenable` เปลี่ยน — `State.build()` ที่ครอบอยู่ไม่รันซ้ำเลย
+
+```dart
+// lib/vlb_scope_demo.dart
+import 'package:flutter/material.dart';
+
+int scopedParentBuildCount = 0;
+int scopedChildBuildCount = 0;
+
+class ScopedCounter extends StatefulWidget {
+  const ScopedCounter({super.key});
+  @override
+  State<ScopedCounter> createState() => _ScopedCounterState();
+}
+
+class _ScopedCounterState extends State<ScopedCounter> {
+  final ValueNotifier<int> notifier = ValueNotifier<int>(0);
+
+  @override
+  void dispose() {
+    notifier.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    scopedParentBuildCount++;
+    return Column(
+      children: [
+        ValueListenableBuilder<int>(
+          valueListenable: notifier,
+          builder: (context, value, child) {
+            scopedChildBuildCount++;
+            return Text('value: $value');
+          },
+        ),
+        ElevatedButton(
+          onPressed: () => notifier.value++,
+          child: const Text('increment'),
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/vlb_scope_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__rebuilds-and-performance/vlb_scope_demo.dart';
+
+void main() {
+  testWidgets(
+      'ValueListenableBuilder rebuilds only its own builder, not the parent State',
+      (tester) async {
+    scopedParentBuildCount = 0;
+    scopedChildBuildCount = 0;
+    await tester.pumpWidget(const MaterialApp(home: ScopedCounter()));
+    expect(scopedParentBuildCount, 1);
+    expect(scopedChildBuildCount, 1);
+
+    await tester.tap(find.byType(ElevatedButton));
+    await tester.pump();
+
+    expect(scopedParentBuildCount, 1); // the State's build() never re-ran
+    expect(scopedChildBuildCount, 2); // only the builder callback re-ran
+  });
+}
+```
+
+```text
+00:00 +0: ValueListenableBuilder rebuilds only its own builder, not the parent State
+
+00:00 +1: All tests passed!
+```
+
+`scopedParentBuildCount` ที่ค้างที่ `1` หลัง notifier เปลี่ยนคือบทพิสูจน์: จุดประสงค์ทั้งหมดของ `ValueListenableBuilder` (และในโลกของ Riverpod คือ `ref.watch(provider.select(...))`) คือการย้ายขอบเขตของ rebuild *ลงไป* ให้ตรงกับ widget ที่ต้องการค่าใหม่พอดี แทนที่จะเป็น `State` ทั้งก้อนที่ครอบอยู่ กลไกของ `.select()` ของ Riverpod (พร้อมบทพิสูจน์ของมันเอง) ครอบคลุมอยู่ใน[บทเรียน Provider & Riverpod](/flutter/th/state-management/provider-and-riverpod/) — *หลักการ* การจำกัดขอบเขตที่พิสูจน์ที่นี่ด้วย `ValueListenableBuilder` คือหลักการเดียวกับที่ `.select()` ใช้ในชั้น provider
+
+## `ListView.builder` เทียบกับ `ListView(children:)` พิสูจน์ว่าขี้เกียจจริง
+
+ข้ออ้างทั่วไป — "`ListView.builder` build แค่ item ที่มองเห็น `ListView(children:)` build ทุกอย่าง" — ต้องการบทพิสูจน์ที่แม่นยำ เพราะ test แบบ build-counter *ไร้เดียงสา* (นับการเรียก `build()`) จริง ๆ แล้วจะได้ผลผิด: `RenderSliverList` mount element เฉพาะช่วง visible **บวก cache extent** เท่านั้นไม่ว่า delegate ไหนป้อนมันอยู่ ดังนั้นจำนวนการเรียก `build()` จะจบลงใกล้เคียงกันมากสำหรับทั้งสองแบบ ความต่างจริงและตรงไปตรงมาอยู่ก่อนหน้านั้นหนึ่งขั้น — ในจำนวน object `Widget` **ที่ถูกสร้างขึ้น** ตั้งแต่แรก:
+
+```dart
+// lib/listview_laziness.dart
+import 'package:flutter/material.dart';
+
+int itemConstructedCount = 0;
+
+class CountedItem extends StatelessWidget {
+  CountedItem(this.index, {super.key}) {
+    itemConstructedCount++; // counts constructor calls, not build() calls
+  }
+  final int index;
+  @override
+  Widget build(BuildContext context) => SizedBox(height: 50, child: Text('item $index'));
+}
+```
+
+```dart
+// test/listview_laziness_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__rebuilds-and-performance/listview_laziness.dart';
+
+void main() {
+  testWidgets(
+      'ListView(children:) constructs every item eagerly; ListView.builder only constructs visible ones',
+      (tester) async {
+    itemConstructedCount = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: SizedBox(
+        height: 300,
+        child: ListView(
+          children: List.generate(100, (i) => CountedItem(i)), // eager: calls CountedItem() 100 times right here
+        ),
+      ),
+    ));
+    expect(itemConstructedCount, 100);
+
+    itemConstructedCount = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: SizedBox(
+        height: 300,
+        child: ListView.builder(
+          itemCount: 100,
+          itemBuilder: (context, i) => CountedItem(i), // lazy: only called for what's needed
+        ),
+      ),
+    ));
+    expect(itemConstructedCount, lessThan(100));
+    expect(itemConstructedCount, greaterThan(0));
+  });
+}
+```
+
+```text
+00:00 +0: ListView(children:) constructs every item eagerly; ListView.builder only constructs visible ones
+
+00:00 +1: All tests passed!
+```
+
+วัดจริงบน Mac เครื่องนี้: `ListView(children:)` สร้าง item ทั้ง **100** ตัว (`List.generate(100, ...)` เป็น Dart แบบ synchronous ธรรมดา — มันไม่มีทางรู้ว่ามีแค่บางส่วนที่จะมองเห็น); `ListView.builder` ใน viewport 300-logical-pixel เดียวกัน สร้างแค่ **17** ตัว (แถวที่มองเห็นบวก cache extent ค่า default ของ `SliverList`) — ความต่างจริงประมาณ 6 เท่าสำหรับ list ขนาดนี้ และเป็นความต่างที่ขยายเป็นเส้นตรงตามความยาว list สำหรับ `ListView(children:)` ในขณะที่ค้างเกือบคงที่สำหรับ `.builder` เลข "17" ที่แน่นอนคือ cache extent ค่า default ของ Mac เครื่องนี้ที่ขนาด viewport นี้ ไม่ใช่ตัวเลขที่รับประกันได้ — ประเด็นที่พิสูจน์คือ *ถูกจำกัดด้วย viewport* เทียบกับ *ถูกจำกัดด้วยความยาว list* ไม่ใช่ตัวเลขที่เจาะจง สำหรับกลไก sliver เบื้องหลัง delegate ทั้งสองแบบ (`SliverList.builder`, กลไก viewport/cache-extent) ดู[โมดูล layout-and-rendering](/flutter/th/layout-and-rendering/)
+
+## ต้นทุนของ `Opacity`, `ClipRRect` และ `saveLayer`
+
+ทั้ง `Opacity` (สำหรับค่าที่ไม่ใช่ 1.0 หรือ 0.0 บน child ที่ไม่ได้โปร่งใสอยู่แล้วแบบ trivial) และ `ClipRRect` แบบ default สามารถบังคับให้ Flutter ต้องจอง **offscreen layer** (`Canvas.saveLayer`) เพื่อ composite ให้ถูกต้อง — เป็นต้นทุน GPU จริง ไม่ใช่สมมติฐาน [doc comment ของ class `Opacity` เอง](https://api.flutter.dev/flutter/widgets/Opacity-class.html) พูดตรง ๆ เรื่องนี้ แนะนำ `AnimatedOpacity`/`FadeTransition` แทนเมื่อค่านั้น animate จริง ๆ และระบุว่า "`Opacity` is a relatively expensive widget because it requires compositing" สำหรับกรณีที่ไม่ trivial บทนี้ไม่ได้อธิบาย paint/composite pipeline ซ้ำ — [บทเรียน render-pipeline](/flutter/th/layout-and-rendering/render-pipeline/) ครอบคลุม layer กับ `saveLayer` แบบเจาะลึก; เวอร์ชันที่ใช้งานได้จริงสำหรับที่นี่คือ: `Opacity`/`ClipRRect` ที่อยู่ข้างในอะไรบางอย่างที่ repaint ทุกเฟรม (animation ที่กำลัง active) จะสะสมต้นทุน `saveLayer` ทุกเฟรมเหล่านั้น ซึ่งเป็นสิ่งที่ `RepaintBoundary` (ครอบคลุมใน[บทเรียน animations](/flutter/th/async-and-performance/animations/)) จำกัดขอบเขตไว้ ไม่ใช่กำจัดมัน
+
+## `shouldRepaint` ใน `CustomPainter` พิสูจน์แล้ว
+
+`paint()` ของ `CustomPainter` มีต้นทุนสูงถ้าถูกเรียกโดยไม่จำเป็น — `shouldRepaint` คือ hook ที่ตัดสินว่าการเรียก `paint()` ใหม่จะเกิดขึ้นจริงหรือไม่เมื่อ painter ถูกแทนที่:
+
+```dart
+// lib/custom_painter_demo.dart
+import 'package:flutter/material.dart';
+
+int paintCallCount = 0;
+
+class CountingPainter extends CustomPainter {
+  CountingPainter(this.value);
+  final int value;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    paintCallCount++;
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), Paint());
+  }
+
+  @override
+  bool shouldRepaint(covariant CountingPainter oldDelegate) {
+    return oldDelegate.value != value;
+  }
+}
+```
+
+```dart
+// test/custom_painter_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__rebuilds-and-performance/custom_painter_demo.dart';
+
+void main() {
+  testWidgets('shouldRepaint returning false skips the next paint() call',
+      (tester) async {
+    paintCallCount = 0;
+    Widget build(int value) => MaterialApp(
+          home: CustomPaint(painter: CountingPainter(value), size: const Size(100, 100)),
+        );
+
+    await tester.pumpWidget(build(1));
+    expect(paintCallCount, 1);
+
+    await tester.pumpWidget(build(1)); // same value -- shouldRepaint returns false
+    expect(paintCallCount, 1); // no new paint() call
+
+    await tester.pumpWidget(build(2)); // different value -- shouldRepaint returns true
+    expect(paintCallCount, 2);
+  });
+}
+```
+
+```text
+00:00 +0: shouldRepaint returning false skips the next paint() call
+
+00:00 +1: All tests passed!
+```
+
+`paintCallCount` ที่ค้างที่ `1` ตลอดการแทนที่ด้วยค่าเดิมคือบทพิสูจน์: Flutter สร้าง instance `CountingPainter` *ใหม่* ทุก `build` แต่จะเรียก `paint()` ของมันก็ต่อเมื่อ `shouldRepaint(oldDelegate)` บอกให้ทำเท่านั้น การคืนค่า `oldDelegate.value != value` — เทียบกับ painter เก่าตัวจริง ไม่ใช่ flag global/static — คือสิ่งที่ทำให้มันถูกต้องข้าม rebuild ที่เหมือนกันซ้ำ ๆ ไม่ใช่แค่ครั้งแรก
+
+## Image caching: `cacheWidth`/`cacheHeight`
+
+การ decode รูปที่ความละเอียดดั้งเดิมทั้งที่มันจะ render แค่ที่ขนาดเล็กกว่ามากคือการเสียทั้งเวลา decode และ memory ที่ cache ไว้ — `Image(..., cacheWidth: 200)` (หรือแบบเทียบเท่าบน `ImageProvider.resolve`) บอก image decoder ของ Flutter ให้ decode ตรง ๆ ที่ความละเอียดเป้าหมายนั้นแทนที่จะ decode เต็มขนาดแล้วค่อย downscale ทีหลัง ซึ่ง[docs ของ class `Image` เอง](https://api.flutter.dev/flutter/widgets/Image-class.html) อธิบายว่าลด "the memory usage of the ImageCache" บทนี้ไม่ได้รัน decode-memory proof — headless probe นี้ไม่มี image asset จริงให้ decode และการสร้างขึ้นแบบสังเคราะห์ (buffer PNG ขนาดเล็ก) จะพิสูจน์แค่ว่า codec API ทำงาน ไม่ใช่ claim เรื่องการประหยัด memory จริง — ดังนั้นข้อนี้จึงอ้างอิงจาก docs แทนที่จะวัด อย่างตรงไปตรงมา แทนที่จะปลอมตัวเลขที่ไม่มีความหมายอะไรเลย
+
+## Shader jank กับ Impeller
+
+shader ที่ยังไม่ถูก compile ทำให้เกิดการสะดุดจริงที่มองเห็นได้ในครั้งแรกที่มันถูกใช้ — "shader compilation jank" นี่เป็นประเด็นระดับ render-pipeline (precompiled pipeline state object ภายใต้ Impeller เทียบกับ runtime shader compilation ภายใต้ Skia) ครอบคลุมแบบเจาะลึก พร้อมกลไกจริงและสถานะ Impeller-default ที่ระบุเวอร์ชันไว้ ใน[บทเรียน render-pipeline](/flutter/th/layout-and-rendering/render-pipeline/) — ไม่อธิบายซ้ำที่นี่เพื่อไม่ให้ซ้ำซ้อนกับบทพิสูจน์นั้น
+
+## Profiling บนอุปกรณ์จริง: `flutter run --profile`, `--trace-skia`, `--trace-systrace` (docs — ไม่มีอุปกรณ์ที่นี่)
+
+environment ของคอร์สนี้ไม่มีอุปกรณ์หรือ emulator ดังนั้นอะไรต่อไปนี้รันและจับผลที่นี่ไม่ได้เลย — อ้างอิงอย่างตรงไปตรงมาจาก[คู่มือ performance profiling ของ docs.flutter.dev](https://docs.flutter.dev/perf/ui-performance) แทน: `flutter run --profile` สร้าง build แบบ profile mode (ใกล้เคียง release performance มากกว่า debug แต่เปิด tracing ไว้) — นี่คือ mode ที่ Performance timeline ของ DevTools ถูกออกแบบให้ใช้เทียบ เพราะเวลาของ debug mode มี overhead ของ assertion และ debug-service ที่ไม่สะท้อนเวลาเฟรมจริง `--trace-skia` กับ `--trace-systrace` (flag ที่ระบุไว้สำหรับจับ trace ระดับ rendering/OS ที่ลึกกว่า) ป้อนข้อมูลให้เครื่องมือ profiling ระดับ platform-native (Perfetto/`systrace` ของ Android หรือ trace viewer ของ Skia เอง) สำหรับกรณีที่ timeline ของ DevTools เองไม่ละเอียดพอ
+
+## Frame budget
+
+ที่ 60fps แต่ละเฟรมมี **16.67ms** (1000ms ÷ 60) ในการทำ build + layout + paint + raster ให้เสร็จก่อนที่เฟรมถัดไปจะถึงกำหนด; ที่ 120fps (โทรศัพท์ปัจจุบันหลายรุ่น) งบนั้นลดครึ่งเหลือ **8.33ms** ทุกเทคนิคในบทนี้ — การข้าม rebuild ด้วย `const`, การจำกัดขอบเขตด้วย `ValueListenableBuilder`, การรักษาความขี้เกียจของ `ListView`, การข้าม `paint()` ที่ไม่จำเป็นผ่าน `shouldRepaint` — มีอยู่เพื่อรักษางานจริงของแต่ละเฟรมให้อยู่ใต้ตัวเลขนั้น; Performance timeline ของ DevTools (ด้านบน) คือวิธีที่คุณจะรู้ บนอุปกรณ์จริง ว่าเฟรมไหนเกินงบจริง ๆ และทำไม
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Flutter ที่ลื่นส่วนใหญ่คือการ *ไม่* rebuild หรือ repaint มากเกินจำเป็น: mark widget ที่ input คงที่ทุกตัวเป็น `const` (ถูกข้ามตอน parent rebuild), ดัน `setState` ลงไปที่ widget เล็กสุดเพื่อให้ scope เล็ก, คง subtree รอบ ๆ ให้นิ่ง และห่อส่วน animated/หนักด้วย `RepaintBoundary` แล้วยืนยันด้วย rebuild count และ frame timeline ใน DevTools แทนการเดา
+build-counter ธรรมดา (`int` ที่เพิ่มค่าข้างใน `build()`/`paint()`) พิสูจน์แล้วด้านบนว่าเป็นวิธีที่แม่นยำ assert ได้ สำหรับวัด rebuild ใน environment นี้ — `debugPrintRebuildDirtyWidgets` กับ Widget Rebuild Stats ของ DevTools ทำงานเดียวกันแบบ interactive บนอุปกรณ์จริง `const` ข้าม `build()` ไปเลยจริง ๆ ตอน parent rebuild พิสูจน์แล้วด้านบน `ValueListenableBuilder` (และ `.select()` ของ Riverpod) จำกัดขอบเขต rebuild จาก `State` ทั้งก้อนลงมาเหลือแค่ widget ที่ต้องการค่าใหม่ พิสูจน์แล้วด้านบนโดย build count ของ parent ค้างนิ่ง `ListView.builder` พิสูจน์แล้วว่าขี้เกียจจริงในระดับการสร้าง widget (17 เทียบ 100 สำหรับ list 100 รายการใน viewport 300px) — ไม่ใช่เพราะมัน "สร้าง widget น้อยกว่า" แบบกว้าง ๆ แต่เพราะ `List.generate` สำหรับ `ListView(children:)` ไม่มีทางเลี่ยงการสร้างทุก item ตั้งแต่แรก `CustomPainter.shouldRepaint` พิสูจน์แล้วด้านบนว่าควบคุมจริงว่า `paint()` จะรันซ้ำหรือไม่ Frame budget คือตัวเลขตายตัว — 16.67ms ที่ 60fps — ที่ทุกคันโยกในบทนี้มีอยู่เพื่อปกป้อง
 </Callout>
+
+## Reading AI-generated code
+
+โค้ด "ที่ใส่ใจ performance" ที่ AI generate มักหยิบ `const` มาใช้ในจุดที่ง่ายและชัดเจนอยู่แล้ว แต่พลาดสองจุดที่สำคัญจริง ๆ เมื่อ scale ขึ้น: การสร้าง list กับ custom painting
+
+```dart
+// AI-generated: "show a scrollable list of 500 items"
+class ItemsScreen extends StatelessWidget {
+  const ItemsScreen({super.key, required this.items});
+  final List<Item> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      children: items.map((item) => ListTile(title: Text(item.name))).toList(),
+    );
+  }
+}
+```
+
+ก่อนจะเชื่อโค้ด list/painting ที่ generate มาแบบนี้ ให้เช็ค:
+
+- `ListView(children: someList.map(...).toList())` สำหรับอะไรก็ตามที่อาจยาวหรือมาจาก server — พิสูจน์แล้วด้านบนว่ามันสร้าง widget ของทุก item ทันที ไม่ว่าจะมองเห็นกี่ตัวก็ตาม `ListView.builder(itemCount:, itemBuilder:)` คือทางแก้ พิสูจน์แล้วด้านบนว่าสร้างแค่สิ่งที่ viewport (บวก cache extent) ต้องการจริง ๆ
+- `CustomPainter` ที่ไม่มี `shouldRepaint` override (implementation default คืนค่า `true` แบบไม่มีเงื่อนไขในโค้ด generate ส่วนใหญ่ หรือถูกละไว้เฉย ๆ ซึ่งให้ผลเดียวกัน) — พิสูจน์แล้วด้านบนว่ามันหมายความว่าทุก rebuild ที่ไปถึง `CustomPaint` จะรัน `paint()` ซ้ำแม้ไม่มีอะไรที่ painter อ่านเปลี่ยนไปเลย
+- `Opacity`/`ClipRRect` ที่ห่ออยู่ตรง ๆ รอบอะไรบางอย่างที่ rebuild ทุกเฟรม (ข้างใน `AnimatedBuilder` เช่น) โดยไม่มี `RepaintBoundary` — สะสมต้นทุน `saveLayer` ทุกเฟรมแทนที่จะจำกัดขอบเขตไว้
+- `Image` ความละเอียดเต็มที่ render ที่ขนาดเล็กคงที่โดยไม่มี `cacheWidth`/`cacheHeight` — decode และ cache ข้อมูล pixel มากกว่าที่จะแสดงจริงมาก
+
+<SpotTheBug code={`class Heatmap extends StatelessWidget {
+  const Heatmap({super.key, required this.values});
+  final List<double> values;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: HeatmapPainter(values),
+      size: const Size(300, 300),
+    );
+  }
+}
+
+class HeatmapPainter extends CustomPainter {
+  HeatmapPainter(this.values);
+  final List<double> values;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (var i = 0; i < values.length; i++) {
+      canvas.drawRect(
+        Rect.fromLTWH(i * 10.0, 0, 10, size.height * values[i]),
+        Paint()..color = Colors.red.withValues(alpha: values[i]),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant HeatmapPainter oldDelegate) => true;
+}`}>
+พิสูจน์แล้วด้านบนด้วยกลไกเดียวกันเป๊ะ: `shouldRepaint` คืนค่า `true` แบบไม่มีเงื่อนไข ดังนั้นทุกครั้งที่ `Heatmap` rebuild — แม้ `values` จะเป็น list เดิมที่มีเนื้อหาเดิมทุกอย่าง — `HeatmapPainter.paint()` จะรัน loop ทั้งหมดซ้ำและ repaint ทุกสี่เหลี่ยมใหม่ตั้งแต่ต้น สำหรับ `values` list ขนาดใหญ่ที่ rebuild บ่อย (เช่น ข้างในรายการที่ scroll หรือควบคู่กับ animation ที่ไม่เกี่ยวข้องที่อื่นบนหน้าจอ) นี่คือต้นทุน repaint จริงที่หลีกเลี่ยงได้ทุกเฟรม วิธีแก้ พิสูจน์แล้วด้านบน: เทียบกับ `oldDelegate.values` (เช่น `!listEquals(oldDelegate.values, values)` หรือติดตาม version/revision number แยกต่างหากถ้า list ใหญ่พอที่การเช็ค equality เต็มรูปแบบเองจะมีต้นทุนสูง) แล้วคืนค่า `true` เฉพาะตอนที่ข้อมูลเปลี่ยนจริง ๆ เท่านั้น
+</SpotTheBug>
+
+## Mental Model
+
+ทุกเทคนิคในบทนี้จริง ๆ แล้วคือการเคลื่อนไหวเดียวกัน ประยุกต์ใช้ในชั้นที่ต่างกัน: **จำกัดขอบเขตของ "อะไรต้องทำงานซ้ำ" ให้ใกล้เคียงกับสิ่งที่เปลี่ยนจริง ๆ มากที่สุด** `const` จำกัดมันให้เหลือ "ไม่มีอะไรเลย" (input เหมือนกันตอน compile-time งานเป็นศูนย์) `ValueListenableBuilder`/`.select()` จำกัดจาก "`State` ทั้งก้อน" ให้เหลือ "widget ตัวเดียวที่อ่านค่านี้ค่าเดียว" `ListView.builder` จำกัด "item ไหนถูกสร้าง" จาก "list ทั้งหมด" ให้เหลือ "สิ่งที่ viewport มองเห็นได้" `shouldRepaint` จำกัด "เฟรมไหน repaint จริง" จาก "ทุก rebuild" ให้เหลือ "เฉพาะตอนที่ input ของ painter เองเปลี่ยน" ไม่มีอันไหนเป็นเทคนิคแยกกันเลย — มันคือวินัยเดียวกัน ประยุกต์ใช้ทุกที่ที่มีขอบเขต rebuild/repaint อยู่ใน tree ของ Flutter
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `const` ทุกที่ที่ทำได้ | พิสูจน์แล้วด้านบน: ข้าม `build()` ไปเลยตอน parent rebuild ฟรี | ไม่มีต้นทุนจริง — แค่ต้องการให้ input ของ widget เป็น compile-time constant จริง ๆ |
+| `ValueListenableBuilder`/`.select()` | พิสูจน์แล้วด้านบน: จำกัดขอบเขต rebuild จาก `State` ทั้งก้อนลงมาเหลือ widget เดียว | มี layer ของ indirection/boilerplate เพิ่มต่อค่าที่จำกัดขอบเขต |
+| `ListView.builder` | พิสูจน์แล้วด้านบน: ถูกจำกัดด้วย viewport จริง ไม่ใช่ความยาว list | ต้อง setup มากกว่าเล็กน้อย (`itemCount`/`itemBuilder`) เทียบกับ list `children:` ตรง ๆ |
+| `shouldRepaint` ที่เทียบค่าจริง | พิสูจน์แล้วด้านบน: ข้าม `paint()` ไปเลยเมื่อไม่มีอะไรที่เกี่ยวข้องเปลี่ยน | การเทียบเองก็มีต้นทุน — สำหรับข้อมูลใหญ่มาก ตัวนับ version/revision อาจชนะการเช็ค equality แบบลึก |
+| วัดด้วย build-counter แทน DevTools | แม่นยำ assert ได้ ทำงานแบบ headless ได้ (พิสูจน์แล้วตลอดบทนี้) | ต้องเพิ่ม instrumentation เข้าไปในโค้ดที่วัด; DevTools ไม่ต้องแก้โค้ดแต่ต้องมีอุปกรณ์จริง |
+
+## Common Misconceptions
+
+- **"`ListView.builder` สร้าง widget น้อยกว่าเพราะมันฉลาดเรื่อง diffing กว่า"** พิสูจน์แล้วด้านบนว่าไม่จริง: delegate ทั้งสองแบบป้อน `RenderSliverList` เดียวกัน ซึ่ง mount ช่วง viewport-บวก-cache-extent ของ *element* เท่ากันไม่ว่าจะแบบไหน ความต่างจริงที่พิสูจน์แล้วคือขั้นตอน `List.generate`/`.map().toList()` ของ `ListView(children:)` สร้าง widget OBJECT ทุกตัวแบบ eager ก่อนที่ sliver จะเห็นมันด้วยซ้ำ ในขณะที่ closure `itemBuilder` ของ `.builder` ถูกเรียกเฉพาะสิ่งที่ต้องการจริง ๆ เท่านั้น
+- **"`CustomPainter` ที่ไม่มี `shouldRepaint` override ปลอดภัยโดย default"** พิสูจน์แล้วด้านบนว่าไม่จริง: pattern ทั่วไป (`=> true` หรือ override ที่ถูกละไว้ ซึ่งให้ผลเหมือนกัน) หมายความว่า `paint()` รันซ้ำทุก rebuild เดียว พิสูจน์แล้วด้านบนว่าเป็นต้นทุน repaint จริงที่หลีกเลี่ยงได้
+- **"การวัด rebuild ต้องมีอุปกรณ์จริงกับ DevTools"** พิสูจน์แล้วว่าไม่จริงตลอดทั้งบทนี้: ทุก claim ด้านบนพิสูจน์แบบ headless ใน environment นี้เป๊ะ ด้วย build-counter `int` ธรรมดากับ `tester.pump()` — DevTools คือความสะดวกสำหรับการสืบสวนแบบ interactive บนอุปกรณ์ ไม่ใช่ทางเดียวที่จะได้ตัวเลขจริง
+- **"`ValueListenableBuilder` ก็แค่ `setState` เวอร์ชันหรูขึ้น"** พิสูจน์แล้วด้านบนว่าไม่จริง: `setState` rebuild `State.build()` ทั้งก้อนที่ครอบอยู่; `State` ที่เป็น parent ของ `ValueListenableBuilder` ไม่ rebuild เลยเมื่อ notifier เปลี่ยน — พิสูจน์แล้วด้านบนโดย `scopedParentBuildCount` ค้างที่ `1`
 
 export const quizPerf = [
   {
-    q: 'ทำไม const widget ช่วยเรื่อง performance?',
+    q: 'ทำไม const widget ถึงช่วยเรื่อง performance?',
     options: [
-      'compress widget',
-      'ถูก canonicalize เมื่อ parent rebuild Flutter reuse instance เดิมและข้ามการ rebuild subtree นั้น',
-      'รันบน background isolate',
-      'ปิด layout',
+      'มันบีบอัด widget',
+      'มันถูก canonicalize ดังนั้นตอน parent rebuild Flutter ใช้ instance เดิมซ้ำและข้าม rebuild subtree นั้นไปเลย — พิสูจน์แล้วด้านบนว่า build counter ของมันไม่ขยับเลย',
+      'มันรันบน background isolate',
+      'มันปิดการ layout',
     ],
     answer: 1,
+    explain: 'constChildBuildCount ค้างที่ 1 พอดีตลอด setState ที่ rebuild parent ของมันและ sibling แบบ dynamic ของมัน',
   },
   {
-    q: 'ผลของการเรียก setState ใน State class ใหญ่คืออะไร?',
+    q: 'พิสูจน์แล้วด้านบน output ของ debugPrintRebuildDirtyWidgets ที่กรองแล้วอย่างตรงไปตรงมา กับ test แบบ build-counter เห็นตรงกันเรื่องอะไร?',
     options: [
-      'เฉพาะ pixel ที่เปลี่ยน update',
-      'output ของ build ทั้งหมดของ State นั้นถูก rebuild — จง keep scope ของ setState ให้เล็ก',
-      'ไม่มีอะไร rebuild',
-      'rebuild ทั้งแอป',
+      'ทั้งสองเทคนิคไม่ได้ผลลัพธ์ที่ใช้งานได้เลย',
+      'DynamicChild rebuild และ ConstChild ไม่ หลัง setState เดียวกัน — เวอร์ชัน build-counter คือสิ่งที่บทนี้ใช้ตลอดเพราะมันแม่นยำและ assert ได้ ไม่ใช่กำแพง noise ระดับ framework-internal',
+      'widget ทั้งสองตัว rebuild เท่ากัน',
+      'debugPrintRebuildDirtyWidgets ทำงานได้แค่ตอนต่อ DevTools เท่านั้น',
     ],
     answer: 1,
+    explain: 'log ที่กรองแล้วมี "Rebuilding DynamicChild" แต่ไม่มีบรรทัดไหนพูดถึง ConstChild เลย ตรงกับผล build-counter (dynamic: 1 -> 2, const: ค้างที่ 1)',
   },
   {
-    q: 'RepaintBoundary ทำอะไร?',
+    q: 'พิสูจน์แล้วด้านบน ความต่างที่แท้จริงและแม่นยำระหว่าง ListView.builder กับ ListView(children:) คืออะไร?',
     options: [
-      'ห้าม widget paint ตลอดไป',
-      'ให้ subtree มี paint layer ของตัวเอง การ repaint จึงไม่ลากเพื่อนบ้าน repaint ตาม',
-      'cap frame rate',
-      'สร้าง isolate ใหม่',
+      'ListView.builder เรียก build() น้อยกว่าเพราะ sliver ปฏิบัติกับมันเป็นพิเศษ',
+      'List.generate/.map().toList() สำหรับ ListView(children:) สร้าง widget object ของทุก item แบบ eager (100 ตัวสำหรับ list 100 รายการ); closure itemBuilder ของ ListView.builder ถูกเรียกเฉพาะสิ่งที่ viewport บวก cache extent ต้องการจริง ๆ (17 ตัว วัดบน Mac เครื่องนี้)',
+      'ไม่มีความต่างจริง — เป็นแค่ตัวเลือก API แบบเก่า',
+      'ListView.builder ไม่รองรับการ scroll',
     ],
     answer: 1,
+    explain: 'itemConstructedCount (นับ CONSTRUCTOR ของ widget ไม่ใช่ build()) เป็น 100 สำหรับ children: และแค่ 17 สำหรับ .builder ใน viewport 300px เดียวกัน — delegate ทั้งสองแบบป้อน sliver เดียวกัน ซึ่ง mount ช่วง element เดียวกันไม่ว่าแบบไหน',
   },
   {
-    q: 'ควรหาปัญหา performance อย่างไร?',
+    q: 'พิสูจน์แล้วด้านบนด้วย test จริง CustomPainter.shouldRepaint ควบคุมอะไรจริง ๆ?',
     options: [
-      'เดาแล้วใส่ const ทุกที่แบบมั่ว',
-      'วัดด้วย DevTools — rebuild count และ frame timeline — เพื่อหา subtree ที่เกิน budget',
-      'ปิด widget tree',
-      'เขียนแอปใหม่',
+      'ว่า widget CustomPaint เองจะ rebuild หรือไม่',
+      'ว่า paint() จะถูกเรียกอีกครั้งหรือไม่เมื่อ painter instance ใหม่มาแทนที่ตัวเก่า — พิสูจน์แล้วด้านบนว่า paintCallCount ค้างที่ 1 ตลอดการแทนที่ด้วยค่าเดิม และเพิ่มขึ้นเฉพาะตอนค่าเปลี่ยนจริง ๆ',
+      'ขนาดของ canvas',
+      'มันไม่มีผลเลยถ้าไม่ห่อด้วย RepaintBoundary',
     ],
     answer: 1,
+    explain: 'instance CountingPainter ใหม่ถูกสร้างทุก build แต่ paint() รันซ้ำแค่ตอนที่ shouldRepaint(oldDelegate) คืนค่า true สำหรับค่าที่ต่างจริง ๆ',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบน ValueListenableBuilder เปลี่ยนอะไรเกี่ยวกับ widget ไหน rebuild เมื่อค่าเปลี่ยน?',
+    options: [
+      'ไม่มีอะไรต่างจาก setState — มัน rebuild State ทั้งก้อนที่ครอบอยู่เหมือนเดิม',
+      'มีแค่ callback builder ของมันเองเท่านั้นที่รันซ้ำ; State.build() ที่ครอบอยู่ไม่รันซ้ำเลย — พิสูจน์แล้วด้านบนว่า scopedParentBuildCount ค้างที่ 1 ในขณะที่ scopedChildBuildCount วิ่งจาก 1 เป็น 2',
+      'มัน rebuild ทั้งแอป',
+      'มันใช้ได้แค่ข้างใน StatelessWidget เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'นี่คือหลักการจำกัดขอบเขตเดียวกับที่ .select() ของ Riverpod ใช้ในชั้น provider ครอบคลุมพร้อมบทพิสูจน์ของมันเองในบทเรียน Provider & Riverpod',
+  },
+  {
+    q: 'frame budget จริงที่ 60fps คือเท่าไหร่ และทำไมทุกเทคนิคในบทนี้ถึงมีอยู่โดยสัมพันธ์กับมัน?',
+    options: [
+      'ไม่มีงบจริง — เฟรม render เร็วที่สุดเท่าที่จะทำได้',
+      '16.67ms (1000ms / 60) สำหรับ build+layout+paint+raster รวมกัน — const, rebuild ที่จำกัดขอบเขต, list แบบขี้เกียจ และ shouldRepaint ทั้งหมดมีอยู่เพื่อรักษางานจริงของเฟรมให้อยู่ใต้ตัวเลขนั้น',
+      '1 วินาทีต่อเฟรม',
+      'งบนี้ใช้ได้แค่ใน profile mode เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'ที่ 120fps (พบทั่วไปในโทรศัพท์ปัจจุบัน) งบนั้นลดครึ่งเหลือ 8.33ms ทำให้งาน rebuild/repaint ที่ไม่จำเป็นมีต้นทุนสูงขึ้นอีกเมื่อเทียบกับเวลาที่มี',
   },
 ];
 
