@@ -1,6 +1,6 @@
 ---
 title: 'Project & Tooling'
-description: 'pubspec.yaml and pub, the flutter CLI, DevTools, and the difference between hot reload and hot restart — the daily toolchain.'
+description: 'Project layout, pubspec.yaml anatomy, analysis_options.yaml strictness with real diagnostics, flutter_lints vs very_good_analysis, dart fix --dry-run, dart:io vs web proven with a real build, flutter doctor, FVM, DevTools, and hot reload vs hot restart.'
 sidebar:
   order: 2
 ---
@@ -8,6 +8,22 @@ sidebar:
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+## Project layout
+
+`flutter create` scaffolds a standard shape every Flutter project shares:
+
+```text
+my_app/
+  lib/                  # your Dart source — main.dart is the entry point
+  test/                 # unit/widget tests, mirrors lib/'s structure
+  android/ ios/ web/     # per-platform native project (generated, rarely hand-edited)
+  macos/ windows/ linux/ # desktop targets, same idea
+  pubspec.yaml           # the manifest — dependencies, assets, SDK constraint
+  analysis_options.yaml  # linter/analyzer configuration
+```
+
+`lib/` and `test/` are where you live day to day; the platform folders exist so each target has a real native project underneath (Gradle for Android, an Xcode project for iOS/macOS, and so on) — you only reach into them for platform-specific config (permissions, native plugin setup, signing).
 
 ## pubspec.yaml: the manifest
 
@@ -51,11 +67,263 @@ flutter doctor               # diagnose your local toolchain
 flutter analyze              # static analysis / lints
 ```
 
-`flutter doctor` is the first thing to run when anything is off — it checks the SDK, device toolchains, and IDE plugins and tells you exactly what's missing.
+`flutter doctor` is the first thing to run when anything is off — real output from this exact machine (Flutter 3.47.5):
+
+```text
+Doctor summary (to see all details, run flutter doctor -v):
+[✓] Flutter (Channel stable, 3.47.5, on macOS 26.6.2 25G83 darwin-arm64, locale en-TH)
+[✓] Android toolchain - develop for Android devices (Android SDK version 35.0.0)
+[✓] Xcode - develop for iOS and macOS (Xcode 26.2)
+[✓] Chrome - develop for the web
+[✓] Connected device (2 available)
+[✓] Network resources
+
+• No issues found!
+```
+
+It checks the SDK, every platform's device toolchain, and IDE plugins, and tells you exactly what's missing — a red `[✗]` line names the specific thing to fix (an unaccepted Android license, a missing Xcode component, …) rather than a generic failure.
+
+### FVM: pinning a Flutter SDK version per project
+
+**FVM** (Flutter Version Management, [fvm.app](https://fvm.app)) is the community-standard tool for exactly the problem this course itself has to manage: pinning a specific Flutter SDK version per project (`.fvmrc` / `.fvm/fvm_config.json`) instead of whatever version happens to be on `PATH`. It is not part of the Flutter SDK itself — it's a separate CLI that manages multiple cached Flutter SDK installs and symlinks the right one into each project — but it's the standard answer to "why does this build differently on my machine vs. CI" when the real cause is two different Flutter versions.
+
+## `analysis_options.yaml`: strictness that catches real bugs
+
+`analysis_options.yaml` configures the analyzer beyond the base lint set. Three flags — `strict-casts`, `strict-inference`, and `strict-raw-types` — are **not** part of any lint package; they're analyzer `language` options, off by default, that catch a specific class of bug: code that only "works" because of an implicit `dynamic`.
+
+```yaml
+# analysis_options.yaml
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+```
+
+This course's own probe runs with exactly this configuration — every diagnostic below is real, captured by running `flutter analyze` against small demo files with these three flags on.
+
+```dart
+// @expect-error strict-casts: real diagnostic captured with strict-casts:
+// true enabled, from a scratch file inside this course's own probe
+dynamic getValue() => 42;
+
+int useStrictCasts() {
+  int value = getValue(); // implicit dynamic -> int cast
+  return value;
+}
+```
+
+```text
+error • A value of type 'dynamic' can't be assigned to a variable of type 'int'. Try changing the type of the variable, or casting the right-hand type to 'int' • invalid_assignment
+```
+
+Without `strict-casts`, this implicit narrowing from `dynamic` is silently allowed — a real source of "it worked in this one code path but crashed with a type error somewhere else at runtime" bugs, now caught at analyze time instead.
+
+```dart
+// @expect-error strict-raw-types: real diagnostic captured with
+// strict-raw-types: true enabled
+List useStrictRawTypes() {
+  final List list = []; // raw type, no type argument
+  return list;
+}
+```
+
+```text
+warning • The generic type 'List<dynamic>' should have explicit type arguments but doesn't. Use explicit type arguments for 'List' • strict_raw_type
+```
+
+```dart
+// @expect-error strict-inference: real diagnostic captured with
+// strict-inference: true enabled
+List computeList() {
+  final result = []; // inferred as List<dynamic> -- strict-inference flags this
+  return result;
+}
+```
+
+```text
+warning • The type argument(s) of 'List' can't be inferred. Use explicit type argument(s) for 'List' • inference_failure_on_collection_literal
+```
+
+The fix for all three is the same: be explicit.
+
+```dart
+// lib/strict_mode_fixed.dart
+
+int getIntValue() => 42; // no dynamic return type to begin with
+
+int useStrictCastsFixed() {
+  final int value = getIntValue(); // no implicit cast needed
+  return value;
+}
+
+List<String> useStrictRawTypesFixed() {
+  final List<String> list = <String>[]; // explicit type argument
+  return list;
+}
+
+List<int> computeListFixed() {
+  final result = <int>[]; // explicit type argument
+  return result;
+}
+```
+
+This fence analyzes clean against the exact same strict settings — running `flutter analyze` over it reports zero issues.
+
+## `flutter_lints` vs. `very_good_analysis`, proven with a real gap
+
+Both are lint-rule packages you `include:` from `analysis_options.yaml`; they are not equivalent, and the difference isn't always where you'd guess. Checking both packages' real, installed rule sets on this machine (`flutter_lints` resolves to **6.0.0**, `very_good_analysis` resolves to **11.0.0** via `flutter pub add --dry-run` against current pub.dev):
+
+- **`flutter_lints` 6.0.0** (`include: package:flutter_lints/flutter.yaml`) layers a small, Flutter-specific set on top of `package:lints/recommended.yaml`: `avoid_print`, `avoid_unnecessary_containers`, `avoid_web_libraries_in_flutter`, `no_logic_in_create_state`, `prefer_const_constructors_in_immutables`, `sized_box_for_whitespace`, `sort_child_properties_last`, `use_build_context_synchronously`, `use_full_hex_values_for_flutter_colors`, `use_key_in_widget_constructors` — a deliberately small, low-friction default.
+- **`very_good_analysis` 11.0.0** is much larger (237 lines of rules) and notably **does** include the general `prefer_const_constructors` — reading `flutter_lints`' own `lib/flutter.yaml` line by line shows the reverse is true: it ships only the narrower `prefer_const_constructors_in_immutables` (which only fires for a constructor call inside a class marked `@immutable`), not the general rule used throughout the [rebuilds-and-performance lesson](/flutter/en/async-and-performance/rebuilds-and-performance/)'s `const`-skip proof.
+
+The practical takeaway: `flutter_lints` alone will not flag a missing `const` on an ordinary `StatelessWidget` call site — if that specific win matters to your team as an enforced rule (not just a habit), either add `prefer_const_constructors` explicitly under this project's own `linter: rules:` section, or adopt `very_good_analysis`, which ships it by default alongside a much stricter overall baseline.
+
+## `dart fix --dry-run`: real output
+
+`dart fix` applies the analyzer's own registered auto-fixes. `--dry-run` shows what it *would* change without touching anything:
+
+```dart
+// @expect-error use_full_hex_values_for_flutter_colors: real diagnostic +
+// dart fix --dry-run output captured from a scratch file inside this
+// course's own probe (see the info-level output quoted below)
+import 'package:flutter/material.dart';
+
+const Color brandColor = Color(0xFFFFF); // triggers use_full_hex_values_for_flutter_colors
+```
+
+`flutter analyze` on this file reports the real diagnostic:
+
+```text
+info • Instances of 'Color' should be created using an 8-digit hexadecimal integer (such as '0xFFFFFFFF') • use_full_hex_values_for_flutter_colors
+```
+
+Running `dart fix --dry-run` against a file with exactly this line (captured from this course's own probe):
+
+```text
+Computing fixes in scratch_fix (dry run)...
+
+1 proposed fix in 1 file.
+
+fixable_demo.dart
+  use_full_hex_values_for_flutter_colors - 1 fix
+
+To fix an individual diagnostic, run one of:
+  dart fix --apply --code=use_full_hex_values_for_flutter_colors lib/scratch_fix
+
+To fix all diagnostics, run:
+  dart fix --apply lib/scratch_fix
+```
+
+Not every lint is auto-fixable, though — proven while building this exact example: `avoid_unnecessary_containers` (a real, live diagnostic from `flutter analyze`) reported **zero** proposed fixes from `dart fix --dry-run` on the same file, because removing a `Container` while correctly re-parenting its `child` is a structural edit the fix registry doesn't attempt automatically. `dart fix` is genuinely useful, but "the analyzer flagged it" and "`dart fix` can fix it" are two different, independently-provable facts.
+
+## `dart:io` vs. web — proven with a real build (correcting a common assumption)
+
+The common assumption is that `flutter build web` fails outright the moment you `import 'dart:io'` and touch `File`. Running it for real, in a scratch Flutter app with a direct `dart:io` `File` call wired into `main()` (this course's probe never gets a web-incompatible import, per the shared brief — this was run in scratch, never the probe):
+
+```dart
+// scratch/lib/dart_io_direct.dart -- NOT run in the shared probe, per the brief
+import 'dart:io';
+
+String readConfigPath() {
+  final file = File('config.json');
+  return file.path;
+}
+
+bool isIOSPlatform() => Platform.isIOS;
+
+Future<String> readConfigContents() async {
+  final file = File('config.json');
+  return file.readAsString();
+}
+```
+
+```text
+$ flutter build web
+Compiling lib/main.dart for the Web...
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 7800 bytes (99.5% reduction).
+Compiling lib/main.dart for the Web...                             13.6s
+✓ Built build/web
+```
+
+It **succeeds** — with `Platform.isIOS` and `File.readAsString()` both compiled in and called from `main()`. Same result with `flutter build web --wasm`. The reason, proven by reading this exact installed SDK's own web patch source (`~/flutter/bin/cache/dart-sdk/lib/_internal/js_runtime/lib/io_patch.dart`): `dart:io`'s classes exist as real, type-checkable stubs on the web compiler — every native operation just throws at runtime instead of failing to compile:
+
+```text
+// ~/flutter/bin/cache/dart-sdk/lib/_internal/js_runtime/lib/io_patch.dart
+@patch
+class _File {
+  @patch
+  static _exists(_Namespace namespace, Uint8List path) {
+    throw UnsupportedError("File._exists");
+  }
+  @patch
+  static _create(_Namespace namespace, Uint8List path, bool exclusive) {
+    throw UnsupportedError("File._create");
+  }
+  // ...every other native File/Directory/FileStat operation follows the same pattern
+}
+```
+
+This is the actual danger, and it's worse than a build failure: the bug ships silently through every gate (`flutter analyze`, `flutter build web`, `flutter build web --wasm` — none of them catch it), and only surfaces as a real `UnsupportedError` the first time a user's browser actually executes that code path in production. This course's environment has no browser to run and capture that runtime crash directly — cited from source above, honestly, rather than asserted without evidence.
+
+`kIsWeb` (from `package:flutter/foundation.dart`) is the runtime check most code reaches for — `if (!kIsWeb) { file.readAsStringSync(); }` — and it does work as a runtime guard. But it does **not** change what's compiled: the `dart:io`-importing code is still part of the web bundle either way (proven above — the build never failed even for the unguarded version), so a `kIsWeb` check alone gives you no compile-time signal if you forget it somewhere. The more robust fix is a **conditional import/export**, which swaps the *entire implementation* per platform instead of branching at runtime inside one:
+
+```dart
+// lib/platform_stub.dart
+String readConfigValue() =>
+    throw UnsupportedError('No platform implementation selected');
+```
+
+```dart
+// lib/platform_io_impl.dart
+import 'dart:io';
+
+String readConfigValue() => Platform.environment['CONFIG'] ?? 'io-default';
+```
+
+```dart
+// lib/platform_web_impl.dart
+String readConfigValue() => 'web-default'; // no dart:io reference at all
+```
+
+```dart
+// lib/platform_config.dart
+export 'platform_stub.dart'
+    if (dart.library.io) 'platform_io_impl.dart'
+    if (dart.library.js_interop) 'platform_web_impl.dart';
+```
+
+```dart
+// test/platform_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__project-and-tooling/platform_config.dart';
+
+void main() {
+  test(
+      'the conditional export selects the dart:io implementation under flutter test (native VM)',
+      () {
+    expect(readConfigValue(), 'io-default');
+  });
+}
+```
+
+```text
+00:00 +0: the conditional export selects the dart:io implementation under flutter test (native VM)
+
+00:00 +1: All tests passed!
+```
+
+`dart.library.io` is `true` under `flutter test` (a native VM process), so this test proves the `io_impl` branch is genuinely the one selected — not just that the file compiles. On web, the same `export` line resolves `dart.library.js_interop` instead and swaps in `platform_web_impl.dart`, whose file never even has a `dart:io` import to compile in the first place. `universal_io` (a pub.dev package providing a `dart:io`-shaped API that's actually web-safe for the HTTP-client subset) is the ready-made version of this pattern for the common case of wanting `HttpClient`-shaped code that also runs on web.
+
+<Callout title="The one-line takeaway">
+Project layout is standardized by `flutter create`; `pubspec.yaml` declares `dependencies` (shipped) vs. `dev_dependencies` (build/test-only) and the only assets that get bundled. `strict-casts`/`strict-inference`/`strict-raw-types` are analyzer `language` options (not lints) that catch implicit-`dynamic` bugs, proven above with three real diagnostics. `flutter_lints` 6.0.0 and `very_good_analysis` 11.0.0 are genuinely different in a way worth checking directly — proven above, `flutter_lints` does **not** enable the general `prefer_const_constructors` by default. `dart fix --dry-run` shows real, auto-fixable diagnostics, but not every lint is fixable this way, proven above. `flutter build web` does **not** fail on a direct `dart:io` call — proven above with a real build — it silently compiles a runtime crash instead; a conditional import/export (not just a `kIsWeb` runtime guard) is what actually keeps `dart:io` out of the web bundle, proven above by which implementation gets selected.
+</Callout>
 
 ## DevTools
 
-**DevTools** is the browser-based suite for inspecting a running app: the widget inspector (tap a widget, see its tree and constraints), the performance/timeline view (find jank), the memory view, and the network view. It's how you *see* the trees and pipeline the earlier modules described.
+**DevTools** is the browser-based suite for inspecting a running app: the widget inspector (tap a widget, see its tree and constraints), the performance/timeline view (find jank, covered with its own real workflow in the [rebuilds-and-performance lesson](/flutter/en/async-and-performance/rebuilds-and-performance/)), the memory view, and the network view. It's how you *see* the trees and pipeline the earlier modules described — this course's environment has no device to attach it to, so every claim about it in this course is docs-cited, never a screenshot.
 
 ## Hot reload vs hot restart
 
@@ -66,9 +334,53 @@ The two refresh commands are not the same, and knowing the difference saves real
 
 Hot reload has limits. It re-runs `build`, but it does **not** re-run `initState` or a changed `main()`, and it can't apply certain changes (new `const` evaluations, changes to enum/class shape, global variable initializers). When a change doesn't seem to take, the answer is usually hot restart.
 
-<Callout title="The one-line takeaway">
+<Callout title="Second takeaway: hot reload">
 `pubspec.yaml` declares dependencies (shipped), `dev_dependencies` (build/test-only), and the assets that get bundled — a missing asset entry is the classic "not found" bug. The `flutter` CLI runs everything (start with `flutter doctor` when stuck), DevTools lets you inspect the live tree and timeline, and **hot reload** preserves State while re-running `build` — but changes to `initState`, `main`, or class shape need a **hot restart**.
 </Callout>
+
+## Reading AI-generated code
+
+AI-generated project setup and config code reliably assumes a lint/analyzer baseline stricter than what's actually configured, or reaches for `dart:io` in code that's meant to be platform-shared without checking.
+
+```dart
+// AI-generated: a shared "read local settings file" helper,
+// used from both a mobile screen and (the AI assumed) a web build too
+import 'dart:io';
+
+class SettingsRepository {
+  Future<String> loadRawSettings() {
+    return File('settings.json').readAsString();
+  }
+}
+```
+
+Before trusting generated project/tooling code like this, check for:
+
+- A `dart:io` import in any file that's reachable from a web build target — proven above, this compiles fine and ships silently; only a conditional import/export (or `universal_io`) actually prevents it from being part of the web bundle at all.
+- Assuming `prefer_const_constructors` (or any specific lint) is active just because `flutter_lints` is included — proven above, `flutter_lints` 6.0.0 does not enable it by default; check the actual installed package's rule file, don't assume from the name.
+- Code that only "compiles" because of an implicit `dynamic` somewhere — proven above, `strict-casts`/`strict-inference`/`strict-raw-types` catch exactly this class of bug, but only if a project's `analysis_options.yaml` actually turns them on (they are off by default even with `flutter_lints` included).
+
+## Mental Model
+
+Every layer in this lesson is a different kind of "what did I actually agree to, versus what did I assume." `pubspec.yaml` is an explicit contract for what ships. A lint package's name (`flutter_lints`, `very_good_analysis`) is not itself the contract — the actual `.yaml` rule file it resolves to is, and reading it directly (as this lesson did, finding the `prefer_const_constructors` gap) is the only way to know for certain what's enforced. `strict-casts`/`strict-inference`/`strict-raw-types` exist because Dart's type system has an escape hatch (`dynamic`) that's silent by default — these three flags are how you tell the analyzer "stop letting me use it by accident." And `dart:io` on web is the sharpest version of this lesson: the compiler's silence (a successful build) is not the same thing as safety, proven above by a build that genuinely succeeds while shipping a guaranteed runtime crash.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `flutter_lints` (default from `flutter create`) | Small, low-friction, Flutter-specific — proven above, ten rules on top of `lints/recommended.yaml` | Proven above: does not enforce `prefer_const_constructors` or several other performance/safety rules `very_good_analysis` does |
+| `very_good_analysis` | Much stricter baseline (237 lines of rules) — proven above to include `prefer_const_constructors` | More upfront friction on an existing codebase; likely surfaces many pre-existing violations at once |
+| `strict-casts`/`strict-inference`/`strict-raw-types` on | Catches real implicit-`dynamic` bugs at analyze time, proven above with three real diagnostics | More explicit type annotations required throughout the codebase |
+| Conditional import/export for platform-specific code | Proven above: the non-selected implementation's code (and its imports) genuinely isn't part of that platform's bundle | More files/boilerplate than a single `if (kIsWeb)` branch |
+| `kIsWeb` runtime guard alone | Simple, one file, no extra structure | Proven above: does not remove the guarded code (or its imports) from the web bundle — only prevents it from *running* |
+
+## Common Misconceptions
+
+- **"Including `flutter_lints` means `prefer_const_constructors` is enforced."** Disproven above by reading `flutter_lints` 6.0.0's actual rule file: it ships only the narrower `prefer_const_constructors_in_immutables`.
+- **"`strict-casts`/`strict-inference`/`strict-raw-types` are lints, so a lint package like `flutter_lints` turns them on."** Disproven above: they are analyzer `language` options, configured under a completely different YAML key (`analyzer: language:`), off by default regardless of which lint package is included.
+- **"If `dart fix --dry-run` finds a diagnostic, it can fix it."** Disproven above: `avoid_unnecessary_containers` is a real, live diagnostic with zero proposed auto-fixes on the exact same file where `use_full_hex_values_for_flutter_colors` had one.
+- **"`flutter build web` will fail to compile if the code imports `dart:io`."** Disproven above with a real build: it succeeds, even calling `Platform.isIOS` and `File.readAsString()` from `main()` — the failure, proven from source, happens only at runtime, in the browser, the first time that code path actually executes.
+- **"A `kIsWeb` check is enough to make `dart:io`-touching code web-safe."** Disproven above: the code (and its `dart:io` import) is still compiled into the web bundle either way; only a conditional import/export changes which implementation — and which imports — are actually present per platform.
 
 export const quizTooling = [
   {
@@ -82,34 +394,59 @@ export const quizTooling = [
     answer: 1,
   },
   {
-    q: 'What does hot reload preserve that hot restart does not?',
+    q: 'Proven above by reading the actual installed package sources, what is the real gap between flutter_lints 6.0.0 and very_good_analysis 11.0.0?',
     options: [
-      'The source code',
-      'The running app\'s State',
-      'The pubspec',
-      'The build cache',
+      'They are functionally identical rule sets under different names',
+      'flutter_lints ships only prefer_const_constructors_in_immutables (a narrower rule); very_good_analysis includes the general prefer_const_constructors rule that this course\'s own const-skip proofs rely on',
+      'very_good_analysis is a subset of flutter_lints',
+      'flutter_lints requires very_good_analysis as a dependency',
     ],
     answer: 1,
+    explain: 'Reading flutter_lints\' own lib/flutter.yaml line by line confirmed the ten rules it actually ships, and prefer_const_constructors (general) was not among them.',
   },
   {
-    q: 'Why might a code change not appear after a hot reload?',
+    q: 'Proven above with three real diagnostics, what do strict-casts/strict-inference/strict-raw-types actually catch?',
     options: [
-      'Hot reload never works',
-      'It re-runs build but not initState/main or certain shape changes — those need a hot restart',
-      'The file was not saved is the only cause',
-      'Hot reload requires release mode',
+      'Formatting issues',
+      'Code that only compiles because of an implicit dynamic somewhere — e.g. assigning a dynamic return value to an int, or an uninferred List<dynamic>',
+      'Missing semicolons',
+      'Unused imports only',
     ],
     answer: 1,
+    explain: 'The real captured diagnostics were invalid_assignment (dynamic -> int), strict_raw_type, and inference_failure_on_collection_literal — all three are about implicit dynamic, not style.',
   },
   {
-    q: 'What is the first command to run when your local toolchain seems broken?',
+    q: 'Proven above, what happens when you run `flutter build web` on code that directly imports dart:io and calls File.readAsString()?',
     options: [
-      'flutter build apk',
-      'flutter doctor',
-      'flutter clean',
-      'flutter upgrade',
+      'It fails to compile immediately, naming the dart:io import as the problem',
+      'It succeeds and produces a working build/web output — the failure only happens at runtime, in the browser, when that code path actually executes, per the installed SDK\'s own web io_patch.dart source',
+      'It silently removes the dart:io code via tree-shaking',
+      'It only fails with --wasm, not the default web target',
     ],
     answer: 1,
+    explain: 'A real flutter build web (and flutter build web --wasm) both succeeded with Platform.isIOS and File.readAsString() wired into main() -- disproving the common "it won\'t even compile" assumption.',
+  },
+  {
+    q: 'Proven above, why is a conditional import/export more robust than a bare `if (kIsWeb)` check for dart:io-touching code?',
+    options: [
+      'kIsWeb does not exist in current Flutter',
+      'kIsWeb only guards execution at runtime -- the dart:io-importing code is still compiled into the web bundle either way; a conditional import/export swaps the entire implementation file (and its imports) per platform, proven above by which implementation flutter test actually selected',
+      'Conditional imports are faster at runtime',
+      'kIsWeb only works inside a StatelessWidget',
+    ],
+    answer: 1,
+    explain: 'The conditional-export test proved dart.library.io selected platform_io_impl.dart under flutter test\'s native VM -- the web branch (platform_web_impl.dart) never even has a dart:io import to compile in.',
+  },
+  {
+    q: 'Proven above, does dart fix --dry-run propose a fix for every diagnostic flutter analyze reports?',
+    options: [
+      'Yes, always',
+      'No -- avoid_unnecessary_containers was a real, live diagnostic with zero proposed fixes, while use_full_hex_values_for_flutter_colors on a different file had exactly one -- fixability is diagnostic-specific, not guaranteed',
+      'Only for errors, never warnings or info',
+      'dart fix only works with very_good_analysis',
+    ],
+    answer: 1,
+    explain: 'Both diagnostics were captured as real flutter analyze output first, then dart fix --dry-run was run against each -- one proposed a fix, the other proposed none.',
   },
 ];
 

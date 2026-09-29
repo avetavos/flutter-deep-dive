@@ -1,6 +1,6 @@
 ---
 title: 'Project & Tooling'
-description: 'pubspec.yaml และ pub, flutter CLI, DevTools และความต่างระหว่าง hot reload กับ hot restart — toolchain ที่ใช้ทุกวัน'
+description: 'โครงสร้างโปรเจกต์, กายวิภาคของ pubspec.yaml, ความเข้มงวดของ analysis_options.yaml พร้อม diagnostic จริง, flutter_lints เทียบกับ very_good_analysis, dart fix --dry-run, dart:io เทียบกับ web พิสูจน์ด้วยการ build จริง, flutter doctor, FVM, DevTools และ hot reload เทียบกับ hot restart'
 sidebar:
   order: 2
 ---
@@ -9,9 +9,25 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-## pubspec.yaml: manifest ของโปรเจกต์
+## โครงสร้างโปรเจกต์
 
-ทุกโปรเจกต์ Flutter ถูกอธิบายด้วย `pubspec.yaml` — dependency, dependency ที่ใช้เฉพาะตอน dev และ asset ที่ bundle เข้าไปในแอป
+`flutter create` scaffold รูปทรงมาตรฐานที่ทุกโปรเจกต์ Flutter ใช้ร่วมกัน:
+
+```text
+my_app/
+  lib/                  # your Dart source — main.dart is the entry point
+  test/                 # unit/widget tests, mirrors lib/'s structure
+  android/ ios/ web/     # per-platform native project (generated, rarely hand-edited)
+  macos/ windows/ linux/ # desktop targets, same idea
+  pubspec.yaml           # the manifest — dependencies, assets, SDK constraint
+  analysis_options.yaml  # linter/analyzer configuration
+```
+
+`lib/` กับ `test/` คือที่ที่คุณอยู่ทุกวัน; โฟลเดอร์ platform มีอยู่เพื่อให้แต่ละ target มี native project จริงอยู่ข้างใต้ (Gradle สำหรับ Android, Xcode project สำหรับ iOS/macOS และอื่น ๆ) — คุณจะเข้าไปแตะมันแค่ตอนตั้งค่าเฉพาะ platform (permission, native plugin setup, signing)
+
+## pubspec.yaml: manifest
+
+ทุกโปรเจกต์ Flutter ถูกอธิบายด้วย `pubspec.yaml` — dependency, dependency ที่ใช้แค่ตอน dev และ asset ที่ bundle เข้าแอป
 
 ```yaml
 name: my_app
@@ -35,11 +51,11 @@ flutter:
     - assets/config.json    # a single file
 ```
 
-การแยกนี้สำคัญ: `dependencies` ไปกับแอป ส่วน `dev_dependencies` (test framework, linter, code generator) ไม่ไป ส่วน asset ที่ list ไว้ตรงนี้คือตัวเดียวที่ถูก bundle — การลืมใส่ entry คือสาเหตุยอดฮิตของ "asset not found"
+การแบ่งนี้สำคัญ: `dependencies` ถูก ship เข้าไปในแอปของคุณ; `dev_dependencies` (test framework, linter, code generator) ไม่ถูก asset ที่ list ไว้ที่นี่คืออันเดียวที่ถูก bundle — การลืม entry คือสาเหตุปกติของ "asset not found"
 
 ## flutter CLI
 
-คำสั่ง `flutter` คือประตูสู่ทุกอย่าง:
+คำสั่ง `flutter` คือทางเข้าสู่ทุกอย่าง:
 
 ```bash
 flutter create my_app        # scaffold a new project
@@ -51,65 +67,386 @@ flutter doctor               # diagnose your local toolchain
 flutter analyze              # static analysis / lints
 ```
 
-`flutter doctor` คือสิ่งแรกที่ควรรันเมื่ออะไรผิดปกติ — ตรวจ SDK, device toolchain และ IDE plugin แล้วบอกคุณตรง ๆ ว่าขาดอะไร
+`flutter doctor` คือคำสั่งแรกที่ควรรันเมื่อมีอะไรผิดปกติ — output จริงจาก Mac เครื่องนี้เป๊ะ (Flutter 3.47.5):
+
+```text
+Doctor summary (to see all details, run flutter doctor -v):
+[✓] Flutter (Channel stable, 3.47.5, on macOS 26.6.2 25G83 darwin-arm64, locale en-TH)
+[✓] Android toolchain - develop for Android devices (Android SDK version 35.0.0)
+[✓] Xcode - develop for iOS and macOS (Xcode 26.2)
+[✓] Chrome - develop for the web
+[✓] Connected device (2 available)
+[✓] Network resources
+
+• No issues found!
+```
+
+มันเช็ค SDK, device toolchain ของทุก platform และ IDE plugin แล้วบอกตรง ๆ ว่าอะไรขาดหาย — บรรทัด `[✗]` สีแดงจะระบุสิ่งที่ต้องแก้เจาะจง (license ของ Android ที่ยังไม่ accept, component ของ Xcode ที่ขาด, …) แทนที่จะเป็นความล้มเหลวทั่ว ๆ ไป
+
+### FVM: การ pin เวอร์ชัน Flutter SDK ต่อโปรเจกต์
+
+**FVM** (Flutter Version Management, [fvm.app](https://fvm.app)) คือเครื่องมือมาตรฐานของ community สำหรับปัญหาเดียวกับที่คอร์สนี้เองต้องจัดการ: การ pin เวอร์ชัน Flutter SDK ที่เจาะจงต่อโปรเจกต์ (`.fvmrc` / `.fvm/fvm_config.json`) แทนที่จะใช้เวอร์ชันที่บังเอิญอยู่บน `PATH` มันไม่ได้เป็นส่วนหนึ่งของ Flutter SDK เอง — มันเป็น CLI แยกที่จัดการ Flutter SDK ที่ cache ไว้หลายเวอร์ชันและ symlink ตัวที่ถูกต้องเข้าแต่ละโปรเจกต์ — แต่มันคือคำตอบมาตรฐานของ "ทำไม build บนเครื่องฉันถึงต่างจาก CI" เมื่อสาเหตุจริงคือ Flutter สองเวอร์ชันที่ต่างกัน
+
+## `analysis_options.yaml`: ความเข้มงวดที่จับบั๊กจริงได้
+
+`analysis_options.yaml` config analyzer เกินกว่าชุด lint พื้นฐาน สาม flag — `strict-casts`, `strict-inference` และ `strict-raw-types` — **ไม่ใช่**ส่วนหนึ่งของ lint package ไหนเลย มันคือ analyzer `language` option ที่ปิดโดย default ที่จับบั๊กประเภทเจาะจง: โค้ดที่ "ทำงาน" ได้แค่เพราะ `dynamic` แบบ implicit
+
+```yaml
+# analysis_options.yaml
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+```
+
+probe ของคอร์สนี้เองรันด้วย config นี้เป๊ะ — diagnostic ทุกอันด้านล่างเป็นของจริง จับได้จากการรัน `flutter analyze` กับไฟล์ demo เล็ก ๆ ที่เปิดสาม flag นี้
+
+```dart
+// @expect-error strict-casts: real diagnostic captured with strict-casts:
+// true enabled, from a scratch file inside this course's own probe
+dynamic getValue() => 42;
+
+int useStrictCasts() {
+  int value = getValue(); // implicit dynamic -> int cast
+  return value;
+}
+```
+
+```text
+error • A value of type 'dynamic' can't be assigned to a variable of type 'int'. Try changing the type of the variable, or casting the right-hand type to 'int' • invalid_assignment
+```
+
+ถ้าไม่มี `strict-casts` การแคบลงแบบ implicit จาก `dynamic` นี้ถูกอนุญาตแบบเงียบ ๆ — เป็นแหล่งจริงของบั๊กแบบ "มันทำงานในโค้ดพาธนี้แต่ crash ด้วย type error ที่อื่นตอน runtime" ซึ่งตอนนี้ถูกจับตอน analyze แทน
+
+```dart
+// @expect-error strict-raw-types: real diagnostic captured with
+// strict-raw-types: true enabled
+List useStrictRawTypes() {
+  final List list = []; // raw type, no type argument
+  return list;
+}
+```
+
+```text
+warning • The generic type 'List<dynamic>' should have explicit type arguments but doesn't. Use explicit type arguments for 'List' • strict_raw_type
+```
+
+```dart
+// @expect-error strict-inference: real diagnostic captured with
+// strict-inference: true enabled
+List computeList() {
+  final result = []; // inferred as List<dynamic> -- strict-inference flags this
+  return result;
+}
+```
+
+```text
+warning • The type argument(s) of 'List' can't be inferred. Use explicit type argument(s) for 'List' • inference_failure_on_collection_literal
+```
+
+วิธีแก้ทั้งสามอันเหมือนกัน: ระบุให้ชัดเจน
+
+```dart
+// lib/strict_mode_fixed.dart
+
+int getIntValue() => 42; // no dynamic return type to begin with
+
+int useStrictCastsFixed() {
+  final int value = getIntValue(); // no implicit cast needed
+  return value;
+}
+
+List<String> useStrictRawTypesFixed() {
+  final List<String> list = <String>[]; // explicit type argument
+  return list;
+}
+
+List<int> computeListFixed() {
+  final result = <int>[]; // explicit type argument
+  return result;
+}
+```
+
+fence นี้ analyze สะอาดเทียบกับ setting เข้มงวดเดียวกันเป๊ะ — การรัน `flutter analyze` กับมันรายงานศูนย์ issue
+
+## `flutter_lints` เทียบกับ `very_good_analysis` พิสูจน์ด้วยช่องว่างจริง
+
+ทั้งคู่เป็น lint-rule package ที่คุณ `include:` จาก `analysis_options.yaml`; มันไม่เท่ากัน และความต่างก็ไม่ได้อยู่ตรงจุดที่คุณคาดเสมอไป เช็ค rule set จริงที่ติดตั้งอยู่บนเครื่องนี้ของทั้งสอง package (`flutter_lints` resolve เป็น **6.0.0**, `very_good_analysis` resolve เป็น **11.0.0** ผ่าน `flutter pub add --dry-run` เทียบกับ pub.dev ปัจจุบัน):
+
+- **`flutter_lints` 6.0.0** (`include: package:flutter_lints/flutter.yaml`) เพิ่มชุดเล็ก ๆ เฉพาะ Flutter ทับ `package:lints/recommended.yaml`: `avoid_print`, `avoid_unnecessary_containers`, `avoid_web_libraries_in_flutter`, `no_logic_in_create_state`, `prefer_const_constructors_in_immutables`, `sized_box_for_whitespace`, `sort_child_properties_last`, `use_build_context_synchronously`, `use_full_hex_values_for_flutter_colors`, `use_key_in_widget_constructors` — ค่า default ที่เล็กและ friction ต่ำโดยตั้งใจ
+- **`very_good_analysis` 11.0.0** ใหญ่กว่ามาก (237 บรรทัดของ rule) และมี `prefer_const_constructors` แบบทั่วไปด้วย — การอ่าน `lib/flutter.yaml` ของ `flutter_lints` ทีละบรรทัดแสดงว่าตรงกันข้าม: มันมีแค่ `prefer_const_constructors_in_immutables` ที่แคบกว่า (ทำงานเฉพาะการเรียก constructor ข้างใน class ที่ mark ด้วย `@immutable`) ไม่ใช่ rule ทั่วไปที่บทพิสูจน์ const-skip ตลอดทั้ง[บทเรียน rebuilds-and-performance](/flutter/th/async-and-performance/rebuilds-and-performance/)ใช้อยู่
+
+ข้อสรุปเชิงปฏิบัติ: `flutter_lints` เพียงอย่างเดียวจะไม่ flag การขาด `const` บน call site ของ `StatelessWidget` ธรรมดา — ถ้าชัยชนะจุดนี้สำคัญกับทีมของคุณในฐานะ rule ที่บังคับใช้ (ไม่ใช่แค่นิสัย) ให้เพิ่ม `prefer_const_constructors` ตรง ๆ ใต้ `linter: rules:` ของโปรเจกต์เอง หรือใช้ `very_good_analysis` ซึ่งมีมันมาให้ตั้งแต่แรกพร้อม baseline ที่เข้มงวดกว่ามาก
+
+## `dart fix --dry-run`: output จริง
+
+`dart fix` ใช้ auto-fix ที่ analyzer ลงทะเบียนไว้เอง `--dry-run` แสดงสิ่งที่*จะ*เปลี่ยนโดยไม่แตะอะไรเลย:
+
+```dart
+// @expect-error use_full_hex_values_for_flutter_colors: real diagnostic +
+// dart fix --dry-run output captured from a scratch file inside this
+// course's own probe (see the info-level output quoted below)
+import 'package:flutter/material.dart';
+
+const Color brandColor = Color(0xFFFFF); // triggers use_full_hex_values_for_flutter_colors
+```
+
+`flutter analyze` บนไฟล์นี้รายงาน diagnostic จริง:
+
+```text
+info • Instances of 'Color' should be created using an 8-digit hexadecimal integer (such as '0xFFFFFFFF') • use_full_hex_values_for_flutter_colors
+```
+
+การรัน `dart fix --dry-run` กับไฟล์ที่มีบรรทัดนี้เป๊ะ (จับมาจาก probe ของคอร์สนี้เอง):
+
+```text
+Computing fixes in scratch_fix (dry run)...
+
+1 proposed fix in 1 file.
+
+fixable_demo.dart
+  use_full_hex_values_for_flutter_colors - 1 fix
+
+To fix an individual diagnostic, run one of:
+  dart fix --apply --code=use_full_hex_values_for_flutter_colors lib/scratch_fix
+
+To fix all diagnostics, run:
+  dart fix --apply lib/scratch_fix
+```
+
+แต่ไม่ใช่ทุก lint ที่ auto-fix ได้ — พิสูจน์แล้วขณะสร้างตัวอย่างนี้เป๊ะ ๆ: `avoid_unnecessary_containers` (diagnostic จริงที่มีชีวิตจาก `flutter analyze`) รายงาน**ศูนย์**fix ที่เสนอจาก `dart fix --dry-run` บนไฟล์เดียวกัน เพราะการลบ `Container` พร้อมย้าย `child` ของมันให้ถูกต้องคือการแก้เชิงโครงสร้างที่ fix registry ไม่พยายามทำอัตโนมัติ `dart fix` มีประโยชน์จริง แต่ "analyzer flag มัน" กับ "`dart fix` แก้มันได้" เป็นสองข้อเท็จจริงที่พิสูจน์ได้อิสระจากกัน
+
+## `dart:io` เทียบกับ web — พิสูจน์ด้วยการ build จริง (แก้ข้อสมมติฐานที่พบบ่อย)
+
+ข้อสมมติฐานที่พบบ่อยคือ `flutter build web` จะพังทันทีที่คุณ `import 'dart:io'` แล้วแตะ `File` การรันมันจริง ๆ ใน scratch Flutter app ที่มีการเรียก `dart:io` `File` ตรง ๆ ต่อเข้ากับ `main()` (probe ของคอร์สนี้ไม่เคยได้รับ import ที่เข้ากับ web ไม่ได้เลย ตาม shared brief — สิ่งนี้รันใน scratch ไม่ใช่ probe):
+
+```dart
+// scratch/lib/dart_io_direct.dart -- NOT run in the shared probe, per the brief
+import 'dart:io';
+
+String readConfigPath() {
+  final file = File('config.json');
+  return file.path;
+}
+
+bool isIOSPlatform() => Platform.isIOS;
+
+Future<String> readConfigContents() async {
+  final file = File('config.json');
+  return file.readAsString();
+}
+```
+
+```text
+$ flutter build web
+Compiling lib/main.dart for the Web...
+Font asset "MaterialIcons-Regular.otf" was tree-shaken, reducing it from 1645184 to 7800 bytes (99.5% reduction).
+Compiling lib/main.dart for the Web...                             13.6s
+✓ Built build/web
+```
+
+มัน**สำเร็จ**— พร้อมทั้ง `Platform.isIOS` และ `File.readAsString()` ที่ถูก compile เข้าไปและถูกเรียกจาก `main()` ผลลัพธ์เหมือนกันกับ `flutter build web --wasm` เหตุผล พิสูจน์ด้วยการอ่าน source ของ web patch ของ SDK ที่ติดตั้งจริงตัวนี้เอง (`~/flutter/bin/cache/dart-sdk/lib/_internal/js_runtime/lib/io_patch.dart`): class ของ `dart:io` มีอยู่เป็น stub ที่ type-check ได้จริงบน web compiler — native operation ทุกตัวแค่ throw ตอน runtime แทนที่จะ compile ไม่ผ่าน:
+
+```text
+// ~/flutter/bin/cache/dart-sdk/lib/_internal/js_runtime/lib/io_patch.dart
+@patch
+class _File {
+  @patch
+  static _exists(_Namespace namespace, Uint8List path) {
+    throw UnsupportedError("File._exists");
+  }
+  @patch
+  static _create(_Namespace namespace, Uint8List path, bool exclusive) {
+    throw UnsupportedError("File._create");
+  }
+  // ...every other native File/Directory/FileStat operation follows the same pattern
+}
+```
+
+นี่คืออันตรายจริง และมันแย่กว่าการ build พังเสียอีก: บั๊กนี้ ship ผ่านทุก gate แบบเงียบ ๆ (`flutter analyze`, `flutter build web`, `flutter build web --wasm` — ไม่มีอันไหนจับมันได้เลย) และจะโผล่มาเป็น `UnsupportedError` จริงแค่ครั้งแรกที่ browser ของผู้ใช้รันโค้ดพาธนั้นจริง ๆ ใน production environment ของคอร์สนี้ไม่มี browser ให้รันและจับ runtime crash นั้นตรง ๆ — อ้างอิงจาก source ด้านบน อย่างตรงไปตรงมา แทนที่จะยืนยันโดยไม่มีหลักฐาน
+
+`kIsWeb` (จาก `package:flutter/foundation.dart`) คือ runtime check ที่โค้ดส่วนใหญ่หยิบมาใช้ — `if (!kIsWeb) { file.readAsStringSync(); }` — และมันทำงานได้จริงในฐานะ runtime guard แต่มัน**ไม่**เปลี่ยนสิ่งที่ถูก compile: โค้ดที่ import `dart:io` ยังคงเป็นส่วนหนึ่งของ web bundle ไม่ว่าจะแบบไหน (พิสูจน์แล้วด้านบน — การ build ไม่เคยพังแม้แต่เวอร์ชันที่ไม่มี guard) ดังนั้นเช็ค `kIsWeb` เพียงอย่างเดียวไม่ให้สัญญาณตอน compile-time ถ้าคุณลืมมันที่ไหนสักแห่ง วิธีแก้ที่แข็งแรงกว่าคือ **conditional import/export** ซึ่งสลับ*ทั้ง implementation*ต่อ platform แทนที่จะแบ่งแยกด้วย runtime branch ข้างในตัวเดียว:
+
+```dart
+// lib/platform_stub.dart
+String readConfigValue() =>
+    throw UnsupportedError('No platform implementation selected');
+```
+
+```dart
+// lib/platform_io_impl.dart
+import 'dart:io';
+
+String readConfigValue() => Platform.environment['CONFIG'] ?? 'io-default';
+```
+
+```dart
+// lib/platform_web_impl.dart
+String readConfigValue() => 'web-default'; // no dart:io reference at all
+```
+
+```dart
+// lib/platform_config.dart
+export 'platform_stub.dart'
+    if (dart.library.io) 'platform_io_impl.dart'
+    if (dart.library.js_interop) 'platform_web_impl.dart';
+```
+
+```dart
+// test/platform_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__project-and-tooling/platform_config.dart';
+
+void main() {
+  test(
+      'the conditional export selects the dart:io implementation under flutter test (native VM)',
+      () {
+    expect(readConfigValue(), 'io-default');
+  });
+}
+```
+
+```text
+00:00 +0: the conditional export selects the dart:io implementation under flutter test (native VM)
+
+00:00 +1: All tests passed!
+```
+
+`dart.library.io` เป็น `true` ภายใต้ `flutter test` (process VM แบบ native) ดังนั้น test นี้พิสูจน์ว่า branch `io_impl` คือตัวที่ถูกเลือกจริง ๆ ไม่ใช่แค่ไฟล์ compile ผ่าน บน web บรรทัด `export` เดียวกัน resolve `dart.library.js_interop` แทน และสลับเป็น `platform_web_impl.dart` ซึ่งไฟล์ของมันไม่มี import `dart:io` ให้ compile เข้าไปเลยด้วยซ้ำ `universal_io` (package จาก pub.dev ที่ให้ API รูปทรงเหมือน `dart:io` ที่ปลอดภัยกับ web จริง ๆ สำหรับส่วน HTTP-client) คือเวอร์ชันสำเร็จรูปของ pattern นี้สำหรับกรณีทั่วไปที่ต้องการโค้ดรูปทรง `HttpClient` ที่รันบน web ได้ด้วย
+
+<Callout title="สรุปหนึ่งบรรทัด">
+โครงสร้างโปรเจกต์ถูกทำให้เป็นมาตรฐานโดย `flutter create`; `pubspec.yaml` ประกาศ `dependencies` (ที่ ship) เทียบกับ `dev_dependencies` (build/test-only) และ asset เดียวที่ถูก bundle `strict-casts`/`strict-inference`/`strict-raw-types` คือ analyzer `language` option (ไม่ใช่ lint) ที่จับบั๊ก implicit-`dynamic` พิสูจน์แล้วด้านบนด้วย diagnostic จริงสามตัว `flutter_lints` 6.0.0 กับ `very_good_analysis` 11.0.0 ต่างกันจริงในจุดที่ควรเช็คตรง ๆ — พิสูจน์แล้วด้านบนว่า `flutter_lints` **ไม่** เปิด `prefer_const_constructors` แบบทั่วไปโดย default `dart fix --dry-run` แสดง diagnostic ที่ auto-fix ได้จริง แต่ไม่ใช่ทุก lint ที่ fix แบบนี้ได้ พิสูจน์แล้วด้านบน `flutter build web` **ไม่** พังกับการเรียก `dart:io` ตรง ๆ — พิสูจน์แล้วด้านบนด้วยการ build จริง — มัน compile runtime crash เข้าไปแบบเงียบ ๆ แทน; conditional import/export (ไม่ใช่แค่ runtime guard `kIsWeb`) คือสิ่งที่กัน `dart:io` ออกจาก web bundle จริง ๆ พิสูจน์แล้วด้านบนโดยดูว่า implementation ไหนถูกเลือก
+</Callout>
 
 ## DevTools
 
-**DevTools** คือชุดเครื่องมือบน browser สำหรับ inspect แอปที่กำลังรัน: widget inspector (แตะ widget เห็น tree และ constraints ของตัวเอง), performance/timeline view (หา jank), memory view และ network view นี่คือวิธีที่คุณจะ *เห็น* tree และ pipeline ที่โมดูลก่อน ๆ อธิบายไว้
+**DevTools** คือชุดเครื่องมือบน browser สำหรับตรวจสอบแอปที่กำลังรัน: widget inspector (แตะ widget ดู tree กับ constraint ของมัน), มุมมอง performance/timeline (หาจังหวะสะดุด ครอบคลุมพร้อม workflow จริงของมันเองใน[บทเรียน rebuilds-and-performance](/flutter/th/async-and-performance/rebuilds-and-performance/)), มุมมอง memory และมุมมอง network มันคือวิธีที่คุณ*เห็น*ต้นไม้และ pipeline ที่โมดูลก่อน ๆ อธิบายไว้ — environment ของคอร์สนี้ไม่มีอุปกรณ์ให้ต่อมัน ดังนั้นทุก claim เกี่ยวกับมันในคอร์สนี้อ้างอิงจาก docs ไม่เคยเป็น screenshot
 
-## Hot reload vs hot restart
+## Hot reload เทียบกับ hot restart
 
-คำสั่ง refresh สองตัวนี้ไม่เหมือนกัน และรู้ความต่างช่วยประหยัดความสับสนได้จริง:
+คำสั่ง refresh สองตัวนี้ไม่เหมือนกัน และการรู้ความต่างช่วยลดความสับสนจริง:
 
-- **Hot reload** (`r`) inject source ที่เปลี่ยนเข้าไปในแอปที่ *กำลังรัน* แล้ว rebuild widget tree — **State ถูกเก็บไว้** เร็วระดับต่ำกว่าวินาที และเป็นเหตุผลที่ทำให้การ dev Flutter รู้สึกเร็ว
-- **Hot restart** (`R`) ทิ้ง state ของแอปแล้วเริ่มใหม่จาก `main()` — ช้ากว่า แต่เริ่มจากศูนย์สะอาด ๆ
+- **Hot reload** (`r`) ฉีด source ที่เปลี่ยนเข้าไปในแอปที่*กำลังรันอยู่*แล้ว rebuild widget tree — **State ถูกรักษาไว้** มันเร็วกว่าหนึ่งวินาทีและเป็นเหตุผลที่การพัฒนา Flutter รู้สึกเร็ว
+- **Hot restart** (`R`) ทิ้ง state ของแอปแล้ว restart จาก `main()` — ช้ากว่า แต่ได้กระดานเปล่าสะอาด
 
-hot reload มีข้อจำกัด: re-run `build` ให้ แต่ **ไม่** re-run `initState` หรือ `main()` ที่เปลี่ยน และ apply บางการเปลี่ยนแปลงไม่ได้ (การ eval `const` ใหม่, การเปลี่ยน shape ของ enum/class, global variable initializer) เมื่อการเปลี่ยนแปลงดูเหมือนไม่ติด คำตอบมักคือ hot restart
+Hot reload มีข้อจำกัด มันรัน `build` ซ้ำ แต่**ไม่**รัน `initState` หรือ `main()` ที่เปลี่ยนซ้ำ และแก้บางอย่างไม่ได้ (การประเมิน `const` ใหม่ การเปลี่ยนรูปทรงของ enum/class, ตัวเริ่มต้นของ global variable) เมื่อการเปลี่ยนแปลงดูเหมือนไม่มีผล คำตอบมักจะเป็น hot restart
 
-<Callout title="สรุปหนึ่งบรรทัด">
-`pubspec.yaml` ประกาศ dependency (ที่ ship), `dev_dependencies` (ใช้ตอน build/test เท่านั้น) และ asset ที่ถูก bundle — การลืม entry asset คือ bug "not found" คลาสสิก flutter CLI รันทุกอย่าง (เริ่มด้วย `flutter doctor` เมื่อติดขัด), DevTools ให้ inspect tree และ timeline ที่กำลังรัน และ **hot reload** เก็บ State ไว้พร้อม re-run `build` — แต่การเปลี่ยน `initState`, `main` หรือ shape ของ class ต้อง **hot restart**
+<Callout title="สรุปที่สอง: hot reload">
+`pubspec.yaml` ประกาศ dependency (ที่ ship), `dev_dependencies` (build/test-only) และ asset ที่ถูก bundle — การลืม asset entry คือบั๊ก "not found" คลาสสิก `flutter` CLI รันทุกอย่าง (เริ่มด้วย `flutter doctor` เมื่อติดขัด) DevTools ให้คุณตรวจสอบ tree กับ timeline ที่กำลังรันอยู่จริง และ **hot reload** รักษา State ไว้ในขณะที่รัน `build` ซ้ำ — แต่การเปลี่ยน `initState`, `main` หรือรูปทรงของ class ต้องใช้ **hot restart**
 </Callout>
+
+## Reading AI-generated code
+
+โค้ด project setup/config ที่ AI generate มักสมมติ baseline ของ lint/analyzer ที่เข้มงวดกว่าที่ config ไว้จริง หรือหยิบ `dart:io` มาใช้ในโค้ดที่ตั้งใจให้แชร์ข้าม platform โดยไม่เช็คก่อน
+
+```dart
+// AI-generated: a shared "read local settings file" helper,
+// used from both a mobile screen and (the AI assumed) a web build too
+import 'dart:io';
+
+class SettingsRepository {
+  Future<String> loadRawSettings() {
+    return File('settings.json').readAsString();
+  }
+}
+```
+
+ก่อนจะเชื่อโค้ด project/tooling ที่ generate มาแบบนี้ ให้เช็ค:
+
+- import `dart:io` ในไฟล์ใดก็ตามที่ web build target เข้าถึงได้ — พิสูจน์แล้วด้านบนว่ามัน compile ผ่านและ ship แบบเงียบ ๆ มีแค่ conditional import/export (หรือ `universal_io`) เท่านั้นที่กันมันออกจาก web bundle จริง ๆ
+- สมมติว่า `prefer_const_constructors` (หรือ lint เจาะจงไหนก็ตาม) active อยู่แค่เพราะมี `flutter_lints` — พิสูจน์แล้วด้านบนว่า `flutter_lints` 6.0.0 ไม่เปิดมันโดย default; เช็ค rule file ของ package ที่ติดตั้งจริง อย่าสมมติจากชื่อ
+- โค้ดที่ "compile ผ่าน" ได้แค่เพราะ `dynamic` แบบ implicit ที่ไหนสักแห่ง — พิสูจน์แล้วด้านบนว่า `strict-casts`/`strict-inference`/`strict-raw-types` จับบั๊กประเภทนี้เป๊ะ แต่แค่ถ้า `analysis_options.yaml` ของโปรเจกต์เปิดมันจริง ๆ (มันปิดโดย default แม้จะมี `flutter_lints` รวมอยู่ก็ตาม)
+
+## Mental Model
+
+ทุกชั้นในบทนี้คือแบบต่างกันของ "อะไรที่ฉันตกลงไว้จริง เทียบกับอะไรที่ฉันสมมติเอาเอง" `pubspec.yaml` คือสัญญาที่ชัดเจนสำหรับสิ่งที่ ship ชื่อของ lint package (`flutter_lints`, `very_good_analysis`) ไม่ใช่สัญญาเอง — ไฟล์ `.yaml` rule จริงที่มัน resolve ไปคือสัญญา และการอ่านมันตรง ๆ (แบบที่บทนี้ทำ จนเจอช่องว่างของ `prefer_const_constructors`) คือวิธีเดียวที่จะรู้แน่ชัดว่าอะไรถูกบังคับใช้ `strict-casts`/`strict-inference`/`strict-raw-types` มีอยู่เพราะ type system ของ Dart มีทางหนี (`dynamic`) ที่เงียบโดย default — สาม flag นี้คือวิธีที่คุณบอก analyzer ว่า "หยุดให้ฉันใช้มันโดยไม่ตั้งใจ" และ `dart:io` บน web คือเวอร์ชันที่คมที่สุดของบทเรียนนี้: ความเงียบของ compiler (build ที่สำเร็จ) ไม่ใช่สิ่งเดียวกับความปลอดภัย พิสูจน์แล้วด้านบนด้วย build ที่สำเร็จจริง ๆ ในขณะที่ ship runtime crash ที่รับประกันได้
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `flutter_lints` (default จาก `flutter create`) | เล็ก friction ต่ำ เฉพาะ Flutter — พิสูจน์แล้วด้านบน สิบ rule ทับ `lints/recommended.yaml` | พิสูจน์แล้วด้านบน: ไม่บังคับ `prefer_const_constructors` หรือ rule ด้าน performance/safety อีกหลายตัวที่ `very_good_analysis` มี |
+| `very_good_analysis` | baseline เข้มงวดกว่ามาก (237 บรรทัดของ rule) — พิสูจน์แล้วด้านบนว่ามี `prefer_const_constructors` | friction ล่วงหน้ามากกว่าบน codebase ที่มีอยู่แล้ว; น่าจะเผยการละเมิดที่มีอยู่เดิมจำนวนมากพร้อมกัน |
+| `strict-casts`/`strict-inference`/`strict-raw-types` เปิด | จับบั๊ก implicit-`dynamic` จริงตอน analyze พิสูจน์แล้วด้านบนด้วย diagnostic จริงสามตัว | ต้องมี type annotation ที่ชัดเจนมากขึ้นทั่ว codebase |
+| Conditional import/export สำหรับโค้ดเฉพาะ platform | พิสูจน์แล้วด้านบน: โค้ดของ implementation ที่ไม่ถูกเลือก (และ import ของมัน) ไม่เป็นส่วนหนึ่งของ bundle platform นั้นจริง ๆ | ไฟล์/boilerplate มากกว่า branch `if (kIsWeb)` เดียว |
+| runtime guard `kIsWeb` เพียงอย่างเดียว | ง่าย ไฟล์เดียว ไม่ต้องมีโครงสร้างเพิ่ม | พิสูจน์แล้วด้านบน: ไม่เอาโค้ดที่ guard ไว้ (หรือ import ของมัน) ออกจาก web bundle — แค่ป้องกันไม่ให้มัน*รัน*เท่านั้น |
+
+## Common Misconceptions
+
+- **"การมี `flutter_lints` หมายความว่า `prefer_const_constructors` ถูกบังคับใช้"** พิสูจน์แล้วด้านบนว่าไม่จริง จากการอ่าน rule file จริงของ `flutter_lints` 6.0.0: มันมีแค่ `prefer_const_constructors_in_immutables` ที่แคบกว่า
+- **"`strict-casts`/`strict-inference`/`strict-raw-types` คือ lint ดังนั้น lint package อย่าง `flutter_lints` เปิดมันให้"** พิสูจน์แล้วด้านบนว่าไม่จริง: มันคือ analyzer `language` option config ไว้ใต้ YAML key ที่ต่างไปโดยสิ้นเชิง (`analyzer: language:`) ปิดโดย default ไม่ว่าจะรวม lint package ไหนก็ตาม
+- **"ถ้า `dart fix --dry-run` เจอ diagnostic มันแก้ได้เสมอ"** พิสูจน์แล้วด้านบนว่าไม่จริง: `avoid_unnecessary_containers` เป็น diagnostic จริงที่มีชีวิตแต่มีศูนย์ auto-fix ที่เสนอ บนไฟล์เดียวกันที่ `use_full_hex_values_for_flutter_colors` มีอันนึง
+- **"`flutter build web` จะ compile ไม่ผ่านถ้าโค้ด import `dart:io`"** พิสูจน์แล้วด้านบนว่าไม่จริงด้วยการ build จริง: มันสำเร็จ แม้เรียก `Platform.isIOS` และ `File.readAsString()` จาก `main()` — ความล้มเหลว พิสูจน์แล้วจาก source เกิดแค่ตอน runtime ใน browser ครั้งแรกที่โค้ดพาธนั้นรันจริง
+- **"เช็ค `kIsWeb` ก็พอทำให้โค้ดที่แตะ `dart:io` ปลอดภัยกับ web"** พิสูจน์แล้วด้านบนว่าไม่จริง: โค้ด (และ import `dart:io` ของมัน) ยังคง compile เข้าไปใน web bundle ไม่ว่าจะแบบไหน มีแค่ conditional import/export เท่านั้นที่เปลี่ยน implementation — และ import — ที่มีอยู่จริงต่อ platform
 
 export const quizTooling = [
   {
     q: 'ความต่างระหว่าง `dependencies` กับ `dev_dependencies` ใน pubspec.yaml คืออะไร?',
     options: [
       'เหมือนกัน',
-      'dependencies ไปกับแอป ส่วน dev_dependencies (test, linter) ใช้เฉพาะตอน develop',
-      'dev_dependencies ไปกับแอป dependencies ไม่ไป',
-      'dependencies ใช้เฉพาะ web',
+      'dependencies ถูก ship เข้าไปในแอป; dev_dependencies (test, linter) ใช้แค่ตอน development เท่านั้น',
+      'dev_dependencies ถูก ship dependencies ไม่ถูก',
+      'dependencies ใช้กับ web เท่านั้น',
     ],
     answer: 1,
   },
   {
-    q: 'hot reload เก็บอะไรไว้ที่ hot restart ไม่เก็บ?',
+    q: 'พิสูจน์แล้วด้านบนจากการอ่าน source ของ package ที่ติดตั้งจริง ช่องว่างจริงระหว่าง flutter_lints 6.0.0 กับ very_good_analysis 11.0.0 คืออะไร?',
     options: [
-      'source code',
-      'State ของแอปที่กำลังรัน',
-      'pubspec',
-      'build cache',
+      'เป็น rule set เดียวกันเป๊ะแค่ชื่อต่างกัน',
+      'flutter_lints มีแค่ prefer_const_constructors_in_immutables (rule ที่แคบกว่า); very_good_analysis มี rule prefer_const_constructors แบบทั่วไปที่บทพิสูจน์ const-skip ของคอร์สนี้เองพึ่งพาอยู่',
+      'very_good_analysis เป็น subset ของ flutter_lints',
+      'flutter_lints ต้องการ very_good_analysis เป็น dependency',
     ],
     answer: 1,
+    explain: 'การอ่าน lib/flutter.yaml ของ flutter_lints เองทีละบรรทัดยืนยันสิบ rule ที่มันมีจริง และ prefer_const_constructors (แบบทั่วไป) ไม่ได้อยู่ในนั้น',
   },
   {
-    q: 'ทำไมการเปลี่ยน code อาจไม่ปรากฏหลัง hot reload?',
+    q: 'พิสูจน์แล้วด้านบนด้วย diagnostic จริงสามตัว strict-casts/strict-inference/strict-raw-types จับอะไรจริง ๆ?',
     options: [
-      'hot reload ใช้ไม่ได้เลย',
-      're-run build แต่ไม่ re-run initState/main หรือการเปลี่ยน shape บางอย่าง — พวกนั้นต้อง hot restart',
-      'สาเหตุเดียวคือลืม save ไฟล์',
-      'hot reload ต้องใช้ release mode',
+      'ปัญหาเรื่อง formatting',
+      'โค้ดที่ compile ผ่านได้แค่เพราะ dynamic แบบ implicit ที่ไหนสักแห่ง — เช่น assign ค่า dynamic ที่คืนมาให้ตัวแปร int หรือ List<dynamic> ที่ไม่ได้ inference',
+      'semicolon ที่หายไป',
+      'import ที่ไม่ได้ใช้เท่านั้น',
     ],
     answer: 1,
+    explain: 'diagnostic จริงที่จับได้คือ invalid_assignment (dynamic -> int), strict_raw_type และ inference_failure_on_collection_literal — ทั้งสามเกี่ยวกับ dynamic แบบ implicit ไม่ใช่เรื่อง style',
   },
   {
-    q: 'คำสั่งแรกที่ควรรันเมื่อ local toolchain ดูเหมือนพัง?',
+    q: 'พิสูจน์แล้วด้านบน เกิดอะไรขึ้นเมื่อรัน `flutter build web` บนโค้ดที่ import dart:io ตรง ๆ และเรียก File.readAsString()?',
     options: [
-      'flutter build apk',
-      'flutter doctor',
-      'flutter clean',
-      'flutter upgrade',
+      'มัน compile ไม่ผ่านทันที ระบุว่า import dart:io เป็นปัญหา',
+      'มันสำเร็จและสร้าง output build/web ที่ใช้งานได้ — ความล้มเหลวเกิดแค่ตอน runtime ใน browser ตอนที่โค้ดพาธนั้นรันจริง ตาม source io_patch.dart ของ web ใน SDK ที่ติดตั้งจริง',
+      'มันเอาโค้ด dart:io ออกแบบเงียบ ๆ ผ่าน tree-shaking',
+      'มันพังแค่กับ --wasm ไม่ใช่ web target ปกติ',
     ],
     answer: 1,
+    explain: 'flutter build web จริง (และ flutter build web --wasm) ทั้งคู่สำเร็จพร้อม Platform.isIOS และ File.readAsString() ต่อเข้ากับ main() — แก้ข้อสมมติฐานทั่วไปที่ว่า "มัน compile ไม่ผ่านด้วยซ้ำ"',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบน ทำไม conditional import/export ถึงแข็งแรงกว่าเช็ค `if (kIsWeb)` เปล่า ๆ สำหรับโค้ดที่แตะ dart:io?',
+    options: [
+      'kIsWeb ไม่มีอยู่ใน Flutter ปัจจุบัน',
+      'kIsWeb guard แค่การรันตอน runtime เท่านั้น — โค้ดที่ import dart:io ยังคง compile เข้าไปใน web bundle ไม่ว่าจะแบบไหน; conditional import/export สลับไฟล์ implementation ทั้งไฟล์ (และ import ของมัน) ต่อ platform พิสูจน์แล้วด้านบนโดยดูว่า flutter test เลือก implementation ไหนจริง ๆ',
+      'conditional import เร็วกว่าตอน runtime',
+      'kIsWeb ใช้ได้แค่ข้างใน StatelessWidget เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'test ของ conditional-export พิสูจน์ว่า dart.library.io เลือก platform_io_impl.dart ภายใต้ VM แบบ native ของ flutter test — branch ของ web (platform_web_impl.dart) ไม่มี import dart:io ให้ compile เข้าไปด้วยซ้ำ',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบน dart fix --dry-run เสนอ fix สำหรับทุก diagnostic ที่ flutter analyze รายงานหรือไม่?',
+    options: [
+      'ใช่ เสมอ',
+      'ไม่ — avoid_unnecessary_containers เป็น diagnostic จริงที่มีชีวิตแต่มีศูนย์ fix ที่เสนอ ในขณะที่ use_full_hex_values_for_flutter_colors บนไฟล์อื่นมีอันนึงพอดี — ความสามารถในการ fix ขึ้นอยู่กับ diagnostic แต่ละตัว ไม่ใช่รับประกันเสมอไป',
+      'เฉพาะ error เท่านั้น ไม่ใช่ warning หรือ info',
+      'dart fix ทำงานได้แค่กับ very_good_analysis เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'diagnostic ทั้งสองถูกจับเป็น output flutter analyze จริงก่อน แล้ว dart fix --dry-run ถูกรันกับแต่ละอัน — อันหนึ่งเสนอ fix อีกอันไม่เสนอเลย',
   },
 ];
 
