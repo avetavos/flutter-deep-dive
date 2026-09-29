@@ -1,0 +1,130 @@
+---
+title: Review checklist
+description: 'checklist หน้าเดียวแปดกลุ่มสำหรับรีวิวโค้ด Flutter — แต่ละบรรทัดเป็นคำถามใช่/ไม่ใช่ที่ลิงก์ไปยัง catalog entry และเครื่องมือที่พิสูจน์มัน'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+นี่คือ checklist ที่ต้องไล่ตรวจ — ด้วยตา บน diff ไหนก็ได้ ของคุณเองหรือของ AI — หลังจากเครื่องมือใน **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** รันเสร็จและผ่านสะอาดแล้ว มันตั้งใจให้อยู่ในกระดาษหน้าเดียวพอดี: checklist ที่ไม่มีใครเปิดดูจริงระหว่างรีวิวก็ไร้ค่า ทุกบรรทัดลิงก์ไปยัง catalog entry ที่อธิบาย *ทำไม* เพื่อให้หน้านี้ยังเป็นแค่รายการ ไม่ใช่การรันคอร์สซ้ำ กลุ่มต่าง ๆ เรียงตามลำดับเดียวกับ **[How to read Flutter code you did not write](/flutter/th/reading-flutter/)** บวกกลุ่ม Tooling สุดท้ายที่ครอบคลุมว่าอีกแปดกลุ่มถูกตรวจสอบจริงได้อย่างไร
+
+<Mermaid title="อะไรจับแต่ละกลุ่มได้จริง ถ้ามี" code={checklistCoverageDiagram} />
+
+export const checklistCoverageDiagram = `flowchart LR
+  A["State &amp; lifecycle"] --> R["Needs a real dispose/rebuild sequence<br/>to surface at all"]
+  W["Widget tree &amp; keys"] --> T["Mostly human review<br/>(renders correctly either way)"]
+  L["Layout"] --> T2["Framework catches it loudly --<br/>but only the exact arrangement that overflows"]
+  As["Async &amp; isolates"] --> R
+  N["Navigation"] --> T
+  P["Platform"] --> D["Needs the actual platform/runtime --<br/>compiles and analyzes clean otherwise"]
+  Pf["Performance"] --> M["Silent cost, not a crash --<br/>needs reading RenderObject properties directly"]
+  Tl["Tooling &amp; release"] --> M2["Analyzer/lint catches SOME --<br/>only if the rule is actually enabled"]
+`;
+
+## pubspec & ข้อจำกัดของ SDK
+
+- `environment: sdk:` ใน `pubspec.yaml` รองรับ Dart/Flutter เวอร์ชันที่โปรเจกต์นี้เล็งเป้าไว้จริงหรือเปล่า ไม่ใช่ก็อปมาจาก tutorial เก่า?
+- โค้ด Riverpod ไหนเรียก `StateProvider`/`StateNotifierProvider`/`ChangeNotifierProvider` ผ่าน import หลัก `flutter_riverpod.dart` แทนที่จะเป็น import `legacy.dart` ที่จำเป็นใน Riverpod 3 หรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 5 พิสูจน์ด้วย diagnostic จริง `undefined_function`
+- ถ้า `custom_lint`/`riverpod_lint` ถูก pin ไว้ทั้งคู่ พวกมัน resolve คู่กันได้จริงที่เวอร์ชันเหล่านั้นหรือเปล่า? ดู **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** สำหรับข้อค้นพบ version-conflict จริงและเป็นปัจจุบัน
+
+## State & lifecycle
+
+- มี `ProviderScope` อยู่เหนือ `ConsumerWidget`/`ref.watch` ตัวแรกหรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 1 พิสูจน์ด้วย `Bad state: No ProviderScope found` จริง
+- ทุก `setState` ที่เข้าถึงได้จาก `.then()`, การทำงานต่อหลัง `await`, `Timer`, หรือ `Stream` listener เช็ค `mounted` ก่อนหรือเปล่า? ดู entry 2 พิสูจน์ด้วย `setState() called after dispose()` จริง
+- `build()` ของ widget ไหนเรียก `setState` บน widget *อื่น* ที่ยังกลาง build แบบ synchronous หรือเปล่า? ดู entry 3 พิสูจน์ด้วย `setState() or markNeedsBuild() called during build` จริง
+- field แบบ `late` เคยถูกอ่านบน path ที่ method ซึ่งกำหนดค่าให้มันอาจยังไม่ทำงานหรือเปล่า? ดู entry 4 พิสูจน์ด้วย `LateInitializationError` จริง
+
+## Widget tree & keys
+
+- list ของ stateful widget ที่สร้างด้วย `for`/`.map()` มี `key` หรือเปล่า ในเมื่อลำดับของมันเปลี่ยนได้? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 6 พิสูจน์ด้วย test การเรียงใหม่จริง
+- `GlobalKey` ตัวเดียวกันถูกใช้ซ้ำข้าม sibling widget แทนที่จะใช้ `UniqueKey()`/`ValueKey` ต่อรายการหรือเปล่า? ดู entry 7 พิสูจน์ด้วย `Duplicate keys found` จริง
+- `Scaffold.of(context)` เคยถูกเรียกด้วย `context` ตัวเดียวกันเป๊ะกับที่ `Scaffold` ที่ล้อมรอบถูก build ด้วย แทนที่จะเป็น context จาก descendant ของ `Builder` หรือเปล่า? ดู entry 8 พิสูจน์ด้วย `Scaffold.of() called with a context that does not contain a Scaffold` จริง
+
+## Layout
+
+- `ListView`/`GridView`/scrollable อื่นถูกวางตรง ๆ ใน `Column`/`Row` โดยไม่มีอะไรจำกัดขนาดแกนหลักของมันหรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 9 พิสูจน์ด้วย `Vertical viewport was given unbounded height` จริง — และยืนยันว่ากรณีย้อนกลับ (`Column` ข้างใน `ListView`) ไม่ถูก "แก้" โดยไม่จำเป็น
+- `Expanded`/`Flexible` เคยถูกใช้เป็นลูกของสิ่งที่ไม่ใช่ `Row`/`Column`/`Flex` หรือเปล่า? ดู entry 10 พิสูจน์ด้วย `Incorrect use of ParentDataWidget` จริง
+- `Row`/`Column` ของ children ขนาดคงที่ไม่มี `Expanded`/`Flexible`/scrolling เป็นทางออกสำหรับเนื้อหาที่อาจเกิน viewport หรือเปล่า? ดู entry 11 พิสูจน์ด้วย `RenderFlex overflowed` จริง
+
+## Async & isolate
+
+- async function ถูกเรียกตรง ๆ ข้างใน `build()` แทนที่จะเรียกครั้งเดียวใน `State` (`initState`/field แบบ `late final`) หรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 12 พิสูจน์ด้วยการนับจำนวนการ rebuild-refetch จริง
+- closure ของ `compute()` capture `BuildContext`, `Zone`, หรืออะไรก็ตามที่เข้าถึงได้จาก binding ของ isolate นี้เองหรือเปล่า? ดู entry 13 พิสูจน์ด้วย `Illegal argument in isolate message: object is unsendable` จริง
+- `StreamController` ถูกปล่อยไว้ที่ default แบบ single-subscription ในขณะที่มีการเรียก `.listen()` อิสระมากกว่าหนึ่งครั้งบนมันหรือเปล่า? ดู entry 14 พิสูจน์ด้วย `Bad state: Stream has already been listened to` จริง
+
+## Navigation
+
+- route ของ `go_router` ที่มีพารามิเตอร์ (`/pets/:id`) ถูกประกาศ *ก่อน* route แบบ static ที่เฉพาะเจาะจงกว่าในระดับ segment เดียวกัน (`/pets/new`) หรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 15 พิสูจน์ด้วย test misroute จริง
+- `context.go()`/`router.go()` ถูกใช้ในจุดที่ user ต้องกดย้อนกลับได้ (navigation แบบดำดิ่งลึก) แทนที่จะเป็น `push()` หรือเปล่า? ดู entry 16 พิสูจน์ด้วยการเปรียบเทียบความลึกของ route stack จริง
+- callback `redirect` อ่าน state ภายนอก (auth flag) โดยไม่ได้ชี้ `refreshListenable` ไปที่สิ่งที่แจ้งเตือนเมื่อ state นั้นเปลี่ยนหรือเปล่า? ดู entry 17 พิสูจน์ด้วย test ที่ค้างหน้า login จริง
+- โค้ดไหนยังใช้ `WillPopScope` (deprecated ไม่รองรับ predictive-back) หรืออ้างถึง `PredictiveBackPageTransitionBuilder` (ขาดตัว "s") หรือเปล่า? ดู entry 18 พิสูจน์ด้วย deprecation `info` จริงและ `undefined_function` error จริง
+
+## Platform
+
+- `dart:io`/`Platform.isIOS`/`File` ถูกใช้แบบไม่มีเงื่อนไขในโค้ดที่ต้อง build สำหรับ web ด้วยหรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 19 พิสูจน์ด้วย `flutter build web --release` จริงที่สะอาดและซ่อนบั๊กไว้จนกว่าจะถึง runtime จริง
+- การเรียก `MethodChannel.invokeMethod` สมมติว่ามี native handler ลงทะเบียนไว้ทุก platform ที่แอป ship ไปหรือเปล่า (และทุก test ที่ใช้มัน mock channel หรือเปล่า)? ดู entry 20 พิสูจน์ด้วย `MissingPluginException` จริง
+- `FlutterError.onError` ถูกมองว่าครอบคลุม error ทั้งหมด โดยไม่มี `runZonedGuarded`/`PlatformDispatcher.onError` สำหรับ error ที่ throw นอก build/layout/paint ของ framework เองหรือเปล่า? ดู entry 21 พิสูจน์ด้วย error จาก `Future` ธรรมดาจริงที่มีแค่ `runZonedGuarded` เท่านั้นที่จับได้
+
+## Performance
+
+- `AnimationController` ทุกตัวที่สร้างด้วย `SingleTickerProviderStateMixin`/`TickerProviderStateMixin` ถูก `.dispose()` ใน `dispose()` ของ `State` เองหรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 22 พิสูจน์ด้วย `was disposed with an active Ticker` จริง
+- `Opacity(opacity: 1.0)` ถูกใช้ในจุดที่ค่าไม่เคยเปลี่ยนแปลงจริง ๆ แทนที่จะคืนค่า child ตรง ๆ หรือเปล่า? ดู entry 23 พิสูจน์ด้วยการอ่าน property `isRepaintBoundary`/`alwaysNeedsCompositing` ของ `RenderOpacity` ที่มีชีวิตจริง
+- โค้ดไหนยังส่งตัวเลขเปล่า ๆ ให้ `cacheExtent` แทนที่จะเป็น `scrollCacheExtent: ScrollCacheExtent.pixels(...)` หรือเปล่า? ดู entry 24 พิสูจน์ด้วย deprecation `info` จริงและคำแนะนำจริงจาก `dart fix --dry-run`
+
+## Tooling & release
+
+- `const` ถูกสมมติว่าถูกบังคับใช้โดย "linter" ทั้งที่ `flutter_lints` 6.0.0 ที่คอร์สนี้ pin ไว้มีแค่ `prefer_const_constructors_in_immutables` ไม่มี rule ทั่วไปหรือเปล่า? ดู **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** entry 25 พิสูจน์ด้วยการเทียบ `flutter analyze` ก่อน/หลังจริง
+- การเรียก `print()` ไหนถูกสมมติว่าถูกตัดออกจาก release build หรือเปล่า? ดู entry 26 พิสูจน์ด้วย string จริงที่พบคำต่อคำข้างใน `main.dart.js` ของ release
+- `switch` บน `sealed class` ข้าม subtype ไปโดยพึ่งความเคยชินแทนที่จะพึ่ง exhaustiveness check ของ analyzer เองหรือเปล่า? ดู entry 27 พิสูจน์ด้วย `non_exhaustive_switch_expression` error จริง
+- named parameter หรือชื่อ method ไหนดูสมเหตุสมผลแต่ไม่มีอยู่จริงบน class ที่กำลังพูดถึงหรือเปล่า? ดู entry 28 พิสูจน์ด้วย `undefined_named_parameter`/`undefined_method` error จริง — การเช็คที่ถูกที่สุดและใช้เครื่องจักรจับได้ง่ายที่สุดในทั้งหน้านี้
+- CI รันทั้ง `flutter analyze` AND `flutter test` (ไม่ใช่แค่ตัวใดตัวหนึ่ง) โดยรู้ว่า analyze พิสูจน์แค่ type/syntax ไม่เคยพิสูจน์พฤติกรรมตอน runtime เลยหรือเปล่า? ดู **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)**
+- `flutter build web --wasm` เคยถูกใช้เป็น portability gate หรือเปล่า หรือมีแค่ default build แบบ JS? ดู **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)** พิสูจน์ด้วย `--wasm` build จริงที่สะอาด
+- harness ของคอร์สนี้เอง (`npm run verify`, `--test <module>/<lesson>`) รันกับทุก fence จริงหรือเปล่า ไม่ใช่แค่ human skim? ดู **[Verification Tools](/flutter/th/reading-flutter/verification-tools/)**
+
+<Callout title="Checklist ช่วยแคบขอบเขตการค้นหา ไม่ได้แทนที่มัน">
+ทุกบรรทัดด้านบนโยงกับหนึ่งใน 28 pattern ของ **[AI Bug Catalog](/flutter/th/reading-flutter/ai-bug-catalog/)** — ส่วนใหญ่ analyze หรือ render ผ่านสะอาดสมบูรณ์ในรอบแรก รันรายการนี้กับทุก diff ไม่ว่า `flutter analyze` หรือการรันด้วยมือเร็ว ๆ จะกลับมาสะอาดแค่ไหนก็ตาม
+</Callout>
+
+export const quizReviewChecklist = [
+  {
+    q: "ทำไม checklist item ของกลุ่ม 'Layout' สำหรับ entry 9 ถึงขอให้ reviewer ยืนยันโดยเฉพาะว่ากรณีย้อนกลับ (Column ข้างใน ListView) ไม่ถูก 'แก้' โดยไม่จำเป็น?",
+    options: [
+      "เพราะ Column ข้างใน ListView พังเสมอเช่นกัน",
+      "เพราะ pattern การแก้สำหรับบั๊กจริง (ห่อ ListView ด้วย Expanded ตอนมันอยู่ใน Column) ถูก apply เกินไปยังการจัดวางตรงข้ามที่ปกติดีอยู่แล้วได้ง่าย -- ListView ให้ children ของมัน cross-axis ที่มีขอบเขตและ main-axis ที่ไม่มีขอบเขตอยู่แล้ว ตรงกับที่ Column ต้องการพอดี ดังนั้นการเพิ่ม Expanded ตรงนั้นเป็นความรกที่ไม่จำเป็น ไม่ใช่การแก้ไข",
+      "เพราะ ListView ไม่สามารถมี Column อยู่ข้างในได้เลย",
+      "เพราะเรื่องนี้สำคัญแค่ใน release build เท่านั้น",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ ใน entry 9 ของ AI Bug Catalog: ColumnInsideListView ไม่ต้องการ widget เพิ่มเลยและผ่านสะอาดตามที่เขียนไว้เป๊ะ -- checklist ชี้ประเด็นนี้ออกมาเพราะ keyword การแก้เดียวกัน (Expanded) ใช้ได้ถูกต้องกับทิศทางหนึ่งแต่ไม่ใช่อีกทิศทาง",
+  },
+  {
+    q: "ทำไมกลุ่ม 'Tooling & release' ถึงถามเจาะจงว่า CI รันทั้ง flutter analyze AND flutter test หรือเปล่า แทนที่จะถือว่า analyze ที่สะอาดเพียงพอแล้ว?",
+    options: [
+      "flutter test ช้ากว่าอย่างเดียวและไม่ให้สัญญาณเพิ่มเติมเลย",
+      "flutter analyze พิสูจน์แค่ว่า type และ syntax resolve ได้ มันไม่มีความเห็นเรื่องพฤติกรรมตอน runtime เลย -- entry อย่างการขาด ProviderScope, ความสูง ListView ที่ไม่มีขอบเขต, และลำดับ route ของ go_router ล้วน analyze ผ่านสะอาดสมบูรณ์และล้มเหลวก็ต่อเมื่อรันจริงเท่านั้น",
+      "flutter analyze ไม่เช็ค Dart syntax เลย",
+      "ความแตกต่างนี้สำคัญแค่กับ web build เท่านั้น",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตลอดทั้ง AI Bug Catalog: entry ส่วนใหญ่ในจำนวน 28 ตัวไม่สร้าง diagnostic ของ flutter analyze เลยและถูกจับได้แค่ด้วยการรัน flutter test จริง (หรือสำหรับบางตัว ถูกจับได้แค่ด้วยการรันบน platform/browser จริงที่ flutter test เองก็เข้าไม่ถึง)",
+  },
+  {
+    q: "checklist item ของกลุ่ม Platform สำหรับ entry 19 บอกว่า `flutter build web --release` ที่สะอาด 'ซ่อนบั๊กไว้จนกว่าจะถึง runtime จริง' นั่นหมายความว่า reviewer ต้อง*ไม่*สรุปอะไรจาก web build ที่เขียว?",
+    options: [
+      "ว่าแอปจะ crash บน web แน่นอน",
+      "ว่า web build ที่สำเร็จพิสูจน์ว่าโค้ดที่แตะ dart:io ปลอดภัยบน web -- มันไม่พิสูจน์เลย web compiler ships facade จริงที่ครบถ้วนให้ dart:io ซึ่ง member ของมันแค่ throw UnsupportedError ทันทีที่มันรันจริง ดังนั้น build ที่สำเร็จไม่บอกอะไรเกี่ยวกับความปลอดภัยตอน runtime เลย",
+      "ว่า dart:io ถูกลบออกจาก build โดยอัตโนมัติ",
+      "ว่า Platform.isIOS คืนค่า false เสมอบน web",
+    ],
+    answer: 1,
+    explain: "พิสูจน์แล้วตรง ๆ ใน entry 19 ของ AI Bug Catalog: `flutter build web --release` (และแม้แต่ `--wasm`) compile snippet Platform.isIOS ที่มีบั๊กจริงโดยไม่มี warning เลย -- UnsupportedError จริงเข้าถึงได้แค่ด้วยการรันแอปที่ build แล้วจริง ๆ ในเบราว์เซอร์เท่านั้น",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/review-checklist" questions={quizReviewChecklist} />
+
+<ProgressTracker client:visible id="reading-flutter/review-checklist" />

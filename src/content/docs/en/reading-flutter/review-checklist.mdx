@@ -1,0 +1,130 @@
+---
+title: Review checklist
+description: 'A one-page, eight-group checklist for reviewing Flutter code — each line a yes/no question linking the catalog entry and the tool that proves it.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+This is the checklist to run down — by eye, on any diff, yours or an AI's — after the tools in **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)** have run and come back clean. It fits on one printed page on purpose: a checklist nobody actually opens during a review is worthless. Every line links the catalog entry that explains *why*, so this page stays a list, not a re-run of the course. The groups follow the same order as **[How to read Flutter code you did not write](/flutter/en/reading-flutter/)**, plus a final Tooling group covering how each of the other eight actually gets verified.
+
+<Mermaid title="What actually catches each group, if anything" code={checklistCoverageDiagram} />
+
+export const checklistCoverageDiagram = `flowchart LR
+  A["State &amp; lifecycle"] --> R["Needs a real dispose/rebuild sequence<br/>to surface at all"]
+  W["Widget tree &amp; keys"] --> T["Mostly human review<br/>(renders correctly either way)"]
+  L["Layout"] --> T2["Framework catches it loudly --<br/>but only the exact arrangement that overflows"]
+  As["Async &amp; isolates"] --> R
+  N["Navigation"] --> T
+  P["Platform"] --> D["Needs the actual platform/runtime --<br/>compiles and analyzes clean otherwise"]
+  Pf["Performance"] --> M["Silent cost, not a crash --<br/>needs reading RenderObject properties directly"]
+  Tl["Tooling &amp; release"] --> M2["Analyzer/lint catches SOME --<br/>only if the rule is actually enabled"]
+`;
+
+## pubspec & SDK constraints
+
+- Does `environment: sdk:` in `pubspec.yaml` actually admit the Dart/Flutter version this project targets, not one copied from an older tutorial?
+- Does any Riverpod code call `StateProvider`/`StateNotifierProvider`/`ChangeNotifierProvider` via the main `flutter_riverpod.dart` import, instead of the required `legacy.dart` import in Riverpod 3? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 5, proven with a real `undefined_function` diagnostic.
+- If `custom_lint`/`riverpod_lint` are both pinned, do they actually resolve together at those versions? See **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)** for a real, current version-conflict finding.
+
+## State & lifecycle
+
+- Is there a `ProviderScope` above the first `ConsumerWidget`/`ref.watch` call? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 1, proven with a real `Bad state: No ProviderScope found`.
+- Does every `setState` reachable from `.then()`, an `await` continuation, a `Timer`, or a `Stream` listener check `mounted` first? See entry 2, proven with a real `setState() called after dispose()`.
+- Does any widget's `build()` call `setState` on a *different*, still-mid-build widget synchronously? See entry 3, proven with a real `setState() or markNeedsBuild() called during build`.
+- Is a `late` field ever read on a path where the method assigning it might not have run yet? See entry 4, proven with a real `LateInitializationError`.
+
+## Widget tree & keys
+
+- Does a list of stateful widgets built with `for`/`.map()` have a `key` at all, when its order can change? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 6, proven with a real reorder test.
+- Is the same `GlobalKey` constant reused across sibling widgets instead of `UniqueKey()`/a `ValueKey` per item? See entry 7, proven with a real `Duplicate keys found`.
+- Does `Scaffold.of(context)` ever get called with the exact same `context` the enclosing `Scaffold` was built with, instead of a `Builder`-descendant context? See entry 8, proven with a real `Scaffold.of() called with a context that does not contain a Scaffold`.
+
+## Layout
+
+- Is a `ListView`/`GridView`/other scrollable placed directly inside a `Column`/`Row` with nothing bounding its main-axis size? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 9, proven with a real `Vertical viewport was given unbounded height` — and confirm the REVERSE case (a `Column` inside a `ListView`) was not "fixed" unnecessarily.
+- Is `Expanded`/`Flexible` ever used as a child of something that is not a `Row`/`Column`/`Flex`? See entry 10, proven with a real `Incorrect use of ParentDataWidget`.
+- Does a `Row`/`Column` of fixed-size children have no `Expanded`/`Flexible`/scrolling escape hatch for content that can exceed the viewport? See entry 11, proven with a real `RenderFlex overflowed`.
+
+## Async & isolates
+
+- Does an async function get called directly inside `build()` instead of once in `State` (`initState`/a `late final` field)? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 12, proven with a real rebuild-refetch count.
+- Does a `compute()` closure capture a `BuildContext`, a `Zone`, or anything else reachable from this isolate's own binding? See entry 13, proven with a real `Illegal argument in isolate message: object is unsendable`.
+- Is a `StreamController` left at its single-subscription default while more than one independent `.listen()` call exists on it? See entry 14, proven with a real `Bad state: Stream has already been listened to`.
+
+## Navigation
+
+- Is a parameterized `go_router` route (`/pets/:id`) declared *before* a more specific static route at the same segment level (`/pets/new`)? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 15, proven with a real misroute test.
+- Is `context.go()`/`router.go()` used where the user needs to be able to press back (drill-down navigation), rather than `push()`? See entry 16, proven with a real route-stack-depth comparison.
+- Does a `redirect` callback read external state (an auth flag) without `refreshListenable` pointed at whatever notifies when that state changes? See entry 17, proven with a real stuck-on-login test.
+- Does any code still use `WillPopScope` (deprecated, no predictive-back support), or reference `PredictiveBackPageTransitionBuilder` (missing the "s")? See entry 18, proven with a real deprecation `info` and a real `undefined_function` error.
+
+## Platform
+
+- Does `dart:io`/`Platform.isIOS`/`File` get used unconditionally in code that also has to build for web? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 19, proven with a real, clean `flutter build web --release` that hides the bug until actual runtime.
+- Does a `MethodChannel.invokeMethod` call assume a native handler is registered on every platform the app ships to (and does every test that exercises it mock the channel)? See entry 20, proven with a real `MissingPluginException`.
+- Is `FlutterError.onError` treated as complete error coverage, with no `runZonedGuarded`/`PlatformDispatcher.onError` for errors thrown outside the framework's own build/layout/paint? See entry 21, proven with a real bare-`Future` error that only `runZonedGuarded` catches.
+
+## Performance
+
+- Does every `AnimationController` created with `SingleTickerProviderStateMixin`/`TickerProviderStateMixin` get `.dispose()`d in the `State`'s own `dispose()`? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 22, proven with a real `was disposed with an active Ticker`.
+- Is `Opacity(opacity: 1.0)` used where the value never actually varies, instead of returning the child directly? See entry 23, proven by reading a live `RenderOpacity`'s own `isRepaintBoundary`/`alwaysNeedsCompositing` properties.
+- Does any code still pass a bare number to `cacheExtent` instead of `scrollCacheExtent: ScrollCacheExtent.pixels(...)`? See entry 24, proven with a real deprecation `info` and a real `dart fix --dry-run` suggestion.
+
+## Tooling & release
+
+- Is `const` assumed to be enforced by "the linter," when this course's pinned `flutter_lints` 6.0.0 only ships `prefer_const_constructors_in_immutables`, not the general rule? See the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)**, entry 25, proven with a real before/after `flutter analyze` diff.
+- Is any `print()` call assumed to be stripped from a release build? See entry 26, proven with a real string found verbatim inside a release `main.dart.js`.
+- Does a `switch` over a `sealed class` skip a subtype, relying on habit instead of the analyzer's own exhaustiveness check? See entry 27, proven with a real `non_exhaustive_switch_expression` error.
+- Does any named parameter or method name look plausible but not actually exist on the class in question? See entry 28, proven with real `undefined_named_parameter`/`undefined_method` errors — the cheapest, most mechanical check on this whole page.
+- Does CI run `flutter analyze` AND `flutter test` (not just one), knowing analyze proves types/syntax only, never runtime behavior? See **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)**.
+- Is `flutter build web --wasm` ever exercised as a portability gate, or only the default JS-compiled build? See **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)**, proven with a real, clean `--wasm` build.
+- Does this course's own harness (`npm run verify`, `--test <module>/<lesson>`) run against every fence, not just a human skim? See **[Verification Tools](/flutter/en/reading-flutter/verification-tools/)**.
+
+<Callout title="A checklist narrows the search, it does not replace it">
+Every line above maps to one of the 28 patterns in the **[AI Bug Catalog](/flutter/en/reading-flutter/ai-bug-catalog/)** — most of which analyze or render perfectly cleanly on the first pass. Run this list on every diff regardless of how clean `flutter analyze` or a quick manual run came back.
+</Callout>
+
+export const quizReviewChecklist = [
+  {
+    q: "Why does the 'Layout' group's checklist item for entry 9 specifically ask reviewers to confirm the REVERSE case (a Column inside a ListView) was not 'fixed' unnecessarily?",
+    options: [
+      "Because a Column inside a ListView is always broken too",
+      "Because the fix pattern for the real bug (wrap the ListView in Expanded when it's inside a Column) is easy to over-apply to the opposite, already-fine arrangement -- a ListView already gives its children a bounded cross-axis and unbounded main-axis, exactly what a Column wants, so adding Expanded there is unnecessary noise, not a fix",
+      "Because ListView cannot contain a Column at all",
+      "Because this only matters in release builds",
+    ],
+    answer: 1,
+    explain: "Proven directly in the AI Bug Catalog's entry 9: ColumnInsideListView needs zero extra widgets and passes cleanly exactly as written -- the checklist calls this out because the SAME fix keyword (Expanded) applies correctly to one direction and not the other.",
+  },
+  {
+    q: "Why does the 'Tooling & release' group ask specifically whether CI runs BOTH flutter analyze AND flutter test, rather than treating a clean analyze as sufficient?",
+    options: [
+      "flutter test is strictly slower and provides no extra signal",
+      "flutter analyze proves types and syntax resolve; it has zero opinion on runtime behavior -- entries like missing ProviderScope, unbounded ListView height, and go_router route order all analyze perfectly cleanly and only fail when actually run",
+      "flutter analyze does not check Dart syntax at all",
+      "This distinction only matters for web builds",
+    ],
+    answer: 1,
+    explain: "Proven throughout the AI Bug Catalog: the majority of its 28 entries produce zero flutter analyze diagnostic and are only caught by an actual flutter test run (or, for a few, only by an actual platform/browser run flutter test itself cannot reach).",
+  },
+  {
+    q: "The Platform group's checklist item for entry 19 says a clean `flutter build web --release` 'hides the bug until actual runtime.' What does that mean a reviewer must NOT conclude from a green web build?",
+    options: [
+      "That the app will definitely crash on web",
+      "That a successful web build proves dart:io-touching code is safe on web -- it does not; the web compiler ships a real, complete facade for dart:io whose members simply throw UnsupportedError the moment they execute, so the build succeeding says nothing about runtime safety",
+      "That dart:io was automatically removed from the build",
+      "That Platform.isIOS always returns false on web",
+    ],
+    answer: 1,
+    explain: "Proven directly in the AI Bug Catalog's entry 19: `flutter build web --release` (and even `--wasm`) compiles the exact buggy Platform.isIOS snippet with zero warnings -- the real UnsupportedError is only reachable by actually running the built app in a browser.",
+  },
+];
+
+<Quiz client:visible id="reading-flutter/review-checklist" questions={quizReviewChecklist} />
+
+<ProgressTracker client:visible id="reading-flutter/review-checklist" />
