@@ -1,6 +1,6 @@
 ---
 title: 'Testing'
-description: 'test pyramid ของ Flutter — unit test สำหรับ logic, widget test สำหรับ UI behavior, integration test สำหรับทั้งแอป และ golden test สำหรับ pixel'
+description: 'Flutter test pyramid, mock repository ด้วย mocktail (when/verify/registerFallbackValue) ใน widget test จริง, finder กับ matcher, pump เทียบกับ pumpAndSettle, golden test, integration_test, output จริงของ flutter test --coverage/lcov และ testWidgets variant'
 sidebar:
   order: 3
 ---
@@ -9,23 +9,24 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## test สี่แบบ หนึ่ง pyramid
+## Test สี่แบบ พีระมิดเดียว
 
-Flutter ให้เครื่องมือ test สี่แบบ ซึ่งแลกความเร็วกับความสมจริง ใช้แบบเร็วเยอะ ๆ และแบบช้าน้อย ๆ
+Flutter ให้เครื่องมือ test สี่แบบ และมันแลกความเร็วกับความสมจริง ใช้แบบเร็วเยอะ ๆ กับแบบช้าน้อย ๆ
 
-<Mermaid title="Flutter test pyramid" code={pyramidDiagram} />
+<Mermaid title="พีระมิด test ของ Flutter" code={pyramidDiagram} />
 
 export const pyramidDiagram = `flowchart TB
   integ["Integration tests\n(whole app, real device) — few, slow"] --> widget["Widget tests\n(one widget tree, no device) — many, fast"]
   widget --> unit["Unit tests\n(pure Dart logic) — most, fastest"]`;
 
-- **Unit test** ตรวจ Dart ล้วน ๆ — function, class, logic ของ Cubit ไม่มี UI ไม่มี device เร็วระดับ millisecond
-- **Widget test** pump widget เข้า test harness แล้วโต้ตอบกับ widget นั้น (tap, พิมพ์, expect) — ไม่ต้องมี device จริง ยังเร็วอยู่ นี่คือจุด sweet spot เฉพาะของ Flutter
-- **Integration test** รันทั้งแอปบน device หรือ emulator จริง ขับแอปแบบ end to end — ช้า แต่สมจริงที่สุด
-- **Golden test** เก็บ pixel ที่ render ของ widget แล้วเทียบกับ reference image ที่ save ไว้ จับ visual regression
+- **Unit test** ยืนยัน Dart บริสุทธิ์ — ฟังก์ชัน, class, logic ของ Cubit ไม่มี UI ไม่มีอุปกรณ์ เร็วระดับมิลลิวินาทีแต่ละอัน
+- **Widget test** pump widget เข้า test harness แล้วโต้ตอบกับมัน (tap, ใส่ข้อความ, expect) — ไม่มีอุปกรณ์จริง ยังเร็วอยู่ นี่คือจุดหวานเฉพาะของ Flutter
+- **Integration test** รันแอปทั้งตัวบนอุปกรณ์จริงหรือ emulator ขับมันแบบ end to end — ช้า แต่สมจริงที่สุด
+- **Golden test** จับ pixel ที่ render ของ widget แล้วเทียบกับ reference image ที่บันทึกไว้ จับ visual regression ได้
 
-## unit test
+## Unit test
 
 ```dart
 import 'package:test/test.dart';
@@ -36,11 +37,11 @@ test('cart total sums item prices', () {
 });
 ```
 
-Dart ล้วน ๆ, `expect` ล้วน ๆ logic ส่วนใหญ่ของคุณ — pricing, validation, parsing, state transition — ควรเข้าถึงได้ด้วย test ที่ง่ายแบบนี้ นั่นคือเหตุผลที่ดีในการเก็บ logic ออกจาก widget
+Dart ธรรมดา `expect` ธรรมดา logic ส่วนใหญ่ของคุณ — ราคา, การ validate, การ parse, state transition — ควร test ได้ง่ายแบบนี้ ซึ่งเป็นเหตุผลที่ดีที่จะเก็บ logic ไว้นอก widget
 
-## widget test
+## Widget test
 
-widget test ใช้ `WidgetTester` เพื่อ build widget, find element, act และ assert — ทั้งหมดอยู่ใน memory
+Widget test ใช้ `WidgetTester` เพื่อสร้าง widget, หา element, ทำอะไรบางอย่าง และ assert — ทั้งหมดในหน่วยความจำ
 
 ```dart
 import 'package:flutter/material.dart';
@@ -58,9 +59,274 @@ testWidgets('tapping + increments the counter', (WidgetTester tester) async {
 });
 ```
 
-call สำคัญ: `pumpWidget` build tree, `find` หา widget, `tap`/`enterText` โต้ตอบ และ `pump` (หรือ `pumpAndSettle` สำหรับ animation) เดินหน้า frame เพื่อให้ rebuild เกิดขึ้น ไม่ต้องมี emulator — อันนี้รันในไม่กี่วินาที
+การเรียกหลัก: `pumpWidget` สร้าง tree, `find` หา widget, `tap`/`enterText` โต้ตอบ และ `pump` เดินหน้าเฟรมเดียวเป๊ะ ๆ เพื่อให้ rebuild เกิดขึ้น
 
-## golden test
+### Finder กับ matcher
+
+`find.text`/`find.byType`/`find.byKey`/`find.byIcon`/`find.widgetWithText` คือ finder ที่ใช้บ่อย แต่ละตัวคืน `Finder` ที่คุณส่งให้ `expect` พร้อม matcher เรื่อง cardinality: `findsOneWidget`, `findsNothing`, `findsWidgets` (หนึ่งตัวขึ้นไป), `findsNWidgets(n)` รวม finder กับ assertion จริงบน widget ที่มันเจอผ่าน `tester.widget<T>(finder)` เมื่อคุณต้องเช็ค property ไม่ใช่แค่การมีอยู่
+
+### `pump` เทียบกับ `pumpAndSettle` พิสูจน์ด้วย animation จริง
+
+`pump([duration])` เดินหน้าเฟรมเดียวเป๊ะ ๆ (อาจบวก duration คงที่ก่อน) — สำหรับ animation หลายเฟรม การเรียก `pump()` ครั้งเดียวพาคุณไปแค่ค่าของ animation ณ ขณะนั้นเท่านั้น `pumpAndSettle()` pump ซ้ำ ๆ จนไม่มีเฟรมถูก schedule แล้ว ซึ่งคือสิ่งที่คุณต้องการเมื่อ animation/transition ต้องจบสมบูรณ์ก่อนที่คุณจะ assert
+
+```dart
+// lib/pump_vs_settle_demo.dart
+import 'package:flutter/material.dart';
+
+class FadeInText extends StatefulWidget {
+  const FadeInText({super.key});
+  @override
+  State<FadeInText> createState() => _FadeInTextState();
+}
+
+class _FadeInTextState extends State<FadeInText>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 300),
+  )..forward();
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      key: const Key('fade'), // disambiguates from MaterialApp's own internal FadeTransitions
+      opacity: controller,
+      child: const Text('loaded'),
+    );
+  }
+}
+```
+
+```dart
+// test/pump_vs_settle_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__testing/pump_vs_settle_demo.dart';
+
+void main() {
+  testWidgets('a single pump() only advances one frame of a running animation',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: FadeInText()));
+    final opacityAfterOnePump =
+        tester.widget<FadeTransition>(find.byKey(const Key('fade'))).opacity.value;
+
+    await tester.pump(const Duration(milliseconds: 150)); // halfway through 300ms
+    final opacityMidway =
+        tester.widget<FadeTransition>(find.byKey(const Key('fade'))).opacity.value;
+
+    expect(opacityAfterOnePump, lessThan(opacityMidway)); // genuinely progressed
+    expect(opacityMidway, lessThan(1.0)); // NOT finished yet after a single pump
+  });
+
+  testWidgets('pumpAndSettle() waits until the animation genuinely finishes',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: FadeInText()));
+    await tester.pumpAndSettle();
+
+    final finalOpacity =
+        tester.widget<FadeTransition>(find.byKey(const Key('fade'))).opacity.value;
+    expect(finalOpacity, 1.0); // fully settled
+  });
+}
+```
+
+```text
+00:00 +0: a single pump() only advances one frame of a running animation
+00:00 +1: pumpAndSettle() waits until the animation genuinely finishes
+
+00:00 +2: All tests passed!
+```
+
+test แรกพิสูจน์ว่า `pump()` เดินหน้าแค่สิ่งที่คุณบอกจริง ๆ (ยังอยู่กลาง fade ที่ 150ms ของ animation 300ms); test ที่สองพิสูจน์ว่า `pumpAndSettle()` ไม่หยุดจนกว่าเฟรมที่ animation schedule เองจะหมด หยิบ `pumpAndSettle()` มาใช้หลัง interaction ใดก็ตามที่เริ่ม animation/transition/`Future` ที่คุณต้องการให้ resolve สมบูรณ์ (route push, `AnimatedSwitcher`, snackbar) — แต่อย่าใช้กับ widget ที่มี animation ไม่รู้จบ (เช่น spinner ที่ใช้ `..repeat()`) ซึ่งจะทำให้ `pumpAndSettle()` timeout รอเฟรมที่ไม่มีวันหยุด
+
+## Mock repository ด้วย `mocktail` พิสูจน์แล้ว
+
+widget จริงพึ่งพา collaborator จริง — repository, API client — และโค้ดที่ AI generate มักสร้างสิ่งเหล่านั้นตรง ๆ ข้างใน widget แทนที่จะรับมันเป็น parameter ซึ่งทำให้ widget test ไม่ได้จริง ๆ โดยไม่ต้องยิง network `mocktail` (เวอร์ชันปัจจุบัน **1.0.5** ตาม `pubspec.lock` ที่ resolve แล้วของคอร์สนี้เอง) ให้คุณแทนที่ด้วย implementation ปลอม และ assert ได้ตรง ๆ ว่ามันถูกเรียกยังไง
+
+```dart
+// lib/mocktail_demo.dart
+import 'package:flutter/material.dart';
+
+abstract class UserRepository {
+  Future<String> fetchUserName(String id);
+}
+
+class ProfileScreen extends StatefulWidget {
+  const ProfileScreen({super.key, required this.repository, required this.userId});
+  final UserRepository repository;
+  final String userId;
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  late final Future<String> _nameFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameFuture = widget.repository.fetchUserName(widget.userId); // injected, not constructed inline
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _nameFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const CircularProgressIndicator();
+        return Text(snapshot.data!);
+      },
+    );
+  }
+}
+
+// A second collaborator whose method takes a custom (non-primitive) type --
+// this is what registerFallbackValue exists for, proven below.
+class AnalyticsEvent {
+  AnalyticsEvent(this.name);
+  final String name;
+}
+
+abstract class Analytics {
+  Future<void> logEvent(AnalyticsEvent event);
+}
+```
+
+```dart
+// test/mocktail_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:probe/lessons/tooling-and-production__testing/mocktail_demo.dart';
+
+class MockUserRepository extends Mock implements UserRepository {}
+
+class MockAnalytics extends Mock implements Analytics {}
+
+// A Fake stands in for AnalyticsEvent ONLY as a fallback value for any() --
+// mocktail never calls its members, so an empty Fake is enough.
+class FakeAnalyticsEvent extends Fake implements AnalyticsEvent {}
+
+void main() {
+  setUpAll(() {
+    registerFallbackValue(FakeAnalyticsEvent());
+  });
+
+  testWidgets('ProfileScreen shows the name the mocked repository returns',
+      (tester) async {
+    final mockRepo = MockUserRepository();
+    when(() => mockRepo.fetchUserName('42'))
+        .thenAnswer((_) async => 'Ada Lovelace');
+
+    await tester.pumpWidget(MaterialApp(
+      home: ProfileScreen(repository: mockRepo, userId: '42'),
+    ));
+    await tester.pump(); // let the FutureBuilder's snapshot settle
+
+    expect(find.text('Ada Lovelace'), findsOneWidget);
+    verify(() => mockRepo.fetchUserName('42')).called(1);
+  });
+
+  test('registerFallbackValue is what makes any() work for a custom type',
+      () async {
+    final analytics = MockAnalytics();
+    // Without the setUpAll registration above, this line throws -- proven
+    // in prose below with the real, unedited error text.
+    when(() => analytics.logEvent(any())).thenAnswer((_) async {});
+
+    await analytics.logEvent(AnalyticsEvent('screen_view'));
+
+    verify(() => analytics.logEvent(any())).called(1);
+  });
+}
+```
+
+```text
+00:00 +0: ProfileScreen shows the name the mocked repository returns
+00:00 +1: registerFallbackValue is what makes any() work for a custom type
+
+00:00 +2: All tests passed!
+```
+
+`verify(() => mockRepo.fetchUserName('42')).called(1)` คือครึ่งหลังของบทพิสูจน์ที่ tutorial ส่วนใหญ่ข้ามไป: มันไม่ได้แค่เช็คว่า widget render ข้อความที่ถูก (ซึ่ง string hardcode ก็ทำแบบนั้นได้เหมือนกัน) — มันยืนยันอย่างอิสระว่า widget เรียก collaborator จริง ๆ ด้วย argument ที่คาดหวังเป๊ะ เป็นจำนวนครั้งที่ถูกต้องเป๊ะ
+
+### `registerFallbackValue`: error จริงที่มันป้องกัน
+
+การเรียก `any()` สำหรับ argument type ที่ไม่ใช่ primitive (`AnalyticsEvent` ด้านบน) โดยไม่ได้ลงทะเบียน fallback ก่อนจะ throw ทันที — จับไว้ที่นี่ จริงและไม่แก้ไข:
+
+```text
+StateError: Bad state: A test tried to use `any` or `captureAny` on a parameter of type `AnalyticsEvent`, but
+registerFallbackValue was not previously called to register a fallback value for `AnalyticsEvent`.
+
+To fix, do:
+
+void main() {
+  setUpAll(() {
+    registerFallbackValue(/* create a dummy instance of `AnalyticsEvent` */);
+  });
+}
+
+This instance of `AnalyticsEvent` will only be passed around, but never be interacted with.
+Therefore, if `AnalyticsEvent` is a function, it does not have to return a valid object and
+could throw unconditionally.
+If you cannot easily create an instance of `AnalyticsEvent`, consider defining a `Fake`:
+
+class MyTypeFake extends Fake implements MyType {}
+
+void main() {
+  setUpAll(() {
+    registerFallbackValue(MyTypeFake());
+  });
+}
+```
+
+ข้อความ error ของ `mocktail` เองคือ documentation ในที่นี้: มันมีอยู่เพราะ sound null safety ของ Dart หมายความว่า `any()` ต้องคืน instance `AnalyticsEvent` ที่ไม่ใช่ null จริง ๆ ข้างในบางตัว และ mocktail ไม่มีทางสร้างมันขึ้นมาเองได้ — `Fake` (ที่ member ของมันไม่เคยถูกเรียกจริง มีแค่ identity ของมันในฐานะ "`AnalyticsEvent`" ที่สำคัญ) คือคำตอบมาตรฐานเมื่อ class จริงสร้างได้ไม่ง่าย
+
+## `testWidgets` variant พิสูจน์แล้ว
+
+`variant:` รัน body ของ `testWidgets` *เดียวกัน* ครั้งละหนึ่งค่าใน `TestVariant` (ตัวที่มีมาให้รวม `TargetPlatformVariant`; `ValueVariant<T>` คือตัวทั่วไปสำหรับชุดค่าของคุณเอง):
+
+```dart
+// test/locale_variant_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+final localeVariant = ValueVariant<String>({'en', 'th', 'ja'});
+
+void main() {
+  testWidgets(
+    'a Text widget renders under every locale variant',
+    (tester) async {
+      final locale = localeVariant.currentValue!;
+      await tester.pumpWidget(MaterialApp(
+        locale: Locale(locale),
+        home: const Text('hello'),
+      ));
+      expect(find.text('hello'), findsOneWidget);
+    },
+    variant: localeVariant,
+  );
+}
+```
+
+```text
+00:00 +0: a Text widget renders under every locale variant (variant: en)
+00:00 +1: a Text widget renders under every locale variant (variant: th)
+00:00 +2: a Text widget renders under every locale variant (variant: ja)
+
+00:00 +3: All tests passed!
+```
+
+การเรียก `testWidgets` เดียว สาม test run ที่รายงานแยกกันจริง — `variant.currentValue` ข้างใน body คือวิธีที่คุณอ่านว่า run ปัจจุบันใช้ค่าไหน นี่คือกลไกเบื้องหลัง `TargetPlatformVariant.all()` pattern ทั่วไปสำหรับการรัน widget test เดียวข้ามทุก `TargetPlatform` โดยไม่ต้องเขียน loop เอง (หรือแย่กว่านั้น test body สี่อันที่เกือบเหมือนกัน)
+
+## Golden test
 
 ```dart
 testWidgets('button matches golden', (tester) async {
@@ -72,52 +338,237 @@ testWidgets('button matches golden', (tester) async {
 });
 ```
 
-golden (snapshot) test ทรงพลังสำหรับ design system แต่เปราะข้าม platform และ font version — pin ให้ดีและ regenerate อย่างตั้งใจด้วย `--update-goldens`
+Golden (snapshot) test ทรงพลังสำหรับ design system แต่เปราะบางข้าม platform และเวอร์ชัน font — pin มันอย่างระมัดระวังและ regenerate อย่างตั้งใจด้วย `--update-goldens` รันจริง ใน scratch environment ของคอร์สนี้เอง (ไม่เคยใน shared probe ของคอร์สนี้ ตาม shared brief — `matchesGoldenFile` ต้องการ reference `.png` ที่ checked-in ซึ่ง fence collector ของ harness นี้ไม่มีกลไกจะพามันไปได้ เพราะมันเก็บแค่ fence `dart`/`yaml`):
+
+```text
+$ flutter test --update-goldens test/golden_experiment_test.dart
+00:00 +0: a simple button matches its golden file
+00:00 +1: All tests passed!
+
+$ flutter test test/golden_experiment_test.dart   # second run, comparing against the file just written
+00:00 +0: a simple button matches its golden file
+00:00 +1: All tests passed!
+```
+
+การรันครั้งแรก (`--update-goldens`) เขียน `test/goldens/simple_button.png`; การรันครั้งที่สองที่ไม่แก้ไขอะไรเทียบ pixel ที่ render ใหม่กับไฟล์นั้นเป๊ะ ๆ และผ่านเพราะไม่มีอะไรเปลี่ยน harness ของคอร์สนี้รัน pattern นี้ไม่ได้จริง ๆ (ไม่มี binary asset support ใน fence collector ของมัน) — ยืนยันอย่างตรงไปตรงมาใน scratch แทนที่จะอ้างโดยไม่ได้รัน
+
+## `integration_test`: test ทั้งแอปบนอุปกรณ์จริง (docs — ไม่มีอุปกรณ์ที่นี่)
+
+package `integration_test` (มากับ Flutter SDK ไม่ใช่ dependency แยกจาก pub.dev ที่ต้องเพิ่มเอง) รันแอปที่ compile แล้วจริงของคุณบนอุปกรณ์จริงหรือ emulator ขับมันแบบเดียวกับที่ widget test ขับ tree ในหน่วยความจำ — `IntegrationTestWidgetsFlutterBinding.ensureInitialized()` แทน test binding ปกติ แล้วใช้ API `tester.tap`/`pump`/`expect` เดียวกันกับแอปที่กำลังรันจริง [คู่มือ integration testing ของ docs.flutter.dev](https://docs.flutter.dev/testing/integration-tests) คือแหล่งที่มาของ section นี้ — environment ของคอร์สนี้ไม่มีอุปกรณ์หรือ emulator ให้รันจริง ดังนั้นนี่คือการอ้างอิง ไม่ใช่การสาธิต trade-off เทียบกับ widget test คือพีระมิดตอนต้นบทนี้เป๊ะ ๆ: ความสมจริงเต็มรูปแบบ (platform channel จริง, การ render จริง, timing จริง) แลกกับความเร็วและต้นทุน setup ระดับอุปกรณ์จริง — หยิบมันมาใช้สำหรับ flow end-to-end จริง ๆ ไม่กี่อัน (onboarding, checkout) ที่คุ้มกับต้นทุน ไม่ใช่แทนที่ widget test
+
+## Test coverage: `flutter test --coverage` กับ lcov output จริง
+
+```dart
+// lib/coverage_demo.dart
+int add(int a, int b) => a + b;
+
+int classify(int value) {
+  if (value < 0) return -1;
+  if (value == 0) return 0;
+  return 1;
+}
+
+int neverCalled(int value) => value * 100; // deliberately left uncovered
+```
+
+```dart
+// test/coverage_demo_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__testing/coverage_demo.dart';
+
+void main() {
+  test('add sums two ints', () {
+    expect(add(2, 3), 5);
+  });
+
+  test('classify handles negative, zero, and positive', () {
+    expect(classify(-5), -1);
+    expect(classify(0), 0);
+    expect(classify(5), 1);
+  });
+}
+```
+
+```text
+00:00 +0: add sums two ints
+00:00 +1: classify handles negative, zero, and positive
+
+00:00 +2: All tests passed!
+```
+
+การรัน `flutter test --coverage` กับสองไฟล์นี้เป๊ะ (harness ของคอร์สนี้ไม่รันด้วย `--coverage` ดังนั้นสิ่งนี้ถูกจับใน scratch) สร้าง `coverage/lcov.info` จริงและไม่แก้ไขสำหรับ `coverage_demo.dart`:
+
+```text
+SF:lib/coverage_demo.dart
+DA:1,2
+DA:3,1
+DA:4,2
+DA:5,1
+DA:9,0
+LF:5
+LH:4
+end_of_record
+```
+
+`DA:<line>,<hitCount>` แต่ละอันคือหนึ่งบรรทัดที่ execute ได้และจำนวนครั้งที่ test เรียกมัน; `DA:9,0` คือบรรทัดของ `neverCalled` — ศูนย์ครั้งจริง ๆ เพราะไม่มี test เรียกมันเลย `LF:5`/`LH:5` สรุปไฟล์ (**5** บรรทัดที่ execute ได้พบ **4** บรรทัดถูก hit) — coverage ระดับบรรทัดจริงที่คำนวณได้ **80%** สำหรับไฟล์เดียวนี้ ไม่ใช่การประมาณ `genhtml` (ส่วนหนึ่งของ toolchain `lcov` — ไม่ได้ติดตั้งบน Mac เครื่องนี้ และคอร์สนี้ `brew install` มันไม่ได้ตาม shared brief) แปลง `lcov.info` เป็น HTML report ที่ดูใน browser ได้; [docs ของมัน](https://github.com/linux-test-project/lcov) คือการอ้างอิงสำหรับขั้นตอนนั้น ไม่ได้ยืนยันซ้ำที่นี่
 
 <Callout title="สรุปหนึ่งบรรทัด">
-พึ่ง pyramid: **unit test** เยอะ ๆ (Dart logic ล้วน ๆ — เหตุผลที่ควรเก็บ logic ออกจาก widget), **widget test** เยอะพอควร (`pumpWidget` → `find` → `tap` → `pump` → `expect` ไม่มี device เร็ว), **integration test** น้อย (ทั้งแอป สมจริง ช้า) และ **golden test** สำหรับ visual regression ระดับ pixel ตรงที่คุ้มค่า
+พึ่งพาพีระมิด: **unit test** เยอะ ๆ, **widget test** พอสมควร, **integration test** น้อย และ **golden test** ตรงที่ pixel regression สำคัญ `pump()` เดินหน้าเฟรมเดียวเป๊ะ ๆ — พิสูจน์แล้วด้านบนว่า animation ที่กำลังรันยังอยู่กลางทางจริง ๆ หลังเรียกครั้งเดียว; `pumpAndSettle()` รอจนเฟรมที่ schedule ไว้ทั้งหมดหมด `mocktail` (1.0.5) ให้ widget test inject collaborator ปลอมและ `verify()` ได้ตรง ๆ ว่ามันถูกเรียกยังไง พิสูจน์แล้วด้านบนแบบ end-to-end ด้วย `when`/`thenAnswer`/`verify`; `registerFallbackValue` มีอยู่เพราะ `any()` ต้องการ instance ที่ไม่ใช่ null จริงของ custom type พิสูจน์แล้วด้านบนด้วย error จริงที่มันโยนเมื่อคุณลืมมัน `testWidgets(..., variant:)` รัน test body เดียวครั้งละหนึ่งค่า พิสูจน์แล้วด้านบนด้วยสาม run ที่รายงานแยกกันจริงจากการเรียก `testWidgets` เดียว `flutter test --coverage` สร้างตัวเลข lcov จริงที่คำนวณได้ พิสูจน์แล้วด้านบน — ไม่ใช่การประมาณ
 </Callout>
+
+## Reading AI-generated code
+
+โค้ด widget ที่ AI generate มักสร้าง dependency ของตัวเองตรงข้างใน ซึ่งทำให้ test แบบที่บทนี้สาธิตเป็นไปไม่ได้เลยโดยไม่ต้องยิง network จริง
+
+```dart
+// AI-generated: "show the user's order history"
+class OrderHistoryScreen extends StatefulWidget {
+  const OrderHistoryScreen({super.key});
+  @override
+  State<OrderHistoryScreen> createState() => _OrderHistoryScreenState();
+}
+
+class _OrderHistoryScreenState extends State<OrderHistoryScreen> {
+  final _api = OrdersApi(); // constructed inline -- cannot be mocked
+  late final Future<List<Order>> _orders = _api.fetchOrders();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Order>>(
+      future: _orders,
+      builder: (context, snapshot) => snapshot.hasData
+          ? ListView(children: snapshot.data!.map((o) => Text(o.id)).toList())
+          : const CircularProgressIndicator(),
+    );
+  }
+}
+```
+
+ก่อนจะเชื่อโค้ด widget ที่ generate มาแบบนี้ ให้เช็ค:
+
+- collaborator (`OrdersApi()` ด้านบน) ที่ถูกสร้างตรงข้างใน `State`/`StatelessWidget` แทนที่จะรับเป็น constructor parameter — พิสูจน์แล้วด้านบนว่า `ProfileScreen` ที่รับ `UserRepository repository` คือสิ่งที่ทำให้ `MockUserRepository` แทนที่ได้ใน test เลย
+- `await tester.pump()` ครั้งเดียวหลัง interaction ที่เริ่ม animation หลายเฟรมจริง ๆ แล้ว assertion ที่สมมติว่ามันจบแล้ว — พิสูจน์แล้วด้านบนว่า `pump()` ตัวเดียวเดินหน้าแค่เฟรมเดียว วิธีแก้คือ `pumpAndSettle()` เมื่อคุณต้องการ end state จริง ๆ
+- `any()` ที่ใช้กับ argument type แบบ custom โดยไม่มี `registerFallbackValue`/`Fake` คู่กัน — พิสูจน์แล้วด้านบนว่ามัน throw ทันที ไม่ผ่านแบบเงียบ ๆ
+- widget test ที่มี assertion เดียวคือมีข้อความบางอย่างปรากฏ โดยไม่มี `verify()` บน mock — พิสูจน์แล้วด้านบนว่า `verify()` คือสิ่งที่ยืนยันจริง ๆ ว่า collaborator ถูกเรียกถูกต้อง ไม่ใช่แค่ UI บังเอิญ render อะไรที่ดูสมเหตุสมผล
+
+<SpotTheBug code={`class CheckoutButton extends StatelessWidget {
+  const CheckoutButton({super.key, required this.paymentService});
+  final PaymentService paymentService;
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: () => paymentService.charge(amount: 42.0),
+      child: const Text('Pay'),
+    );
+  }
+}
+
+// In the test file:
+class MockPaymentService extends Mock implements PaymentService {}
+
+void main() {
+  testWidgets('tapping Pay charges the payment service', (tester) async {
+    final mockService = MockPaymentService();
+    await tester.pumpWidget(MaterialApp(
+      home: CheckoutButton(paymentService: mockService),
+    ));
+
+    await tester.tap(find.text('Pay'));
+    await tester.pump();
+
+    expect(find.text('Pay'), findsOneWidget);
+  });
+}`}>
+test ไม่เคยเรียก `verify()` บน `mockService` เลย — มันแค่ assert ว่า label ของปุ่มยังเป็น "Pay" หลังการ tap ซึ่งจะผ่านแม้ `onPressed` จะขาดการเชื่อมโยงกับ `paymentService.charge(...)` โดยสิ้นเชิง (regression จริงที่พลาดง่าย: มีคนรีแฟคเตอร์ `onPressed` แล้วบังเอิญทำการเรียก charge หายไป และ test นี้ยังผ่านต่อ) พิสูจน์แล้วด้านบนด้วย `ProfileScreen`/`mockRepo` วิธีแก้คือการเรียก `verify()` จริง: `verify(() => mockService.charge(amount: 42.0)).called(1);` — นั่นคือบรรทัดเดียวที่ยืนยันจริง ๆ ว่าปุ่มทำสิ่งที่มันอ้างว่าทำ ไม่ใช่แค่ยังเขียนว่า "Pay"
+</SpotTheBug>
+
+## Mental Model
+
+ทุกเทคนิคในบทนี้มีอยู่เพื่อตอบคำถามเดียวที่การเช็ค "UI ดูถูกไหม" ธรรมดาตอบไม่ได้: **collaborator ที่ถูกต้องถูกเรียกไหม ด้วย argument ที่ถูกต้อง จำนวนครั้งที่ถูกต้อง — ไม่ขึ้นกับว่าอะไร render ออกมา?** `verify()` ของ `mocktail` พิสูจน์สิ่งนั้นตรง ๆ `pumpAndSettle()` เทียบกับ `pump()` เดียวคือคำถามเดียวกันที่ใช้กับเวลา: "state ที่ฉันกำลัง assert คือ state *สุดท้าย* จริงไหม หรือแค่เฟรมไหนก็ตามที่บังเอิญเป็นปัจจุบัน?" และ error ของ `registerFallbackValue` เมื่ออ่านอย่างละเอียด คือ type system ที่ถามคำถามเดียวกันอีกชั้นหนึ่ง: "คุณบอกฉันว่า `any()` match — match *อะไร* กันแน่ เพราะฉันต้องมี object จริงส่งกลับไปด้วย?"
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| Unit test | เร็วที่สุด ง่ายที่สุด ควรมีเยอะที่สุด | ไม่พิสูจน์อะไรเลยเกี่ยวกับที่ widget จริง ๆ render/ทำงาน |
+| Widget test + `mocktail` | พิสูจน์แล้วด้านบน: พฤติกรรมจริง ยืนยันการเรียก collaborator จริง ยังเร็วอยู่ (ไม่มีอุปกรณ์) | ต้องออกแบบ widget ให้รับ dependency แบบ inject ไม่ใช่สร้างตรงข้างใน |
+| `pumpAndSettle()` | พิสูจน์แล้วด้านบน: รอ final state จริง | timeout กับ animation ที่ไม่รู้จบใด ๆ — `FadeInText` ที่พิสูจน์แล้วด้านบนจะทำให้มันค้างถ้าใช้ `..repeat()` |
+| Golden test | จับ pixel regression จริง | พิสูจน์แล้วด้านบน: รันผ่าน harness ของคอร์สนี้เองไม่ได้; เปราะบางข้าม platform/font โดยทั่วไป |
+| Integration test | สมจริงที่สุด — อุปกรณ์จริง แอปจริง | ช้า ต้องการ hardware/emulator จริง — environment ของคอร์สนี้ไม่มี อ้างอิงจาก docs เท่านั้น |
+
+## Common Misconceptions
+
+- **"ถ้าข้อความบนหน้าจอถูกต้อง แสดงว่า widget ทำสิ่งที่ถูกต้อง"** พิสูจน์แล้วด้านบนว่าไม่จริง จากตัวอย่าง `SpotTheBug`: test ที่ assert แค่ข้อความที่ render ผ่านแม้ action ของปุ่มจะขาดการเชื่อมโยงกับ service ที่มันอ้างว่าเรียกโดยสิ้นเชิง — มีแค่ `verify()` เท่านั้นที่ปิดช่องว่างนั้น
+- **"`tester.pump()` ครั้งเดียวพอแล้วหลัง interaction ใดก็ตาม"** พิสูจน์แล้วด้านบนว่าไม่จริง: สำหรับ widget ที่กำลัง animate `pump()` ครั้งเดียวเดินหน้าแค่เฟรมเดียวจริง ๆ — พิสูจน์ด้วยค่า opacity จริงที่ยังต่ำกว่า `1.0` ที่จุดครึ่งทาง
+- **"`any()` ใน mocktail ใช้ได้กับทุก type โดยไม่ต้อง setup"** พิสูจน์แล้วด้านบนว่าไม่จริง ด้วย `StateError` จริงที่ไม่แก้ไข — custom type (ที่ไม่ใช่ primitive) ต้องการ `registerFallbackValue` ก่อน ไม่งั้น `any()` throw ทันที
+- **"harness ของคอร์สนี้รัน golden test ได้เหมือนอย่างอื่น"** พิสูจน์แล้วด้านบนว่าไม่จริง: มันทำไม่ได้จริง ๆ (ไม่มี binary asset support ใน fence collector) — ยืนยันอย่างตรงไปตรงมาใน scratch แทนที่จะอ้างลอย ๆ
 
 export const quizTesting = [
   {
     q: 'widget test คืออะไร?',
     options: [
-      'test ที่รันทั้งแอปบน device จริง',
-      'test ที่ pump widget เข้า harness ใน memory แล้วโต้ตอบกับ widget นั้น — เร็ว ไม่ต้องมี device',
+      'test ที่รันแอปทั้งตัวบนอุปกรณ์จริง',
+      'test ที่ pump widget เข้า harness ในหน่วยความจำแล้วโต้ตอบกับมัน — เร็ว ไม่มีอุปกรณ์',
       'การเทียบ pixel snapshot',
-      'test logic Dart ล้วน ๆ ไม่มี UI',
+      'test logic Dart บริสุทธิ์ที่ไม่มี UI',
     ],
     answer: 1,
   },
   {
-    q: 'ใน widget test `pump` ทำอะไรหลังการโต้ตอบ?',
+    q: 'พิสูจน์แล้วด้านบนด้วย animation จริง ความต่างที่แท้จริงระหว่าง pump() กับ pumpAndSettle() คืออะไร?',
     options: [
-      'ลบ widget',
-      'เดินหน้า frame เพื่อให้ rebuild (เช่นหลัง setState) มีผล',
-      'ถ่าย screenshot',
-      'เริ่ม emulator',
+      'ใช้แทนกันได้',
+      'pump() เดินหน้าเฟรมเดียวเป๊ะ ๆ (หรือ duration ที่กำหนด) — พิสูจน์แล้วด้านบนว่า animation ที่กำลังรันยังอยู่กลางทางจริง ๆ หลังจากนั้น; pumpAndSettle() pump ซ้ำ ๆ จนไม่มีเฟรมเหลือ schedule',
+      'pumpAndSettle() ก็แค่ pump() ที่เร็วกว่า',
+      'pump() ใช้ได้แค่กับ StatelessWidget เท่านั้น',
     ],
     answer: 1,
+    explain: 'test แบบ pump เดียวแสดงค่า opacity จริงที่ต่ำกว่า 1.0 ที่จุดครึ่งทางของ animation; test pumpAndSettle() แสดง opacity สุดท้ายที่เท่ากับ 1.0 เป๊ะ',
   },
   {
-    q: 'ทำไมควรเก็บ business logic ออกจาก widget?',
+    q: 'พิสูจน์แล้วแบบ end-to-end ด้วย mocktail ด้านบน verify(() => mock.method(args)).called(1) ยืนยันอะไรที่ assertion บน UI ธรรมดาไม่ยืนยัน?',
     options: [
-      'Dart บังคับ',
-      'เพื่อให้ cover ด้วย unit test ที่เร็วและง่าย แทน widget test ที่ช้ากว่า',
-      'เพื่อลดขนาดแอป',
-      'widget เก็บ logic ไม่ได้',
+      'ว่า widget render โดยไม่ throw',
+      'ว่า collaborator ที่ mock ไว้ถูกเรียกจริง ๆ ด้วย argument ที่คาดหวังเป๊ะ เป็นจำนวนครั้งที่ถูกต้องเป๊ะ — ไม่ขึ้นกับว่า UI บังเอิญ render ถูกต้องด้วยเหตุผลที่ไม่เกี่ยวข้อง',
+      'ว่าแอป compile ผ่าน',
+      'ว่า widget เป็น const',
     ],
     answer: 1,
+    explain: 'ตัวอย่าง SpotTheBug พิสูจน์ว่า assertion แค่ข้อความอย่างเดียวผ่านได้แม้ onPressed ของปุ่มจะขาดการเชื่อมโยงกับ service ที่ mock ไว้โดยสิ้นเชิง — verify() คือสิ่งที่ปิดช่องว่างนั้นจริง ๆ',
   },
   {
-    q: 'golden test จับอะไร?',
+    q: 'พิสูจน์แล้วด้านบนด้วยข้อความ error จริงที่ไม่แก้ไข registerFallbackValue ป้องกันอะไรจริง ๆ?',
     options: [
-      'logic error',
-      'visual/pixel regression โดยเทียบ output ที่ render กับ reference image',
-      'network failure',
-      'memory leak',
+      'compile error',
+      'StateError จริงที่ throw โดย any()/captureAny() สำหรับ argument type แบบ custom (ที่ไม่ใช่ primitive) เพราะ mocktail ต้องการ instance ที่ไม่ใช่ null จริงส่งกลับ และสร้างเองไม่ได้',
+      'widget test ที่ timeout',
+      'ไม่มีผลจริง — เป็นแค่ boilerplate ที่ไม่จำเป็น',
     ],
     answer: 1,
+    explain: 'error จริงที่จับได้ระบุ type ที่แน่ชัด (AnalyticsEvent) และอธิบายเหตุผล: sound null safety ของ Dart หมายความว่า any() ต้องคืน instance ที่ไม่ใช่ null จริงข้างใน',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบนด้วยสาม test run ที่รายงานแยกกันจริง testWidgets(..., variant:) ทำอะไร?',
+    options: [
+      'มัน skip test บน platform ที่ไม่รองรับ',
+      'มันรัน test body เดียวกันครั้งละหนึ่งค่าใน variant รายงานแต่ละ run แยกกัน (เช่น "variant: en", "variant: th", "variant: ja")',
+      'มันมีผลแค่กับ golden test เท่านั้น',
+      'ต้องการอุปกรณ์จริง',
+    ],
+    answer: 1,
+    explain: 'การเรียก testWidgets เดียวพร้อม variant: localeVariant สร้างผล test จริงสามอันที่รายงานแยกกัน อันละหนึ่งค่า locale',
+  },
+  {
+    q: 'พิสูจน์แล้วด้านบนด้วย output lcov.info จริง บรรทัดอย่าง DA:9,0 หมายความว่าอะไร และ harness ของคอร์สนี้สร้างมันได้ไหม?',
+    options: [
+      'บรรทัด 9 มีบั๊ก 0 ตัว — และใช่ harness รัน --coverage โดย default',
+      'บรรทัด 9 ถูก execute 0 ครั้งโดย test ไหนก็ตาม (ไม่มี coverage จริง ๆ) — และไม่ สิ่งนี้ถูกจับใน scratch เพราะ harness ของคอร์สนี้ไม่รัน flutter test ด้วย --coverage',
+      'บรรทัด 9 ไม่มีอยู่ในไฟล์',
+      'บรรทัด DA ปรากฏแค่กับ widget test เท่านั้น ไม่ใช่ unit test',
+    ],
+    answer: 1,
+    explain: 'บรรทัดของฟังก์ชัน neverCalled ที่ไม่มี coverage แสดง DA:9,0 (ศูนย์ hit) ในขณะที่ทุกบรรทัดที่ test จริง ๆ เรียกใช้แสดง count ที่ไม่ใช่ศูนย์ — LF:5/LH:4 คือ 80% จริงที่คำนวณได้สำหรับไฟล์เดียวนั้น',
   },
 ];
 

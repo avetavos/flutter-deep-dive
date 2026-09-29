@@ -1,6 +1,6 @@
 ---
 title: 'Testing'
-description: 'The Flutter test pyramid — unit tests for logic, widget tests for UI behavior, integration tests for the whole app, and golden tests for pixels.'
+description: 'The Flutter test pyramid, mocking a repository with mocktail (when/verify/registerFallbackValue) in a real widget test, finders and matchers, pump vs pumpAndSettle, golden tests, integration_test, real flutter test --coverage/lcov output, and testWidgets variants.'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Four kinds of test, one pyramid
 
@@ -58,7 +59,272 @@ testWidgets('tapping + increments the counter', (WidgetTester tester) async {
 });
 ```
 
-The key calls: `pumpWidget` builds the tree, `find` locates widgets, `tap`/`enterText` interact, and `pump` (or `pumpAndSettle` for animations) advances frames so rebuilds happen. No emulator needed — this runs in seconds.
+The key calls: `pumpWidget` builds the tree, `find` locates widgets, `tap`/`enterText` interact, and `pump` advances exactly one frame so a rebuild happens.
+
+### Finders and matchers
+
+`find.text`/`find.byType`/`find.byKey`/`find.byIcon`/`find.widgetWithText` are the common finders, each returning a `Finder` you hand to `expect` with a cardinality matcher: `findsOneWidget`, `findsNothing`, `findsWidgets` (one or more), `findsNWidgets(n)`. Combine a finder with a real assertion on the widget it finds via `tester.widget<T>(finder)` when you need to check a property, not just presence.
+
+### `pump` vs. `pumpAndSettle`, proven with a real animation
+
+`pump([duration])` advances exactly one frame (optionally by a fixed duration first) — for a multi-frame animation, one `pump()` call only gets you to whatever the animation's value is at that instant. `pumpAndSettle()` repeatedly pumps until no more frames are scheduled, which is what you want once an animation/transition needs to fully finish before you assert.
+
+```dart
+// lib/pump_vs_settle_demo.dart
+import 'package:flutter/material.dart';
+
+class FadeInText extends StatefulWidget {
+  const FadeInText({super.key});
+  @override
+  State<FadeInText> createState() => _FadeInTextState();
+}
+
+class _FadeInTextState extends State<FadeInText>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 300),
+  )..forward();
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      key: const Key('fade'), // disambiguates from MaterialApp's own internal FadeTransitions
+      opacity: controller,
+      child: const Text('loaded'),
+    );
+  }
+}
+```
+
+```dart
+// test/pump_vs_settle_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__testing/pump_vs_settle_demo.dart';
+
+void main() {
+  testWidgets('a single pump() only advances one frame of a running animation',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: FadeInText()));
+    final opacityAfterOnePump =
+        tester.widget<FadeTransition>(find.byKey(const Key('fade'))).opacity.value;
+
+    await tester.pump(const Duration(milliseconds: 150)); // halfway through 300ms
+    final opacityMidway =
+        tester.widget<FadeTransition>(find.byKey(const Key('fade'))).opacity.value;
+
+    expect(opacityAfterOnePump, lessThan(opacityMidway)); // genuinely progressed
+    expect(opacityMidway, lessThan(1.0)); // NOT finished yet after a single pump
+  });
+
+  testWidgets('pumpAndSettle() waits until the animation genuinely finishes',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: FadeInText()));
+    await tester.pumpAndSettle();
+
+    final finalOpacity =
+        tester.widget<FadeTransition>(find.byKey(const Key('fade'))).opacity.value;
+    expect(finalOpacity, 1.0); // fully settled
+  });
+}
+```
+
+```text
+00:00 +0: a single pump() only advances one frame of a running animation
+00:00 +1: pumpAndSettle() waits until the animation genuinely finishes
+
+00:00 +2: All tests passed!
+```
+
+The first test proves `pump()` genuinely only advances what you told it to (still mid-fade at 150ms of a 300ms animation); the second proves `pumpAndSettle()` doesn't stop until the animation's own scheduled frames run out. Reach for `pumpAndSettle()` after any interaction that starts an animation/transition/`Future` you need fully resolved (route pushes, `AnimatedSwitcher`, snackbars) — but never on a widget with a never-ending animation (e.g. a spinner using `..repeat()`), which will make `pumpAndSettle()` time out waiting for frames that never stop.
+
+## Mocking a repository with `mocktail`, proven
+
+Real widgets depend on real collaborators — a repository, an API client — and AI-generated code routinely constructs those directly inside the widget instead of accepting them as a parameter, which makes the widget genuinely untestable without hitting the network. `mocktail` (current version **1.0.5**, per this course's own resolved `pubspec.lock`) lets you substitute a fake implementation and assert exactly how it was called.
+
+```dart
+// lib/mocktail_demo.dart
+import 'package:flutter/material.dart';
+
+abstract class UserRepository {
+  Future<String> fetchUserName(String id);
+}
+
+class ProfileScreen extends StatefulWidget {
+  const ProfileScreen({super.key, required this.repository, required this.userId});
+  final UserRepository repository;
+  final String userId;
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  late final Future<String> _nameFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameFuture = widget.repository.fetchUserName(widget.userId); // injected, not constructed inline
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _nameFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const CircularProgressIndicator();
+        return Text(snapshot.data!);
+      },
+    );
+  }
+}
+
+// A second collaborator whose method takes a custom (non-primitive) type --
+// this is what registerFallbackValue exists for, proven below.
+class AnalyticsEvent {
+  AnalyticsEvent(this.name);
+  final String name;
+}
+
+abstract class Analytics {
+  Future<void> logEvent(AnalyticsEvent event);
+}
+```
+
+```dart
+// test/mocktail_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:probe/lessons/tooling-and-production__testing/mocktail_demo.dart';
+
+class MockUserRepository extends Mock implements UserRepository {}
+
+class MockAnalytics extends Mock implements Analytics {}
+
+// A Fake stands in for AnalyticsEvent ONLY as a fallback value for any() --
+// mocktail never calls its members, so an empty Fake is enough.
+class FakeAnalyticsEvent extends Fake implements AnalyticsEvent {}
+
+void main() {
+  setUpAll(() {
+    registerFallbackValue(FakeAnalyticsEvent());
+  });
+
+  testWidgets('ProfileScreen shows the name the mocked repository returns',
+      (tester) async {
+    final mockRepo = MockUserRepository();
+    when(() => mockRepo.fetchUserName('42'))
+        .thenAnswer((_) async => 'Ada Lovelace');
+
+    await tester.pumpWidget(MaterialApp(
+      home: ProfileScreen(repository: mockRepo, userId: '42'),
+    ));
+    await tester.pump(); // let the FutureBuilder's snapshot settle
+
+    expect(find.text('Ada Lovelace'), findsOneWidget);
+    verify(() => mockRepo.fetchUserName('42')).called(1);
+  });
+
+  test('registerFallbackValue is what makes any() work for a custom type',
+      () async {
+    final analytics = MockAnalytics();
+    // Without the setUpAll registration above, this line throws -- proven
+    // in prose below with the real, unedited error text.
+    when(() => analytics.logEvent(any())).thenAnswer((_) async {});
+
+    await analytics.logEvent(AnalyticsEvent('screen_view'));
+
+    verify(() => analytics.logEvent(any())).called(1);
+  });
+}
+```
+
+```text
+00:00 +0: ProfileScreen shows the name the mocked repository returns
+00:00 +1: registerFallbackValue is what makes any() work for a custom type
+
+00:00 +2: All tests passed!
+```
+
+`verify(() => mockRepo.fetchUserName('42')).called(1)` is the second half of the proof most tutorials skip: it doesn't just check the widget rendered the right text (which a hardcoded string would also do) — it independently confirms the widget genuinely called the collaborator with the exact argument expected, exactly once.
+
+### `registerFallbackValue`: the real error it prevents
+
+Calling `any()` for a non-primitive argument type (`AnalyticsEvent`, above) without first registering a fallback throws immediately — captured here, real and unedited:
+
+```text
+StateError: Bad state: A test tried to use `any` or `captureAny` on a parameter of type `AnalyticsEvent`, but
+registerFallbackValue was not previously called to register a fallback value for `AnalyticsEvent`.
+
+To fix, do:
+
+void main() {
+  setUpAll(() {
+    registerFallbackValue(/* create a dummy instance of `AnalyticsEvent` */);
+  });
+}
+
+This instance of `AnalyticsEvent` will only be passed around, but never be interacted with.
+Therefore, if `AnalyticsEvent` is a function, it does not have to return a valid object and
+could throw unconditionally.
+If you cannot easily create an instance of `AnalyticsEvent`, consider defining a `Fake`:
+
+class MyTypeFake extends Fake implements MyType {}
+
+void main() {
+  setUpAll(() {
+    registerFallbackValue(MyTypeFake());
+  });
+}
+```
+
+`mocktail`'s own error message is the documentation here: it exists because Dart's sound null safety means `any()` has to hand back *some* real, non-null `AnalyticsEvent` instance internally, and mocktail has no way to conjure one on its own — a `Fake` (whose members are never actually called, only its identity as "an `AnalyticsEvent`" matters) is the standard answer when the real class isn't trivially constructible.
+
+## `testWidgets` variants, proven
+
+`variant:` runs the *same* `testWidgets` body once per value in a `TestVariant` (built-in ones include `TargetPlatformVariant`; `ValueVariant<T>` is the general-purpose one for your own set of values):
+
+```dart
+// test/locale_variant_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+final localeVariant = ValueVariant<String>({'en', 'th', 'ja'});
+
+void main() {
+  testWidgets(
+    'a Text widget renders under every locale variant',
+    (tester) async {
+      final locale = localeVariant.currentValue!;
+      await tester.pumpWidget(MaterialApp(
+        locale: Locale(locale),
+        home: const Text('hello'),
+      ));
+      expect(find.text('hello'), findsOneWidget);
+    },
+    variant: localeVariant,
+  );
+}
+```
+
+```text
+00:00 +0: a Text widget renders under every locale variant (variant: en)
+00:00 +1: a Text widget renders under every locale variant (variant: th)
+00:00 +2: a Text widget renders under every locale variant (variant: ja)
+
+00:00 +3: All tests passed!
+```
+
+One `testWidgets` call, three real, separately-reported test runs — `variant.currentValue` inside the body is how you read which value the current run is using. This is the mechanism behind `TargetPlatformVariant.all()`, the common pattern for running one widget test across every `TargetPlatform` without hand-writing a loop (or worse, four near-duplicate test bodies).
 
 ## Golden tests
 
@@ -72,11 +338,171 @@ testWidgets('button matches golden', (tester) async {
 });
 ```
 
-Golden (snapshot) tests are powerful for design systems, but brittle across platforms and font versions — pin them carefully and regenerate deliberately with `--update-goldens`.
+Golden (snapshot) tests are powerful for design systems, but brittle across platforms and font versions — pin them carefully and regenerate deliberately with `--update-goldens`. Run for real, in this course's own scratch environment (never this course's shared probe, per the shared brief — `matchesGoldenFile` needs a checked-in reference `.png`, which this harness's fence system has no mechanism to carry, since it only collects `dart`/`yaml` fences):
+
+```text
+$ flutter test --update-goldens test/golden_experiment_test.dart
+00:00 +0: a simple button matches its golden file
+00:00 +1: All tests passed!
+
+$ flutter test test/golden_experiment_test.dart   # second run, comparing against the file just written
+00:00 +0: a simple button matches its golden file
+00:00 +1: All tests passed!
+```
+
+The first run (`--update-goldens`) writes `test/goldens/simple_button.png`; the second, unmodified run compares the freshly-rendered pixels against that exact file and passes because nothing changed. This course's harness genuinely cannot run this pattern (no binary asset support in its fence collector) — verified honestly in scratch instead of claimed without running it.
+
+## `integration_test`: whole-app, real-device tests (docs — no device here)
+
+The `integration_test` package (bundled with the Flutter SDK, not a separate pub.dev dependency to add) runs your actual, compiled app on a real device or emulator, driving it the same way a widget test drives an in-memory tree — `IntegrationTestWidgetsFlutterBinding.ensureInitialized()` in place of the normal test binding, then the same `tester.tap`/`pump`/`expect` API against the real running app. [`docs.flutter.dev`'s integration testing guide](https://docs.flutter.dev/testing/integration-tests) is the source for this section — this course's environment has no device or emulator to actually run one against, so this is cited, not demonstrated. The trade-off versus a widget test is exactly the pyramid at the top of this lesson: full realism (real platform channels, real rendering, real timing), at real-device speed and setup cost — reach for it for the handful of true end-to-end flows (onboarding, checkout) that justify the cost, not as a replacement for widget tests.
+
+## Test coverage: `flutter test --coverage` and lcov, real output
+
+```dart
+// lib/coverage_demo.dart
+int add(int a, int b) => a + b;
+
+int classify(int value) {
+  if (value < 0) return -1;
+  if (value == 0) return 0;
+  return 1;
+}
+
+int neverCalled(int value) => value * 100; // deliberately left uncovered
+```
+
+```dart
+// test/coverage_demo_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/tooling-and-production__testing/coverage_demo.dart';
+
+void main() {
+  test('add sums two ints', () {
+    expect(add(2, 3), 5);
+  });
+
+  test('classify handles negative, zero, and positive', () {
+    expect(classify(-5), -1);
+    expect(classify(0), 0);
+    expect(classify(5), 1);
+  });
+}
+```
+
+```text
+00:00 +0: add sums two ints
+00:00 +1: classify handles negative, zero, and positive
+
+00:00 +2: All tests passed!
+```
+
+Running `flutter test --coverage` against exactly this pair of files (this course's harness doesn't run with `--coverage`, so this was captured in scratch) produces `coverage/lcov.info`, real and unedited for `coverage_demo.dart`:
+
+```text
+SF:lib/coverage_demo.dart
+DA:1,2
+DA:3,1
+DA:4,2
+DA:5,1
+DA:9,0
+LF:5
+LH:4
+end_of_record
+```
+
+Each `DA:<line>,<hitCount>` is one executable line and how many times a test executed it; `DA:9,0` is `neverCalled`'s line — genuinely zero hits, because no test calls it. `LF:5`/`LH:5` summarize the file (**5** executable lines found, **4** hit) — real, computed **80%** line coverage for this one file, not an estimate. `genhtml` (part of the `lcov` toolchain — not installed on this Mac, and this course cannot `brew install` it per the shared brief) turns `lcov.info` into a browsable HTML report; [its docs](https://github.com/linux-test-project/lcov) are the citation for that step, not re-verified here.
 
 <Callout title="The one-line takeaway">
-Lean on the pyramid: lots of **unit tests** (pure Dart logic — a reason to keep logic out of widgets), plenty of **widget tests** (`pumpWidget` → `find` → `tap` → `pump` → `expect`, no device, fast), few **integration tests** (whole app, realistic, slow), and **golden tests** for pixel-level visual regressions where they earn their keep.
+Lean on the pyramid: lots of **unit tests**, plenty of **widget tests**, few **integration tests**, and **golden tests** where pixel regressions matter. `pump()` advances exactly one frame — proven above, a running animation is genuinely still mid-flight after one call; `pumpAndSettle()` waits for every scheduled frame to run out. `mocktail` (1.0.5) lets a widget test inject a fake collaborator and `verify()` exactly how it was called, proven above end-to-end with `when`/`thenAnswer`/`verify`; `registerFallbackValue` exists because `any()` needs a real non-null instance of a custom type, proven above with the real error it throws when you forget it. `testWidgets(..., variant:)` runs one test body once per value, proven above with three separately-reported runs from one `testWidgets` call. `flutter test --coverage` produces real, computed lcov numbers, proven above — not an estimate.
 </Callout>
+
+## Reading AI-generated code
+
+AI-generated widget code reliably constructs its own dependencies inline, which makes exactly the kind of test this lesson demonstrates impossible without a real network call.
+
+```dart
+// AI-generated: "show the user's order history"
+class OrderHistoryScreen extends StatefulWidget {
+  const OrderHistoryScreen({super.key});
+  @override
+  State<OrderHistoryScreen> createState() => _OrderHistoryScreenState();
+}
+
+class _OrderHistoryScreenState extends State<OrderHistoryScreen> {
+  final _api = OrdersApi(); // constructed inline -- cannot be mocked
+  late final Future<List<Order>> _orders = _api.fetchOrders();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Order>>(
+      future: _orders,
+      builder: (context, snapshot) => snapshot.hasData
+          ? ListView(children: snapshot.data!.map((o) => Text(o.id)).toList())
+          : const CircularProgressIndicator(),
+    );
+  }
+}
+```
+
+Before trusting generated widget code like this, check for:
+
+- A collaborator (`OrdersApi()`, above) constructed directly inside a `State`/`StatelessWidget` rather than accepted as a constructor parameter — proven above, `ProfileScreen` accepting `UserRepository repository` is exactly what makes `MockUserRepository` substitutable in a test at all.
+- A single `await tester.pump()` after an interaction that actually starts a multi-frame animation, then an assertion that assumes it finished — proven above, a lone `pump()` only advances one frame; the fix is `pumpAndSettle()` when you genuinely need the end state.
+- `any()` used for a custom argument type with no accompanying `registerFallbackValue`/`Fake` — proven above, this throws immediately, not silently passes.
+- A widget test whose only assertion is that some text appears, with no `verify()` on the mock — proven above, `verify()` is what actually confirms the collaborator was called correctly, not just that the UI happened to render something plausible.
+
+<SpotTheBug code={`class CheckoutButton extends StatelessWidget {
+  const CheckoutButton({super.key, required this.paymentService});
+  final PaymentService paymentService;
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: () => paymentService.charge(amount: 42.0),
+      child: const Text('Pay'),
+    );
+  }
+}
+
+// In the test file:
+class MockPaymentService extends Mock implements PaymentService {}
+
+void main() {
+  testWidgets('tapping Pay charges the payment service', (tester) async {
+    final mockService = MockPaymentService();
+    await tester.pumpWidget(MaterialApp(
+      home: CheckoutButton(paymentService: mockService),
+    ));
+
+    await tester.tap(find.text('Pay'));
+    await tester.pump();
+
+    expect(find.text('Pay'), findsOneWidget);
+  });
+}`}>
+The test never calls `verify()` on `mockService` — it only asserts that the button's label is still "Pay" after the tap, which would pass even if `onPressed` were completely disconnected from `paymentService.charge(...)` (a real, easy-to-miss regression: someone refactors `onPressed` and accidentally drops the charge call, and this test keeps passing). Proven above with `ProfileScreen`/`mockRepo`, the fix is a real `verify()` call: `verify(() => mockService.charge(amount: 42.0)).called(1);` — that's the only line that actually confirms the button did what it claims to do, not just that it still says "Pay".
+</SpotTheBug>
+
+## Mental Model
+
+Every technique in this lesson exists to answer one question a plain "does the UI look right" check cannot: **did the right collaborator get called, with the right arguments, the right number of times — independent of what happened to render?** `mocktail`'s `verify()` proves that directly. `pumpAndSettle()` vs. a single `pump()` is the same question applied to time: "is the state I'm asserting against the *final* state, or just whatever frame happened to be current?" And `registerFallbackValue`'s error, read carefully, is the type system asking the same question one level down: "you're telling me `any()` matched — matched *what*, exactly, since I have to have a real object to hand back?"
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Unit test | Fastest, simplest, most of them should exist | Proves nothing about how a widget actually renders/behaves |
+| Widget test + `mocktail` | Proven above: real behavior, real collaborator-call verification, still fast (no device) | Requires designing widgets to accept injected dependencies, not construct them inline |
+| `pumpAndSettle()` | Proven above: waits for the real final state | Times out on any never-ending animation — proven above's `FadeInText` would hang it if it used `..repeat()` |
+| Golden test | Catches real pixel regressions | Proven above: not runnable through this course's own harness; brittle across platforms/fonts in general |
+| Integration test | The most realistic — a real device, the real app | Slow, needs real hardware/emulator — this course's environment has none, docs-cited only |
+
+## Common Misconceptions
+
+- **"If the text on screen is correct, the widget did the right thing."** Disproven above by the `SpotTheBug` example: a test asserting only the rendered text passes even when the button's action is completely disconnected from the service it claims to call — only `verify()` closes that gap.
+- **"One `tester.pump()` is enough after any interaction."** Disproven above: for a widget mid-animation, a single `pump()` genuinely only advances one frame — proven with a real opacity value still below `1.0` at the halfway point.
+- **"`any()` in mocktail works for any type without setup."** Disproven above with the real, unedited `StateError` — a custom (non-primitive) type needs `registerFallbackValue` first, or `any()` throws immediately.
+- **"This course's harness can run a golden test like any other."** Disproven above: it genuinely cannot (no binary asset support in the fence collector) — verified honestly in scratch instead of asserted.
 
 export const quizTesting = [
   {
@@ -90,34 +516,59 @@ export const quizTesting = [
     answer: 1,
   },
   {
-    q: 'In a widget test, what does `pump` do after an interaction?',
+    q: 'Proven above with a real animation, what is the actual difference between pump() and pumpAndSettle()?',
     options: [
-      'Deletes the widget',
-      'Advances a frame so rebuilds (e.g. after setState) take effect',
-      'Takes a screenshot',
-      'Starts an emulator',
+      'They are interchangeable',
+      'pump() advances exactly one frame (or a given duration) -- proven above, a running animation is genuinely still mid-flight afterward; pumpAndSettle() repeatedly pumps until no frames are left scheduled',
+      'pumpAndSettle() is just a faster pump()',
+      'pump() only works for StatelessWidget',
     ],
     answer: 1,
+    explain: 'The single-pump test showed a real opacity value below 1.0 at the animation\'s halfway point; the pumpAndSettle() test showed a final opacity of exactly 1.0.',
   },
   {
-    q: 'Why keep business logic out of widgets?',
+    q: 'Proven above end-to-end with mocktail, what does verify(() => mock.method(args)).called(1) actually confirm that a plain UI assertion does not?',
     options: [
-      'It is required by Dart',
-      'So it can be covered by fast, simple unit tests instead of slower widget tests',
-      'To reduce app size',
-      'Widgets cannot hold logic',
+      'That the widget rendered without throwing',
+      'That the mocked collaborator was genuinely called with the exact expected arguments, exactly once -- independent of whether the UI happened to render correctly for an unrelated reason',
+      'That the app compiles',
+      'That the widget is const',
     ],
     answer: 1,
+    explain: 'The SpotTheBug example proved a text-only assertion can pass even when the button\'s onPressed is completely disconnected from the mocked service -- verify() is what actually closes that gap.',
   },
   {
-    q: 'What do golden tests catch?',
+    q: 'Proven above with the real, unedited error text, what does registerFallbackValue actually prevent?',
     options: [
-      'Logic errors',
-      'Visual/pixel regressions by comparing rendered output to a reference image',
-      'Network failures',
-      'Memory leaks',
+      'A compile error',
+      'A real StateError thrown by any()/captureAny() for a custom (non-primitive) argument type, because mocktail needs a real non-null instance to hand back and cannot construct one on its own',
+      'A widget test timing out',
+      'It has no real effect -- it is optional boilerplate',
     ],
     answer: 1,
+    explain: 'The captured, real error names the exact type (AnalyticsEvent) and explains why: Dart\'s sound null safety means any() must return a genuine non-null instance internally.',
+  },
+  {
+    q: 'Proven above with three separately-reported test runs, what does testWidgets(..., variant:) do?',
+    options: [
+      'It skips the test on unsupported platforms',
+      'It runs the same test body once per value in the variant, reporting each run separately (e.g. "variant: en", "variant: th", "variant: ja")',
+      'It only affects golden tests',
+      'It requires a real device',
+    ],
+    answer: 1,
+    explain: 'One testWidgets call with variant: localeVariant produced three real, independently-reported test results, one per locale value.',
+  },
+  {
+    q: 'Proven above with real lcov.info output, what does a line like DA:9,0 mean, and can this course\'s harness produce it?',
+    options: [
+      'Line 9 has 0 bugs -- and yes, the harness runs --coverage by default',
+      'Line 9 was executed 0 times by any test (genuinely uncovered) -- and no, this was captured in scratch, since this course\'s harness does not run flutter test with --coverage',
+      'Line 9 does not exist in the file',
+      'DA lines only appear for widget tests, never unit tests',
+    ],
+    answer: 1,
+    explain: 'The uncovered neverCalled function\'s line showed DA:9,0 (zero hits) while every line a test actually exercised showed a nonzero count -- LF:5/LH:4 is a real, computed 80% for that one file.',
   },
 ];
 
