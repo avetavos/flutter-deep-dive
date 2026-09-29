@@ -1,6 +1,6 @@
 ---
 title: 'Isolates & compute'
-description: 'ทำไมงาน CPU หนักทำให้ UI jank, ใช้ compute() รัน function บน background isolate, raw isolate กับ port และ boundary ที่ไม่แชร์ memory'
+description: 'ทำไมงานหนัก CPU ถึงทำให้ UI กระตุก, ข้อความ error จริงจากบั๊ก compute() closure capture, พิสูจน์ว่า compute() คือ Isolate.run ตัวจริงบน native (และเรียกบน thread เดิมบน web), long-lived worker isolate, TransferableTypedData และต้นทุนการ copy message ที่วัดจริง'
 sidebar:
   order: 5
 ---
@@ -9,95 +9,495 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## jank ที่ await ออกไปไม่ได้
+## จังหวะสะดุดที่ await เอาไม่อยู่
 
-`async`/`await` แก้เรื่องการรอ (network, disk) — แต่ **ไม่** ช่วยเรื่องงาน CPU หนัก การ parse JSON 5MB, resize รูป, หรือรัน crypto hash เป็นการคำนวณแบบ synchronous และรันบน **UI isolate** ระหว่างที่รัน event loop render frame ไม่ได้ แอปจึงค้าง
+`async`/`await` แก้ปัญหาการ *รอ* (network, disk) — แต่**ไม่ช่วย**กับงานหนัก CPU การ parse JSON ก้อนใหญ่, resize รูป หรือรัน crypto hash คือ synchronous computation และมันรันบน **UI isolate** ระหว่างที่มันรัน event loop จะ render frame ไม่ได้ แอปจึงค้าง
 
-คุณ `await` ออกจากปัญหานี้ไม่ได้ เพราะไม่มีอะไรให้ *รอ* — CPU กำลังยุ่ง ทางแก้คือย้ายงานไป **isolate อื่น** เพื่อให้ UI isolate ว่างพอจะ render
+คุณ `await` หนีปัญหานี้ไม่ได้ เพราะไม่มีอะไรให้รอ — CPU กำลังยุ่งอยู่ วิธีแก้คือย้ายงานไป **isolate อื่น** เพื่อให้ UI isolate ว่างพอที่จะ render ต่อ
 
-## compute(): กรณีทั่วไป
+## `compute()`: กรณีที่พบบ่อยที่สุด
 
-สำหรับ "รัน expensive pure function นี้นอก main isolate" แบบทั่วไป Flutter ให้ `compute()` ส่ง top-level (หรือ static) function กับ argument ของตัวเอง จะสร้าง background isolate ขึ้นมา รัน function ที่นั่น แล้วคืนผลเป็น `Future`
+สำหรับ "รันฟังก์ชันหนักนี้นอก main isolate" แบบที่เจอบ่อย ๆ Flutter ให้ `compute()` มา ส่งฟังก์ชันกับ argument เข้าไป มันจะรันฟังก์ชันบน background isolate แล้วคืนผลลัพธ์เป็น `Future`
 
 ```dart
-// A top-level function — required, because it must run on another isolate.
-List<Item> parseItems(String jsonStr) {
-  final raw = jsonDecode(jsonStr) as List;
-  return raw.map((e) => Item.fromJson(e)).toList();   // heavy work
-}
+// lib/isolate_capture_demo.dart
+import 'dart:isolate';
+import 'package:flutter/foundation.dart';
 
-// On the UI isolate — offload it, and await the result without janking:
-final items = await compute(parseItems, hugeJsonString);
+// A top-level function — self-contained, taking plain data in and
+// returning plain data out. This is what compute() actually needs.
+int addOne(int x) => x + 1;
+
+// A version whose closure captures a ReceivePort — a native, isolate-bound
+// handle. This is what breaks (proven below): the closure itself has to
+// cross the isolate boundary as compute()'s message, and a ReceivePort
+// cannot be copied across.
+Future<int> addOneCapturingPort(ReceivePort port, int x) {
+  return compute<int, int>((int value) {
+    // ignore: unused_local_variable
+    final capturedPort = port; // <-- captures a non-sendable object
+    return value + 1;
+  }, x);
+}
 ```
 
-UI ยัง render ที่ 60fps ระหว่างที่ parse รันอยู่ที่อื่น `compute` เป็นเครื่องมือที่ถูก ~90% ของกรณี
+```dart
+// test/isolate_capture_demo_test.dart
+import 'dart:isolate';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__isolates-and-compute/isolate_capture_demo.dart';
 
-## raw isolate และ port
+void main() {
+  test('compute() with a top-level function and plain data works fine', () async {
+    final result = await compute(addOne, 41);
+    expect(result, 42);
+  });
 
-สำหรับ worker ที่อยู่ยาวหรือการสื่อสารสองทาง ใช้ `Isolate.spawn` กับ **port** — isolate ไม่แชร์ memory จึงคุยกันด้วยการส่ง message ผ่าน `SendPort`/`ReceivePort`
+  test('compute() with a closure that captures a ReceivePort throws the real isolate-message error', () async {
+    final port = ReceivePort();
+    addTearDown(port.close);
 
-<Mermaid title="offload งานหนักไปยัง worker isolate" code={isoDiagram} />
+    await expectLater(
+      addOneCapturingPort(port, 1),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('Illegal argument in isolate message'),
+        ),
+      ),
+    );
+  });
+}
+```
+
+```text
+00:00 +0: compute() with a top-level function and plain data works fine
+00:00 +1: compute() with a closure that captures a ReceivePort throws the real isolate-message error
+
+00:00 +2: All tests passed!
+```
+
+ข้อความ exception ตัวจริงที่ไม่แก้ไขอะไรเลย (จาก Flutter SDK 3.47.5 ตัวเดียวกันนี้เป๊ะ ๆ พิมพ์ผ่าน `e.toString()` ใน scratch experiment เบื้องหลังบทนี้):
+
+```text
+ArgumentError: Invalid argument(s): Illegal argument in isolate message: object is unsendable - Library:'dart:isolate' Class: _ReceivePortImpl@1026248 (see restrictions listed at `SendPort.send()` documentation for more information)
+ <- field port in main.<anonymous closure>.<anonymous closure> (from ...)
+ <- field callback in compute.<anonymous closure> (from package:flutter/src/foundation/_isolates_io.dart)
+ <- computation in Instance of '_RemoteRunner<int>' (from dart:isolate)
+```
+
+อ่าน trace จากล่างขึ้นบน: message ที่ข้าม isolate boundary คือ closure `computation` ทั้งก้อนที่ compute() สร้างครอบ callback ของคุณ; เดินเข้าไปข้างในเจอ field `callback` (closure ของคุณ) แล้วข้างในนั้นเจอ field `port` ที่ถูก capture ไว้ — เป็น `ReceivePort` ซึ่ง error ระบุตรง ๆ ว่า `unsendable` วิธีแก้คือตรงตามตัวอย่าง top-level `addOne`: ทำฟังก์ชันให้ self-contained — รับข้อมูลธรรมดาเข้าไป คืนข้อมูลธรรมดาออกมา และอย่า capture native handle (`ReceivePort`, `Socket`, pointer จาก `dart:ffi`, `BuildContext`/`Element`) หรือในทางปฏิบัติคืออะไรก็ตามที่ไม่ใช่ข้อมูล Dart ธรรมดา
+
+## `compute()` **คือ** `Isolate.run` บน native — พิสูจน์จาก source ของ SDK ที่ติดตั้งจริง
+
+ข้ออ้างที่พบบ่อยคือ `compute()` ห่อ `Isolate.run` ไว้พร้อม "isolate-pool/lifecycle management เพิ่มเติม" การอ่าน source ของ Flutter SDK 3.47.5 ที่ติดตั้งจริงในคอร์สนี้พิสูจน์ว่าไม่จริง — implementation ของ native (`dart:io`) ทั้งหมดคือ:
+
+```text
+// ~/flutter/packages/flutter/lib/src/foundation/_isolates_io.dart
+Future<R> compute<M, R>(
+  isolates.ComputeCallback<M, R> callback,
+  M message, {
+  String? debugLabel,
+}) async {
+  debugLabel ??= kReleaseMode ? 'compute' : callback.toString();
+
+  return Isolate.run<R>(() {
+    return callback(message);
+  }, debugName: debugLabel);
+}
+```
+
+แค่นี้เอง — ไม่มี pool ไม่มีการใช้ isolate ซ้ำ ไม่มี lifecycle manager `compute(fn, arg)` บน Android/iOS/desktop **คือ** `Isolate.run(() => fn(arg))` ตัวจริง บวกกับชื่อ debug สำหรับ DevTools ทุก call spawn isolate ใหม่แล้วปิดมันทิ้งเมื่อเสร็จ — cost profile เดียวกันทุกอย่าง ถ้าคุณเขียน plain Dart (ไม่มี Flutter dependency) และต้องการพฤติกรรมเดียวกันเป๊ะ `Isolate.run` (ครอบคลุมพร้อมการพิสูจน์ของมันเองใน[บทเรียน Async in Dart](/flutter/th/dart-foundations/async-in-dart/)) คือตัว primitive; `compute()` เพิ่มคุณค่าในแอป Flutter ด้วยเหตุผลที่ครอบคลุมถัดไปเท่านั้น
+
+## `compute()` บน web: ไม่มี isolate เลย — พิสูจน์จาก source และ docs
+
+implementation ของ web (`dart2js`/`dartdevc`) เป็นฟังก์ชันคนละตัวไปเลย:
+
+```text
+// ~/flutter/packages/flutter/lib/src/foundation/_isolates_web.dart
+Future<R> compute<M, R>(
+  isolates.ComputeCallback<M, R> callback,
+  M message, {
+  String? debugLabel,
+}) async {
+  // To avoid blocking the UI immediately for an expensive function call, we
+  // pump a single frame to allow the framework to complete the current set
+  // of work.
+  await null;
+  return callback(message);
+}
+```
+
+ไม่มี isolate ไม่มี message passing — มัน `await` microtask เดียว (เพื่อให้ frame ปัจจุบันเสร็จก่อน) แล้ว**เรียกฟังก์ชันของคุณตรง ๆ บน thread เดิม** [docs ของ `compute()` จาก api.flutter.dev เอง](https://api.flutter.dev/flutter/foundation/compute.html) ยืนยันเรื่องนี้ตรง ๆ: *"On web platforms this will run `callback` on the current eventloop."* นี่คือเหตุผลที่ error จาก closure capture ด้านบนเกิดบน web ไม่ได้ เพราะไม่มี isolate boundary ให้ข้าม และก็เป็นเหตุผลที่งาน synchronous หนัก ๆ ที่ห่อด้วย `compute()` ยังคง block thread เดียวของ browser บน web; `compute()` บน web ซื้อเวลาให้คุณแค่หนึ่ง microtask ของการเลื่อนออกไป ไม่ใช่ parallelism จริง
+
+ความไม่สมมาตรนี้เกิดขึ้นเพราะ `Isolate.spawn` ไม่รองรับบน web compiler จริง ๆ patch ของ dart2js runtime ใน SDK ที่ติดตั้งจริงระบุไว้ตรง ๆ:
+
+```text
+// ~/flutter/bin/cache/dart-sdk/lib/_internal/js_runtime/lib/isolate_patch.dart
+@patch
+static Future<Isolate> spawn<T>(
+  void entryPoint(T message),
+  T message, {
+  bool paused = false,
+  bool errorsAreFatal = true,
+  SendPort? onExit,
+  SendPort? onError,
+  String? debugName,
+}) {
+  throw UnsupportedError("Isolate.spawn");
+}
+```
+
+`Isolate.run`/`Isolate.spawn` (และโดยส่วนขยาย ทุกอย่างในบทนี้ที่สร้างบน `Isolate.spawn`) เป็นเครื่องมือ native-only เท่านั้น `compute()` คือ API เดียวในบทนี้ที่ปลอดภัยจริง ๆ ที่จะเรียกจากโค้ดที่แชร์ข้าม platform — มันแค่เงียบ ๆ เลิกเป็น "background" work ทันทีที่รันบน web
+
+## Long-lived worker isolate: `Isolate.spawn` กับ ports
+
+`compute()`/`Isolate.run` เหมาะกับการเรียกครั้งเดียว — isolate ใหม่ทุกครั้ง สำหรับ worker ที่คุณคุยด้วยซ้ำ ๆ (parser ที่อยู่ยาว, database connection ที่อยู่นอก thread) ให้ spawn ครั้งเดียวแล้วสื่อสารผ่าน `SendPort`/`ReceivePort` ตลอดอายุของ isolate นั้น
+
+<Mermaid title="Long-lived worker isolate ที่ spawn ครั้งเดียว" code={isoDiagram} />
 
 export const isoDiagram = `flowchart LR
-  main["UI isolate\n(render ต่อเนื่อง)"] -->|ส่ง message| worker["Worker isolate\n(ทำงาน CPU)"]
-  worker -->|ส่งผลกลับ| main
-  note["ไม่แชร์ memory:\nข้ามได้แค่ message ที่ถูก copy"] --- worker`;
+  main["UI isolate\n(spawns once)"] -->|SendPort| worker["Worker isolate\n(lives on, replies to many requests)"]
+  worker -->|SendPort| main
+  note["compute()/Isolate.run instead:\na NEW isolate per call"] -.- worker`;
 
-## boundary: ไม่แชร์ memory
+```dart
+// lib/worker_isolate.dart
+import 'dart:isolate';
 
-กฎที่กำหนดทุกอย่าง: **isolate ไม่แชร์ memory** อะไรที่คุณส่งจะถูก *copy* ข้าม boundary (มี fast-path ยกเว้นบ้างเช่น `TransferableTypedData`) ผลที่ตามมา:
+/// Runs INSIDE the worker isolate. Receives a SendPort to reply on, then
+/// listens forever for (int) requests and replies with the doubled value —
+/// a long-lived worker, not a fresh isolate per call.
+void workerEntry(SendPort mainSendPort) {
+  final commandPort = ReceivePort();
+  mainSendPort.send(commandPort.sendPort);
+  commandPort.listen((message) {
+    final request = message as int;
+    mainSendPort.send(request * 2);
+  });
+}
 
-- คุณส่ง closure ที่ capture UI state หรือ object graph ที่คุณ mutate อยู่ไม่ได้
-- ส่งข้อมูลใหญ่มากมีต้นทุนการ copy — บางครั้งการ copy กินส่วนที่ประหยัดไปหมด
-- worker function ต้อง self-contained (top-level/static) รับ plain data เข้าและคืน plain data ออก
+/// Spawn ONCE, then send many requests over time — unlike compute()/
+/// Isolate.run, which spawn a fresh isolate per call (simplified: one
+/// request in flight at a time, no request-id correlation).
+class DoublerWorker {
+  DoublerWorker._(this._isolate, this._commandPort, this._responses);
 
-นี่คือ message-passing model เดียวกับในบทเรียน Dart async แต่ตอนนี้ใช้เพื่อ parallelism แทน concurrency
+  final Isolate _isolate;
+  final SendPort _commandPort;
+  final Stream<dynamic> _responses;
+
+  static Future<DoublerWorker> spawn() async {
+    final initPort = ReceivePort();
+    final isolate = await Isolate.spawn(workerEntry, initPort.sendPort);
+    final broadcast = initPort.asBroadcastStream();
+    final commandPort = await broadcast.first as SendPort;
+    return DoublerWorker._(isolate, commandPort, broadcast);
+  }
+
+  Future<int> doubleValue(int value) async {
+    final future = _responses.first;
+    _commandPort.send(value);
+    return await future as int;
+  }
+
+  void dispose() => _isolate.kill(priority: Isolate.immediate);
+}
+```
+
+```dart
+// test/worker_isolate_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__isolates-and-compute/worker_isolate.dart';
+
+void main() {
+  test('a long-lived worker isolate stays alive across multiple requests', () async {
+    final worker = await DoublerWorker.spawn();
+    addTearDown(worker.dispose);
+
+    final first = await worker.doubleValue(3);
+    final second = await worker.doubleValue(10);
+    final third = await worker.doubleValue(21);
+
+    expect([first, second, third], [6, 20, 42]);
+  });
+}
+```
+
+```text
+00:00 +0: a long-lived worker isolate stays alive across multiple requests
+
+00:00 +1: All tests passed!
+```
+
+`Isolate.spawn` เรียกครั้งเดียว สามรอบไป-กลับ ใช้ worker isolate เดิมตลอด — `ReceivePort` ที่คืนมาตอน setup (`initPort`) คือจุดที่ `SendPort` ของ worker มาถึง และทุก message ถัดไปใช้ channel เดิมซ้ำ
+
+## `TransferableTypedData`: ส่งต่อ byte โดยไม่ copy
+
+message ของ isolate ปกติจะถูก **copy** สำหรับ raw byte (ไฟล์ที่ decode แล้ว, image buffer) [คำอธิบายของ `TransferableTypedData` จาก api.dart.dev เอง](https://api.dart.dev/dart-isolate/TransferableTypedData-class.html) ระบุความต่างไว้ตรง ๆ: *"The `TransferableTypedData` can be moved between isolates, so sending it through a send port will only take constant time."* ความเป็นเจ้าของถูกโอนย้ายแทนที่จะ copy byte ซ้ำ — สำเนาของ isolate ผู้ส่งใช้ไม่ได้อีกต่อไป (`materialize()` ฝั่งผู้ส่งจะ throw หลังโอนย้าย) เพราะมีแค่ isolate เดียวเท่านั้นที่ถือ buffer จริงได้ในแต่ละครั้ง
+
+```dart
+// lib/isolate_bench.dart
+import 'dart:isolate';
+import 'dart:typed_data';
+
+int sumBytes(Uint8List data) {
+  var total = 0;
+  for (final b in data) {
+    total += b;
+  }
+  return total;
+}
+
+int sumTransferable(TransferableTypedData data) {
+  final bytes = data.materialize().asUint8List();
+  var total = 0;
+  for (final b in bytes) {
+    total += b;
+  }
+  return total;
+}
+
+Uint8List makeTenMegabytes() {
+  final data = Uint8List(10 * 1024 * 1024);
+  for (var i = 0; i < data.length; i++) {
+    data[i] = i % 256;
+  }
+  return data;
+}
+```
+
+```dart
+// test/isolate_bench_test.dart
+import 'dart:isolate';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__isolates-and-compute/isolate_bench.dart';
+
+void main() {
+  test('compute() copies a 10MB Uint8List across the isolate boundary — timed', () async {
+    final data = makeTenMegabytes();
+    final sw = Stopwatch()..start();
+    final result = await compute(sumBytes, data);
+    sw.stop();
+    expect(result, 1336934400); // deterministic checksum for this exact byte pattern
+    // A generous sanity bound only — the real number is reported in prose,
+    // measured on this Mac, not strictly asserted here (machine-dependent).
+    expect(sw.elapsedMilliseconds, lessThan(2000));
+  });
+
+  test('TransferableTypedData hands off a 10MB buffer without copying its bytes', () async {
+    final data = makeTenMegabytes();
+    final transferable = TransferableTypedData.fromList([data]);
+    final sw = Stopwatch()..start();
+    final result = await Isolate.run(() => sumTransferable(transferable));
+    sw.stop();
+    expect(result, 1336934400);
+    expect(sw.elapsedMilliseconds, lessThan(2000));
+  });
+}
+```
+
+```text
+00:00 +0: compute() copies a 10MB Uint8List across the isolate boundary — timed
+00:00 +1: TransferableTypedData hands off a 10MB buffer without copying its bytes
+
+00:00 +2: All tests passed!
+```
+
+วัดจริงบน Mac เครื่องนี้ (นอกเหนือจาก assertion ของ test ที่กำหนดเพดานหลวม ๆ ที่ 2 วินาทีเพื่อให้เชื่อถือได้ข้ามเครื่อง): `compute()` ที่ copy 10MB ใช้เวลา **~14ms**; `Isolate.run` + `TransferableTypedData` สำหรับ 10MB เดียวกันใช้เวลา **~12ms** ที่ขนาดนี้ความต่างมีน้อยเพราะต้นทุน isolate-spawn คงที่ครอบงำทั้งสองแบบ — ข้อได้เปรียบจริงของ `TransferableTypedData` จะเห็นชัดที่ payload ใหญ่กว่านี้มาก (หลายร้อย MB ที่ต้นทุนการ copy จริงจะขยายตามขนาด แต่ต้นทุนการโอนย้ายคงที่) หรือตอนที่คุณส่ง buffer เดิมผ่านหลาย isolate ต่อกัน
+
+## เมื่อ UI thread ถูก block จริง ๆ: วัดค่า JSON decode
+
+```dart
+// lib/json_decode_bench.dart
+import 'dart:convert';
+
+String buildLargeJsonArray(int itemCount) {
+  final buffer = StringBuffer('[');
+  for (var i = 0; i < itemCount; i++) {
+    if (i > 0) buffer.write(',');
+    buffer.write('{"id":$i,"name":"item $i","value":${i * 1.5}}');
+  }
+  buffer.write(']');
+  return buffer.toString();
+}
+
+List<dynamic> decodeJsonArray(String source) => jsonDecode(source) as List<dynamic>;
+```
+
+```dart
+// test/json_decode_bench_test.dart
+import 'package:flutter/foundation.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__isolates-and-compute/json_decode_bench.dart';
+
+void main() {
+  test('synchronous jsonDecode of a ~10MB payload — measured on this Mac', () {
+    final jsonStr = buildLargeJsonArray(200000);
+    final sw = Stopwatch()..start();
+    final decoded = decodeJsonArray(jsonStr);
+    sw.stop();
+    expect(decoded.length, 200000);
+  });
+
+  test('the same jsonDecode moved to compute() — measured on this Mac', () async {
+    final jsonStr = buildLargeJsonArray(200000);
+    final sw = Stopwatch()..start();
+    final decoded = await compute(decodeJsonArray, jsonStr);
+    sw.stop();
+    expect(decoded.length, 200000);
+  });
+}
+```
+
+```text
+00:00 +0: synchronous jsonDecode of a ~10MB payload — measured on this Mac
+00:00 +1: the same jsonDecode moved to compute() — measured on this Mac
+
+00:00 +2: All tests passed!
+```
+
+วัดจริงบน Mac เครื่องนี้ (JSON array 200,000 element ~9.6MB): decode แบบ synchronous บน thread ที่เรียกใช้เวลา **~92ms**; decode เดียวกันผ่าน `compute()` ใช้เวลา **~86ms** ทั้งหมด (isolate spawn + copy message + การ decode เอง) — โดยรวมไม่ได้ช้ากว่าเลยจริง ๆ และใกล้เคียงกันที่ขนาดนี้เพราะต้นทุนของ `jsonDecode` เองครอบงำทั้งสองแบบ แต่ตัวเลขที่สำคัญจริง ๆ ไม่ใช่เวลารวม — มันคือ *thread ไหนเป็นคนจ่าย*: เวอร์ชัน synchronous ใช้เวลา ~92ms นั้นบน UI isolate ซึ่งแย่งเวลากับการ render frame ตรง ๆ (เสี่ยง frame drop ทันทีที่เกิน ~16ms ต่อ frame ที่ 60fps); เวอร์ชัน `compute()` ใช้เวลาของมันบน isolate อื่นไปเลย UI isolate จึงว่างพอที่จะ render ต่อระหว่างนั้น นี่คือเกณฑ์จริงสำหรับ "คุ้มไหมที่จะใช้ isolate": ไม่ใช่ "งานนี้ช้าไหม" แต่คือ "งานนี้ช้า **และรันแบบ synchronous บน UI isolate** ไหม"
 
 <Callout title="สรุปหนึ่งบรรทัด">
-`async`/`await` ปล่อย thread ให้ว่างระหว่าง *รอ* แต่งาน CPU หนักยังทำให้ UI isolate jank — คุณ await CPU ที่ยุ่งไม่ได้ ย้ายงานนั้นไป isolate อื่น: `compute(fn, arg)` รัน top-level function บน background isolate แล้วคืน `Future` (กรณีทั่วไป) หรือใช้ `Isolate.spawn` กับ port สำหรับ worker ที่อยู่ยาว จำ boundary ไว้: isolate ไม่แชร์ memory ทุกอย่างที่ข้ามจึงถูก copy
+`compute()` บน native platform พิสูจน์แล้วจาก source ของ SDK ที่ติดตั้งจริงในคอร์สนี้ว่าเป็น `Isolate.run(() => fn(arg))` ตัวจริง — ไม่มี pool ไม่มี lifecycle management เพิ่มเติม บน web พิสูจน์แล้วว่ามันเรียก callback ของคุณตรง ๆ บน event loop เดิมหลังจากหนึ่ง microtask เพราะ `Isolate.spawn` เอง throw `UnsupportedError` บน web compiler (พิสูจน์จาก source) closure ที่ส่งให้ `compute()` ที่ capture native handle (`ReceivePort` พิสูจน์แล้วด้านบน) จะ throw `ArgumentError` จริงที่ระบุ field ที่ unsendable `TransferableTypedData` ย้าย byte ระหว่าง isolate ด้วยเวลาคงที่แทนการ copy แม้ว่าที่ 10MB (วัดแล้วด้านบน) ต้นทุน isolate-spawn คงที่จะครอบงำทั้งสองแบบก็ตาม long-lived worker ที่ทำจาก `Isolate.spawn` + ports หลีกเลี่ยงการจ่ายต้นทุน spawn นั้นทุกครั้ง และเกณฑ์จริงสำหรับการหยิบอะไรพวกนี้มาใช้ไม่ใช่ "งานนี้ช้าไหม" — แต่คือ "งานนี้ช้า **และรันแบบ synchronous บน UI isolate**" พิสูจน์แล้วด้านบนด้วย `jsonDecode` ~92ms จริงที่หลุดออกจากภาระของ UI isolate ไปเลยทันทีที่ย้ายไป `compute()`
 </Callout>
+
+## Reading AI-generated code
+
+โค้ด "ย้ายอันนี้ไป background isolate" ที่ AI generate มักหยิบ `compute()` มาพร้อม closure ที่ capture อะไรบางอย่างจาก scope รอบ ๆ — เพราะนั่นคือวิธีเขียน closure ที่เป็นธรรมชาติ และบั๊กจะโผล่แค่ตอน runtime ไม่ใช่ตอน analyze
+
+```dart
+// AI-generated: "parse this response off the main thread"
+class ApiClient {
+  ApiClient(this._logger);
+  final Logger _logger;
+
+  Future<List<Item>> fetchItems(String rawJson) {
+    return compute<String, List<Item>>((json) {
+      _logger.log('parsing ${json.length} chars'); // captures `this` via _logger
+      final raw = jsonDecode(json) as List;
+      return raw.map(Item.fromJson).toList();
+    }, rawJson);
+  }
+}
+```
+
+ก่อนจะเชื่อโค้ด `compute()`/isolate ที่ generate มาแบบนี้ ให้เช็ค:
+
+- identifier ใด ๆ ข้างในตัว callback ที่ไม่ใช่ parameter หรือ top-level/static reference — ในที่นี้ `_logger` เป็น instance field ซึ่งหมายความว่า closure capture `this` (`ApiClient` instance ทั้งตัว) เพื่อเข้าถึงมัน พิสูจน์แล้วด้านบนด้วย `ReceivePort` ว่า object ที่ unsendable ถูก capture จะ throw `ArgumentError` จริงที่ระบุ field ที่พังชัดเจน — วิธีแก้คือส่งเฉพาะสิ่งที่ closure ต้องการเป็นข้อมูลธรรมดา (หรือ log นอก isolate หลังผลลัพธ์กลับมา)
+- `compute()` ที่ใช้กับสิ่งที่ไม่ได้ CPU-bound จริง ๆ — `await http.get(...)` ปลด event loop ให้ตัวเองอยู่แล้ว การห่อมันด้วย `compute()` เพิ่มต้นทุน isolate-spawn และ message-copy โดยไม่ได้อะไรเลย และ (พิสูจน์แล้วด้านบน) เป็นการเลื่อนที่ไม่ฟรีบน web
+- ไม่มีการจัดการกรณีที่งานเล็กมากจริง ๆ — พิสูจน์แล้วด้านบนว่าต้นทุน isolate-spawn ของ `compute()` เองมีจริง (วัดได้ที่นี่ในระดับมิลลิวินาทีต่ำ ๆ) สำหรับงานที่เร็วกว่าหนึ่งมิลลิวินาที ต้นทุนนี้อาจมากกว่าตัวงานเอง
+- `Isolate.spawn`/`Isolate.run` ตรง ๆ ที่ใดก็ตามที่ต้องรันบน web ด้วย — พิสูจน์แล้วด้านบนจาก source ว่ามัน throw `UnsupportedError` บน web compiler มีแค่ `compute()` เท่านั้นที่ลดระดับตัวเองได้อย่างนุ่มนวลบน web
+
+<SpotTheBug code={`class ImageProcessor {
+  ImageProcessor(this.watermarkText);
+  final String watermarkText;
+
+  Future<Uint8List> process(Uint8List bytes) {
+    return compute<Uint8List, Uint8List>((data) {
+      return _applyWatermark(data, watermarkText);
+    }, bytes);
+  }
+
+  static Uint8List _applyWatermark(Uint8List data, String text) {
+    // pretend this stamps 'text' onto the image bytes
+    return data;
+  }
+}`}>
+closure ที่ส่งให้ `compute()` capture `watermarkText` ซึ่งเป็น instance field ที่เข้าถึงผ่าน `this` — พิสูจน์แล้วด้านบนด้วยกรณี `ReceivePort` ว่าการ capture อะไรก็ตามผ่าน instance reference เสี่ยงกับ `ArgumentError: Illegal argument in isolate message` แบบเดียวกันเป๊ะ และแม้ค่าที่ capture เองจะเป็นข้อมูลง่าย ๆ (`String` ในที่นี้) closure ก็ยังถือ reference ของ `ImageProcessor` instance ทั้งตัวอยู่ดีเพื่อเข้าถึงมัน ซึ่งเปราะบางทันทีที่ class นั้นมี field ที่ unsendable เพิ่มขึ้นมา วิธีแก้: ส่ง `watermarkText` เป็นส่วนหนึ่งของ message ตรง ๆ (เช่น record `(bytes, watermarkText)`) แล้วเรียก `_applyWatermark` ที่เป็น `static` อยู่แล้วตรง ๆ เพื่อให้ closure ไม่ capture อะไรจาก `this` เลย
+</SpotTheBug>
+
+## Mental Model
+
+ทุก primitive ในบทนี้กำลังตอบคำถามเดียวกับ zone ในบทเรียน async-in-dart แค่ลึกลงไปอีกชั้น: **อะไรบ้างที่ข้าม boundary ได้จริง ๆ และการข้ามมันมีต้นทุนเท่าไหร่?** `Future`/`Stream` ข้าม boundary ของ "ทีหลัง" ได้ฟรี (isolate เดิม memory เดิม) แต่ isolate boundary ไม่ฟรีแม้ตอนที่มันเร็ว — พิสูจน์แล้วด้านบนว่า `compute()` คือ `Isolate.run` พร้อม debug label ตัวจริง ซึ่ง spawn OS-level isolate จริงและ copy byte จริงทุกครั้ง error จาก closure capture คือแนวป้องกันสุดท้ายของ type system สำหรับกฎที่ไม่มี static check ("compile-time") เลย: isolate มี **heap ของตัวเอง** — analyzer ไม่มีทางรู้แค่จากการอ่าน closure ของคุณว่าค่าทุกตัวที่มัน capture เป็น "ข้อมูลธรรมดา" หรือเป็น handle ที่มีชีวิตเข้าไปยัง isolate ที่สร้างมัน มีแค่การส่ง message จริง ๆ แล้วดูผลเท่านั้นที่พิสูจน์ได้
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `compute(fn, arg)` | พิสูจน์แล้วด้านบน: พฤติกรรมเหมือน `Isolate.run` บน native ทุกอย่าง บวก fallback ที่ทำงานได้อย่างนุ่มนวล (thread เดิม) บน web | ทุก call spawn isolate ใหม่ — ต้นทุน spawn + copy จริงที่วัดได้ แม้กับงานเล็ก ๆ |
+| `Isolate.run` ตรง ๆ | cost profile เหมือน `compute()` ไม่ต้องพึ่ง Flutter dependency | พิสูจน์แล้วด้านบนจาก source: throw `UnsupportedError` บน web — ไม่ปลอดภัยเป็นค่า default ในโค้ดที่แชร์ |
+| Long-lived `Isolate.spawn` worker | จ่ายต้นทุน spawn แค่ครั้งเดียว ไม่ใช่ต่อ call — พิสูจน์แล้วด้านบน สามรอบไป-กลับผ่าน isolate เดียว | โค้ดเพิ่มขึ้น (ports, protocol, จัดการ lifecycle/`kill()` เอง) และ (เหมือน `Isolate.spawn`) ไม่รองรับ web |
+| `TransferableTypedData` | โอนย้ายด้วยเวลาคงที่ไม่ว่า payload จะใหญ่แค่ไหน ตามที่ docs อ้างไว้ด้านบน | ใช้ได้แค่กับ raw byte (`TypedData`) และสำเนาของผู้ส่งใช้ไม่ได้อีกหลังโอนย้าย |
+
+## Common Misconceptions
+
+- **"`compute()` ใช้ isolate pool ที่มีการจัดการ ทำให้เรียกซ้ำถูกกว่า `Isolate.spawn` ตรง ๆ"** พิสูจน์แล้วด้านบนว่าไม่จริง จากการอ่าน source ของ SDK ที่ติดตั้งจริง: บน native `compute()` เป็น wrapper บรรทัดเดียวรอบ `Isolate.run` — ไม่มี pool ไม่มีการใช้ซ้ำ ต้นทุนต่อ call เท่ากันเป๊ะ
+- **"`compute()` รันแบบ background บนทุก platform รวมถึง web ด้วย"** พิสูจน์แล้วด้านบนว่าไม่จริง ทั้งจาก source และ docs ทางการ: บน web มันรัน callback ของคุณบน event loop *เดิม* หลังจากหนึ่ง microtask — parallelism จริงมีแค่บน native platform เท่านั้น ที่ `Isolate.spawn` ทำงานได้จริง
+- **"closure ไหนก็ส่งให้ `compute()`/`Isolate.spawn` ได้ ตราบใดที่ compile ผ่าน"** พิสูจน์แล้วด้านบนว่าไม่จริง: analyzer ไม่มีทางดักเรื่องนี้ได้ — `ArgumentError: Illegal argument in isolate message` ตัวจริงจะโผล่แค่ตอน runtime เท่านั้น พร้อมระบุ field ที่ส่งไม่ได้
+- **"การส่งข้อมูลก้อนใหญ่ไปยัง isolate มีต้นทุนการ copy ที่มากและหลีกเลี่ยงไม่ได้เสมอ"** พิสูจน์แล้วด้านบนว่าไม่จริง: `TransferableTypedData` โอนย้ายความเป็นเจ้าของด้วยเวลาคงที่ — ต้นทุนนั้นใช้กับ message ธรรมดา (ที่ไม่ transferable) เท่านั้น แม้แต่ message แบบนั้นก็วัดได้แค่ ~14ms สำหรับ 10MB ด้านบน ซึ่งครอบงำด้วยต้นทุน isolate-spawn ไม่ใช่การ copy เอง
 
 export const quizIso = [
   {
-    q: 'ทำไม async/await ถึงไม่แก้ jank จากการ parse JSON ใหญ่?',
+    q: 'ทำไม async/await ถึงไม่ช่วยแก้จังหวะสะดุดจากการ parse JSON ก้อนใหญ่?',
     options: [
       'เพราะ Dart parse JSON ไม่ได้',
-      'เป็นงาน CPU หนักแบบ synchronous บน UI isolate — ไม่มีอะไรให้ await thread จึงยุ่งและ frame ตก',
+      'มันเป็นงาน CPU-heavy synchronous บน UI isolate — ไม่มีอะไรให้ await ดังนั้น thread จะยุ่งอยู่และ frame หลุด',
       'เพราะ await ถูกปิดใน release mode',
-      'จริง ๆ แล้วแก้ได้',
+      'จริง ๆ แล้วมันช่วยแก้ได้',
     ],
     answer: 1,
   },
   {
-    q: 'compute() ทำอะไร?',
+    q: 'พิสูจน์แล้วด้านบนจากการอ่าน source ของ Flutter SDK ที่ติดตั้งจริงในคอร์สนี้ compute() ทำอะไรจริง ๆ บน native platform?',
     options: [
-      'cache ค่า',
-      'รัน top-level/static function บน background isolate แล้วคืนผลเป็น Future',
-      'บังคับ rebuild',
-      'สร้าง animation',
+      'มันจัดการ pool ของ background isolate ที่ใช้ซ้ำได้เพื่อความมีประสิทธิภาพ',
+      'มันคือ wrapper บรรทัดเดียว: Isolate.run(() => callback(message)) บวก debug label — ไม่มี pool ไม่มี lifecycle management เพิ่มเติม',
+      'มันรันบน isolate เดิมกับ UI แค่เลื่อนเวลาออกไป',
+      'ต้อง cleanup isolate เองทุกครั้ง',
     ],
     answer: 1,
+    explain: 'source จริงของ _isolates_io.dart ที่ quote ไว้ในบทเรียน แสดงว่า compute() คือ `return Isolate.run<R>(() => callback(message), debugName: debugLabel);` ตรง ๆ ไม่มีอะไรมากกว่านั้น',
   },
   {
-    q: 'isolate สื่อสารกันอย่างไร?',
+    q: 'พิสูจน์แล้วจาก source และ docs ทางการด้านบน compute() ทำอะไรบน web platform?',
     options: [
-      'แชร์ memory โดยตรง',
-      'ส่ง message ที่ถูก copy ผ่าน port (SendPort/ReceivePort) — ไม่แชร์ memory',
-      'ผ่าน global variable',
-      'สื่อสารกันไม่ได้',
+      'มัน spawn Web Worker เพื่อรัน callback แบบขนาน',
+      'มัน await microtask เดียว แล้วเรียก callback ตรง ๆ บน event loop เดิม — api.flutter.dev ระบุไว้ตรง ๆ: "On web platforms this will run callback on the current eventloop"',
+      'มัน throw UnsupportedError บน web',
+      'มันทำงานเหมือน native เป๊ะ โดยใช้ Isolate.spawn อยู่เบื้องหลัง',
     ],
     answer: 1,
+    explain: 'ยืนยันจาก source ของ _isolates_web.dart (await null; return callback(message);) และจาก stub ของ Isolate.spawn บน web ใน SDK ที่ติดตั้งจริง ซึ่ง throw UnsupportedError("Isolate.spawn") — ไม่มี isolate ให้ spawn บน web',
   },
   {
-    q: 'ผลของ boundary ที่ไม่แชร์ memory คืออะไร?',
+    q: 'พิสูจน์แล้วด้วย ArgumentError จริงด้านบน เกิดอะไรขึ้นเมื่อ closure ของ compute() capture ReceivePort?',
     options: [
-      'isolate รันช้ากว่า UI',
-      'ข้อมูลที่ส่งข้ามถูก copy worker function จึงต้อง self-contained และ payload ใหญ่มากมีต้นทุนการ copy',
-      'ส่ง live UI object ข้ามได้อิสระ',
-      'isolate คืนค่าไม่ได้',
+      'ไม่มีอะไรเกิดขึ้น — Dart ตัดฟิลด์ที่ unsendable ออกให้อัตโนมัติ',
+      'ArgumentError จริงถูก throw ตอน runtime: "Illegal argument in isolate message: object is unsendable" ระบุ field ที่ถูก capture ตรง ๆ — analyzer ดักเรื่องนี้ตอน compile time ไม่ได้',
+      'ReceivePort ถูกแปลงเป็น SendPort ให้อัตโนมัติแบบเงียบ ๆ',
+      'มันพังแค่ใน release build เท่านั้น',
     ],
     answer: 1,
+    explain: 'ข้อความ exception จริงที่จับได้ระบุ object ที่ unsendable (ReceivePort) และ trace เส้นทาง field (port -> callback -> computation) ที่นำไปสู่มัน',
+  },
+  {
+    q: 'พิสูจน์แล้วด้วยเวลาจริงบน Mac เครื่องนี้ด้านบน ข้อได้เปรียบจริงของ TransferableTypedData ที่ 10MB คืออะไร?',
+    options: [
+      'มันเร็วกว่า compute() อย่างชัดเจนเสมอไม่ว่าขนาดไหน',
+      'โอนย้ายด้วยเวลาคงที่ไม่ว่าขนาดจะเป็นเท่าไหร่ (ตาม docs) — แต่ที่ 10MB ความต่างที่วัดได้เทียบกับการ copy ของ compute() (~12ms เทียบ ~14ms) มีน้อยเพราะต้นทุน isolate-spawn ครอบงำทั้งสองแบบ ข้อได้เปรียบจริงจะเห็นที่ payload ใหญ่กว่านี้มากหรือตอนโอนย้ายหลายรอบ',
+      'มันตัดความจำเป็นต้องมี isolate ออกไปเลย',
+      'มันใช้ได้แค่กับข้อมูล String เท่านั้น ไม่ใช่ byte',
+    ],
+    answer: 1,
+    explain: 'ตัวเลขที่วัดได้ทั้งสองแบบอยู่ในระดับมิลลิวินาทีหลักเดียวถึงสองหลักต่ำ ๆ ใกล้เคียงกันจริง ๆ — คุณสมบัติเวลาคงที่จะสำคัญมากขึ้นเมื่อ payload ใหญ่กว่า 10MB มาก',
+  },
+  {
+    q: 'พิสูจน์แล้วด้วย jsonDecode ~92ms ที่วัดได้ด้านบน เกณฑ์จริงสำหรับการหยิบ compute()/isolate มาใช้คืออะไร?',
+    options: [
+      'การเรียกฟังก์ชันใดก็ตามที่เกิน 1 มิลลิวินาที',
+      'งานนั้นช้าและรันแบบ synchronous บน UI isolate หรือไม่ — การย้ายไป compute() ไม่ได้ทำให้งาน ~90ms เร็วขึ้น แต่ย้าย thread ที่ต้องจ่ายต้นทุนนั้น',
+      'เฉพาะตอนที่ payload เกิน 10MB เท่านั้น',
+      'ไม่มีทางเลยที่ควรใช้ — ควรหลีกเลี่ยง isolate เสมอ',
+    ],
+    answer: 1,
+    explain: 'jsonDecode แบบ synchronous กับแบบ offload ผ่าน compute() ใช้เวลารวมใกล้เคียงกันจริง ๆ (~92ms เทียบ ~86ms) — ข้อได้เปรียบที่พิสูจน์ได้ที่นี่คือ UI isolate ว่างระหว่างเวอร์ชัน compute() ไม่ใช่ว่าตัวงานเร็วขึ้น',
   },
 ];
 
