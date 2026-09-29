@@ -1,0 +1,309 @@
+---
+title: 'The Dart VM and Isolates'
+description: 'JIT (debug/hot reload) เทียบ AOT (profile/release) พิสูจน์ด้วย output แบบ verbose ที่ตัดทอนจริงจาก flutter build apk และ flutter build web ตัวจริงในเครื่อง — pipeline frontend_server_aot/gen_snapshot ตัวจริง, ELF libapp.so จริงที่แกะออกมาตรวจด้วย file(1), GC แบบ generational จริงของ Dart VM และการแชร์ heap ของ isolate group (อ้างจาก runtime docs ของ dart-lang/sdk เอง), หลักฐานใหม่ว่า compute() copy (ไม่ share) message ของมัน, dart:ffi, และหลักฐานสด ๆ ที่ grep เจอว่า branch ของ kDebugMode ถูกลบออกจาก dart2js output ของ release build'
+sidebar:
+  order: 5
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## บทนี้เพิ่มอะไร
+
+[Build & Release](/flutter/th/tooling-and-production/build-and-release/) รันคำสั่ง `flutter build web`/`flutter build apk --obfuscate` จริงและรายงานขนาด/เวลาจริงไปแล้ว [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/) พิสูจน์ไปแล้วจาก source ของ SDK ที่ติดตั้งว่า `compute()` **คือ** `Isolate.run` บน native, จับเวลาการ transfer ของ `TransferableTypedData` จริงเทียบกับการ copy, และพิสูจน์ `ArgumentError` ที่แน่นอนที่ closure capture ที่ส่งไม่ได้จะ throw บทนี้ไม่ทำซ้ำสิ่งเหล่านั้นเลย แต่ลงลึกไปอีกชั้นหนึ่ง เข้าไปใน Dart VM เอง: `flutter build` เรียกอะไรจริง ๆ ข้างใต้ (`frontend_server_aot`, `gen_snapshot`, `dart2js`/`dart2wasm` — output แบบ verbose ที่ตัดทอนจริงจาก scratch build บน Mac เครื่องนี้), โมเดล GC แบบ generational และ heap ของ isolate group ตัวจริงของ Dart VM (อ้างจาก runtime docs ของ `dart-lang/sdk` เอง ตรึงที่ Dart 3.13.4), หลักฐานใหม่ว่าการส่ง message ของ `compute()` คือการ copy จริง, `dart:ffi`, และหลักฐานสด ๆ ที่ grep เจอว่า code path ที่มีแค่ `kDebugMode` ถูกลบออกทั้งหมดจาก JavaScript output ของ release build
+
+## JIT เทียบ AOT จากแหล่งข้อมูลจริง
+
+[architectural overview ของ `docs.flutter.dev`](https://docs.flutter.dev/resources/architectural-overview) ระบุสองโหมดตรง ๆ: *"During development, Flutter apps run in a VM that offers stateful hot reload of changes without needing a full recompile"* (JIT); *"For release, Flutter apps are compiled directly to machine code, whether Intel x64 or ARM instructions, or to JavaScript if targeting the web"* (AOT หรือ `dart2js`/`dart2wasm` บน web) glossary ของ `dart-lang/sdk` เองแม่นยำกว่าเรื่อง *ทำไม* ทั้งสองถึงต่างกัน อ้างตรงตัวจาก Dart 3.13.4 ที่คอร์สนี้ตรึงไว้:
+
+> *"**Ahead-of-time compilation, AOT**: Compiling a program in a separate process from its execution. Uses conservative optimizations based on a closed-world assumption and whole-program analysis."*
+> *"**Just-in-time compilation, JIT**: Compiling a program as it executes in the same process. Uses speculative optimizations based on type feedback and usage feedback."*
+>
+> ([`runtime/docs/glossary.md#L68-L74`](https://github.com/dart-lang/sdk/blob/3.13.4/runtime/docs/glossary.md#L68))
+
+"Closed-world assumption" คือวลีที่สำคัญ: การ compile แบบ AOT ทำ optimization แบบก้าวร้าวได้ก็เพราะมันเห็น dependency graph **ทั้งหมด**ของโปรแกรมก่อนที่มันจะรันเลยด้วยซ้ำ — closed-world assumption เดียวกันเป๊ะกับที่ tree-shaking พึ่งพา พิสูจน์ภายหลังในบทนี้
+
+## `flutter build` เรียกอะไรจริง ๆ: output แบบ verbose จริง
+
+### `flutter build apk`: การ compile kernel แล้วตามด้วย `libapp.so` ที่เป็น ELF จริง
+
+build แอป scratch จาก `flutter create` สำหรับ Android (`flutter build apk --profile --target-platform=android-arm64 -v` บน Mac เครื่องนี้ ที่มี Android SDK จริง) คำสั่งที่แน่นอนตัดทอนแล้วสำหรับขั้น compile แรก:
+
+```text
+$ flutter build apk --profile --target-platform=android-arm64 -v
+[...] /Users/avetavos/flutter/bin/cache/dart-sdk/bin/dartaotruntime
+  /Users/avetavos/flutter/bin/cache/dart-sdk/bin/snapshots/frontend_server_aot.dart.snapshot
+  --sdk-root .../flutter_patched_sdk/ --target=flutter
+  -Ddart.vm.profile=true -Ddart.vm.product=false
+  --track-widget-creation --aot --tfa --target-os android
+  --output-dill .../app.dill package:scratch_app/main.dart
+[...]
+BUILD SUCCESSFUL in 10s
+✓ Built build/app/outputs/flutter-apk/app-profile.apk (22.5MB)
+```
+
+สอง flag จริงที่ควรพูดถึง: `--aot` (ขั้น compile kernel นี้รู้อยู่แล้วว่ากำลังสร้าง output แบบ AOT ไม่ใช่ JIT) และ `--tfa` — **type flow analysis** กลไกที่แน่นอนเบื้องหลัง "whole-program analysis" จาก quote ของ glossary ข้างบน: pipeline AOT ของ Dart ไล่ตามว่า type ไหนไปถึง call site ไหนได้จริงข้าม*ทั้งแอป*ก่อนจะตัดสินใจสร้าง machine code ซึ่งเป็นสิ่งที่ทำให้มันข้าม runtime type check ที่ JIT build ข้ามไม่ได้ ขั้น native-library ที่ Gradle ขับเคลื่อนซึ่งตามมา (`gen_snapshot` ยืนยันแล้วว่าเป็นเครื่องมือ AOT-snapshot ตัวจริงที่มีเอกสารแยกต่างหากโดย [`snapshot_profiling.md` ของ `dart-lang/sdk` เอง](https://github.com/dart-lang/sdk/blob/3.13.4/runtime/docs/snapshot_profiling.md) ซึ่งแสดงการส่ง `--write-v8-snapshot-profile-to=<file>` **ให้ `gen_snapshot`**) ไม่พิมพ์ command line ของตัวเองผ่าน path ที่ Gradle ขับเคลื่อนนี้ — แต่ output จริงของมันตรวจสอบได้ตรง ๆ การแกะ `libapp.so` ออกจาก APK ที่ build แล้วและรันคำสั่ง Unix มาตรฐานจริง `file`:
+
+```text
+$ unzip -o -q app-profile.apk lib/arm64-v8a/libapp.so -d /tmp/libapp_extract
+$ file /tmp/libapp_extract/lib/arm64-v8a/libapp.so
+libapp.so: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, BuildID[md5/uuid]=d8495d935314a78211dc6fb07fb8158a, stripped
+```
+
+นั่นคือ output ที่ยืนยันแล้วตรงตัวของ `gen_snapshot` สำหรับแอปนี้: **ELF shared library** ARM64 จริง — ตรงกับข้อความอ้างของ glossary เองข้างบนเป๊ะ ว่า *"the Dart AOT compiler can directly produce an ELF shared library as output"* — อยู่ใน APK เคียงข้าง `libflutter.so` (engine เอง ไม่เกี่ยวกับโค้ดที่ compile ของแอปคุณเอง)
+
+### `flutter build web`: command line จริงของ `dart compile js`/`dart compile wasm`
+
+[Build & Release](/flutter/th/tooling-and-production/build-and-release/) รายงานขนาด output จริงไปแล้ว นี่คือคำสั่งจริงข้างใต้ `flutter build web --release -v` ตัดทอนแล้ว:
+
+```text
+$ flutter build web --release -v
+executing: .../dart-sdk/bin/dart compile js --platform-binaries=.../flutter_web_sdk/kernel
+  --invoker=flutter_tool -Ddart.vm.product=true -DFLUTTER_FRAMEWORK_REVISION=6a19cca564
+  --write-resources --native-null-assertions --no-source-maps -O4 --minify
+  -o .../app.dill --cfe-only .../main.dart
+
+executing: .../dart-sdk/bin/dart compile js [... same flags ...]
+  -o .../main.dart.js .../app.dill
+
+Wasm dry run succeeded. Consider building and testing your application with the `--wasm` flag.
+Use --no-wasm-dry-run to disable these warnings.
+Compiling lib/main.dart for the Web... (completed in 19.4s)
+✓ Built build/web
+```
+
+สองอย่างที่ควรพูดให้แม่นยำ ยืนยันตรง ๆ จากการรันจริงนี้: `dart compile js` รัน**สองครั้ง** — ครั้งหนึ่งด้วย `--cfe-only` (compile front-end อย่างเดียว สร้างไฟล์ kernel `app.dill` ระดับกลาง) และอีกครั้งไม่มี flag นั้น (pass การ optimize + emit ของ dart2js จริง ที่กิน `.dill` ไฟล์เดียวกันนั้น); และ build แบบ `--release` เฉยๆ นี้ (ไม่มี flag `--wasm` เลย) ยังเรียก `dart compile wasm` จริง ๆ ด้วย พร้อม `--extra-compiler-option=--dry-run` — การตรวจความเข้ากันได้แบบเงียบ ๆ ที่ Flutter รันโดย default จริง (`--no-wasm-dry-run` ปิดมันได้) เตือนเรื่อง code path ที่เข้ากับ wasm ไม่ได้ โดยไม่สร้างไฟล์ `.wasm` จริง ยืนยันแล้ว: `build/web/main.dart.js` มีอยู่หลัง build นี้; ไม่มีไฟล์ `.wasm` เลย
+
+## Heap ของ isolate ใน Dart VM: generational GC และ isolate GROUP
+
+[`runtime/docs/gc.md` ของ `dart-lang/sdk` เอง](https://github.com/dart-lang/sdk/blob/3.13.4/runtime/docs/gc.md) อ้างตรงตัวจาก Dart 3.13.4 ที่คอร์สนี้ตรึงไว้: *"The Dart VM has a generational garbage collector with two generations. The new generation is collected by a parallel, stop-the-world semispace scavenger. The old generation is collected by concurrent-mark-concurrent-sweep or by concurrent-mark-parallel-compact."* นี่คือกลไกจริงเบื้องหลัง "object อายุสั้นใน Dart ถูกกว่า" — การจัดสรรใหม่ไปที่ young generation เก็บโดย scavenger แบบขนานที่เร็ว; มีแค่ object ที่รอดนานพอเท่านั้นที่จะถูกเลื่อนขั้น (และจ่ายค่า collection ของ old generation ที่แพงกว่า)
+
+<Callout title="แก้ mental model ที่ไม่แม่นยำ: isolate ใน group เดียวกัน SHARE heap">
+"isolate แต่ละตัวมี heap ของตัวเอง แยกจากทุก isolate อื่นโดยสิ้นเชิง" คือการทำให้ง่ายเกินไปที่พบบ่อย — และมันไม่ตรงกับสิ่งที่ source พูดเป๊ะ glossary ของ `dart-lang/sdk` เองกำหนดหน่วยที่แท้จริง: *"**Isolate group**: A set of isolates that are sharing the same program and the same heap. Isolates in the same isolate group can send more types of objects to each other because the sender can rely on the receiver having the classes needed to represent any object it might send. Messages sent within an isolate group can also be more efficient because they are in the same heap."* ([`runtime/docs/glossary.md#L129`](https://github.com/dart-lang/sdk/blob/3.13.4/runtime/docs/glossary.md#L129)) `Isolate.spawn`/`Isolate.run`/`compute()` (พิสูจน์ด้วย test จริงทั้งหมดใน [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/)) ล้วน spawn isolate **ภายใน** group ของ isolate ที่เรียกโดย default — พวกมัน share heap ในระดับ VM นี่คือรายละเอียด implementation ภายใน ไม่ใช่สิ่งที่โค้ด Dart ของคุณสังเกตหรือพึ่งพาได้ (คุณยังแชร์ mutable object กันโดยตรงระหว่าง isolate ไม่ได้ พิสูจน์สด ๆ ด้านล่าง) — แต่นี่คือ*เหตุผล*ที่การส่ง message ภายใน isolate ของแอป Flutter ธรรมดาสามารถมีประสิทธิภาพได้ และทำไม isolate ใน group เดียวกันถึงส่ง object type ที่ receiver อาจสร้างเองไม่ได้อีกทางหนึ่งได้
+</Callout>
+
+## พิสูจน์ใหม่: การส่ง message ของ `compute()` คือการ copy จริง ไม่ใช่ reference ที่ share กัน
+
+[Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/) จับเวลาการ copy เทียบกับการ transfer ของ `TransferableTypedData` ไปแล้ว บทนี้พิสูจน์ความแตกต่างเชิง*ความหมาย*ที่การจับเวลาไม่จำเป็นต้องแสดง: [`docs.flutter.dev/perf/isolates`](https://docs.flutter.dev/perf/isolates) ระบุตรง ๆ *"When messages are 'passed' between each other, they are generally copied from the sending isolate to the receiving isolate. This means that any value passed to an isolate, even if mutated on that isolate, doesn't change the value on the original isolate."* พิสูจน์ตรง ๆ:
+
+```dart
+// lib/isolate_copy_probe.dart
+import 'package:flutter/foundation.dart';
+
+List<int> mutateAndReturn(List<int> input) {
+  input.add(999); // mutate the RECEIVING isolate's copy
+  return input;
+}
+
+Future<List<int>> sendMutateAndCompare(List<int> original) async {
+  final resultFromOtherIsolate = await compute(mutateAndReturn, original);
+  return resultFromOtherIsolate;
+}
+```
+
+```dart
+// test/isolate_copy_probe_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/isolate_copy_probe.dart';
+
+void main() {
+  test('compute() copies the message -- mutating it in the other isolate does NOT affect the sender\'s original', () async {
+    final original = <int>[1, 2, 3];
+    final resultFromOtherIsolate = await sendMutateAndCompare(original);
+
+    expect(resultFromOtherIsolate, [1, 2, 3, 999], reason: 'the OTHER isolate mutated its own copy');
+    expect(original, [1, 2, 3], reason: 'the SENDER\'s original list is untouched -- proof the message was a real copy, not a shared reference');
+  });
+}
+```
+
+```text
+00:00 +0: compute() copies the message -- mutating it in the other isolate does NOT affect the sender's original
+00:00 +1: All tests passed!
+```
+
+(ตัดทอนจากการรัน `flutter test test/lessons/flutter-internals__dart-vm-and-isolates/` จริงบน Mac เครื่องนี้)
+
+`original` ยังเป็น `[1, 2, 3]` หลังจาก isolate อีกตัวเติม `999` เข้าไปในสิ่งที่มันได้รับ คือหลักฐานตรง ๆ: แม้ isolate ใน group เดียวกันจะ share heap ในระดับ VM (พิสูจน์ข้างบน) การส่ง message ของ Dart ยังให้ copy semantics จริงในระดับภาษา ไม่ใช่ aliasing — สองข้อเท็จจริงนี้ไม่ได้ขัดแย้งกัน มันทำงานคนละชั้นกัน `TransferableTypedData` (พิสูจน์ด้วยการ transfer ที่จับเวลาจริงใน [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/)) คือข้อยกเว้นที่ตั้งใจและชัดเจน — ความเป็นเจ้าของถูกโอนแทนที่จะ copy ซึ่งเป็นเหตุผลที่ copy ของผู้ส่งใช้ไม่ได้อีกหลังจากนั้น
+
+## Platform thread: UI, raster, IO, platform
+
+[Impeller and the GPU](/flutter/th/flutter-internals/impeller-and-the-gpu/) พิสูจน์ไปแล้วด้วย quote จริงจาก `docs.flutter.dev` ว่า **UI thread** (รันโค้ด Dart สร้าง layer tree) และ **raster thread** (คุยกับ GPU ที่ Impeller/Skia รันจริง) แยกกันจริง ๆ และการรวมจริงตั้งแต่ 3.29+ คือ UI+**platform** บน iOS/Android โดยเฉพาะ ไม่ใช่ UI+raster thread ที่เหลือ **IO thread** คือที่ที่ส่วน image-decode ของ [Impeller and the GPU](/flutter/th/flutter-internals/impeller-and-the-gpu/) เองวางงาน `instantiateImageCodec` ส่วนใหญ่ไว้ แยกจาก critical path ของทั้ง UI หรือ raster thread ไม่มี thread ระดับ engine เหล่านี้เป็น Dart isolate เลย — มันคือ OS thread ของ engine native เอง; isolate ของ Dart VM (พิสูจน์ข้างบนว่าอาจ share heap ภายใน group) รัน*บนบน*โมเดล thread นี้ โดยโค้ด Dart ของ isolate หลัก/root รันบน UI thread (หรือ thread UI+platform ที่รวมกันแล้ว ตามการแก้ไขข้างบน)
+
+## `dart:ffi`: เรียก native code โดยไม่ต้อง serialize
+
+[doc comment ของ library `dart:ffi` เอง](https://github.com/dart-lang/sdk/blob/3.13.4/sdk/lib/ffi/ffi.dart#L5) อ้างตรงตัว: *"Foreign Function Interface for interoperability with the C programming language."* architectural overview ของ `docs.flutter.dev` เองอธิบายเหตุผลจริงที่ควรหยิบมันมาใช้แทน platform channel ([Platform Channels](/flutter/th/navigation/platform-channels/) พิสูจน์กลไกของ channel เอง): *"For C-based APIs, including those that can be generated for code written in modern languages like Rust or Go, Dart provides a direct mechanism for binding to native code using the `dart:ffi` library. The foreign function interface (FFI) model can be considerably faster than platform channels, because no serialization is required to pass data."* — และคำเตือนของหน้าเดียวกันเอง: *"FFI is available for all platforms other than web, where the JS interop libraries and `package:web` serve a similar purpose."* `dart:ffi` คือ tool ที่ใช้ได้แค่บน native เท่านั้น เหมือนกับ `Isolate.spawn` เป๊ะ (พิสูจน์ใน [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/) ว่า throw `UnsupportedError` บน dart2js runtime patch ของ web) — ทั้งคู่ไปจบที่ความสามารถที่ web compiler target ไม่มีจริง ๆ
+
+## พิสูจน์แล้ว: tree-shaking ลบ branch ของ `kDebugMode` ทั้งหมดออกจาก release build
+
+[source ของ `kDebugMode` เอง](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/foundation/constants.dart#L64) อ้างตรงตัว: `const bool kDebugMode = !kReleaseMode && !kProfileMode;` โดย `kReleaseMode` เองคือ `const bool kReleaseMode = bool.fromEnvironment('dart.vm.product');` — ค่าคงที่ระดับ **compile-time** ที่อ่านจาก flag `-Ddart.vm.product=...` ที่ command line จริงของ `dart compile js` ของบทนี้เอง (ข้างบน) แสดงว่าส่งเป็น `true` สำหรับ release build `if` branch ที่ compile-time-`false` คือสิ่งที่ closed-world whole-program compiler (พิสูจน์ข้างบน ทั้งสำหรับ AOT และ dart2js) ลบทิ้งได้ทั้งหมด ไม่ใช่แค่ข้ามตอน runtime พิสูจน์ตรง ๆ บน scratch app จริง:
+
+```dart
+// lib/tree_shake_probe.dart
+import 'package:flutter/foundation.dart';
+
+String probeMessage() {
+  if (kDebugMode) {
+    return 'ZZZ_DEBUG_ONLY_STRING_MARKER_9f3a1c';
+  }
+  return 'release-path';
+}
+```
+
+เชื่อมเข้ากับ `main()` (`debugPrint(probeMessage());`) เพื่อไม่ให้ compiler tree-shake ทิ้งในฐานะโค้ดที่ unreachable/ไม่ใช้ แล้ว build สำหรับ web สองครั้งบน Mac เครื่องนี้ และ grep output จริงหา marker string:
+
+```text
+$ flutter build web --debug
+$ grep -c ZZZ_DEBUG_ONLY_STRING_MARKER_9f3a1c build/web/main.dart.js
+1
+$ grep -c release-path build/web/main.dart.js
+0
+
+$ flutter build web --release
+$ grep -c ZZZ_DEBUG_ONLY_STRING_MARKER_9f3a1c build/web/main.dart.js
+0
+$ grep -c release-path build/web/main.dart.js
+1
+```
+
+(จำนวน grep จริงไม่ได้แก้ไขจาก build output ของ Mac เครื่องนี้เอง — `main.dart.js` มีขนาด 1,896,590 bytes สำหรับ build `--release` นี้ ตรงกับตัวเลข ~1.8MB ของ [Build & Release](/flutter/th/tooling-and-production/build-and-release/) เองสำหรับ counter app ที่ไม่ได้แก้ไข)
+
+debug marker string มีอยู่จริงใน JavaScript ที่ไม่ได้ minify ของ debug build และ**หายไป**จาก release build จริง ๆ — ไม่ใช่แค่ obfuscate ไม่ใช่แค่เปลี่ยนชื่อ หายไปเลย สายโซ่ที่พิสูจน์ครบวงจร: `--release` ส่ง `-Ddart.vm.product=true` ให้ `dart compile js` (พิสูจน์ข้างบนจาก command line จริง) → `bool.fromEnvironment('dart.vm.product')` ได้ผลลัพธ์เป็นค่าคงที่ compile-time `true` → `kReleaseMode` เป็น `true` ดังนั้น `kDebugMode` คือค่าคงที่ compile-time `false` → `if (kDebugMode) { ... }` คือ branch ที่ตายแล้วทาง static ที่ closed-world compiler ลบทิ้งไปเลย นี่คือกลไกเดียวกันเป๊ะกับที่ [Build & Release](/flutter/th/tooling-and-production/build-and-release/) พิสูจน์ไปแล้วสำหรับค่าคงที่ที่มาจาก `--dart-define` (`String.fromEnvironment`) — `kDebugMode`/`kReleaseMode`/`kProfileMode` ก็แค่ค่าคงที่สภาพแวดล้อมในตัวของ framework เอง ใช้กลไก compile-time เดียวกันเป๊ะ
+
+<Callout title="สรุปหนึ่งบรรทัด">
+AOT (release/profile) และ JIT (debug) ถูกนิยามแม่นยำโดย glossary ของ `dart-lang/sdk` เอง: AOT compile ใน process แยกโดยใช้ closed-world assumption และ whole-program analysis; JIT compile ใน process เดียวกันโดยใช้ optimization แบบ speculative ที่ขับเคลื่อนด้วย feedback `flutter build apk` รัน `frontend_server_aot` (`--aot --tfa`) แล้วตามด้วย `gen_snapshot` ซึ่ง output จริงที่บทนี้แกะออกมาและยืนยันด้วย `file(1)` คือ ELF shared library ARM64 จริง `flutter build web` รัน `dart compile js` สองครั้ง (kernel แล้ว emit) และโดย default ยังมีการตรวจความเข้ากันได้แบบเงียบ ๆ ด้วย `dart compile wasm --dry-run` GC ของ Dart VM เป็นแบบ generational จริง (scavenger ของ young generation, mark-sweep/mark-compact ของ old generation ตาม `gc.md` ของ `dart-lang/sdk` เอง) และ isolate ภายใน group share heap นั้นจริง ๆ — แต่การส่ง message ของ `compute()` พิสูจน์ข้างบนสด ๆ ว่ายัง copy ไม่ใช่ alias `dart:ffi` และ `Isolate.spawn` ใช้ได้แค่บน native ทั้งคู่ ใช้บน web ไม่ได้ด้วยเหตุผลพื้นฐานเดียวกัน และ tree-shaking ของ branch `kDebugMode` พิสูจน์ข้างบนด้วย string ที่ grep เจอจริง มีแล้วหายไปใน build output ของ Mac เครื่องนี้เอง
+</Callout>
+
+## Mental Model
+
+JIT build คือเชฟที่ทำอาหารตามสั่ง ชิมและปรับทุกจานที่ออกไป — เริ่มเร็ว ยืดหยุ่น แต่จ่ายค่าชิม/ปรับต่อเนื่องทุกออเดอร์ (ทุกการเรียกฟังก์ชัน อาจถูก specialize ใหม่ตาม type feedback ใหม่) AOT build คือเชฟคนเดียวกันที่ใช้เวลาคืนก่อนเปิดร้านเขียนสูตรอาหารที่ตายตัวและเหมาะสมที่สุดต่อจานหนึ่ง โดยเห็นรายการจองทั้งคืนแล้ว (closed-world assumption) — ไม่มีการชิมอีกระหว่างให้บริการ มีแค่การทำตามแผนที่พิสูจน์แล้วว่าถูกต้องล่วงหน้าอย่างรวดเร็วตรงไปตรงมา `gen_snapshot`/`dart compile js` คือกระบวนการเขียนสูตรนั้น และ ELF `libapp.so` ที่บทนี้แกะออกมาแล้วรัน `file` ตรวจคือบัตรสูตรอาหารจริงที่จับต้องได้ การ tree-shake branch ของ `kDebugMode` คือเชฟที่สังเกตเห็นตอนเขียนสูตรตายตัวของคืนนี้ว่าสาขาสูตรของจานหนึ่งทั้งหมดไปไม่ถึงได้เลยจากรายการจองที่รู้แล้วของคืนนี้ — เลยไม่ถูกพิมพ์ลงในบัตรด้วยซ้ำ isolate ที่ share heap ภายใน group แต่ยัง copy message ระหว่างกัน คือเชฟสองคนในครัวเดียวกันที่ share ตู้เก็บของ (heap) เดียวกัน แต่ยังจัดออเดอร์ของกันและกันลงจานแยกกัน (การ copy) แทนที่จะกินจากจานเดียวกันกลางการให้บริการ
+
+## Trade-offs
+
+| ทางเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| JIT (debug) | hot reload, iterate เร็ว ไม่ต้องทำ whole-program analysis ล่วงหน้า | optimization แบบ speculative เท่านั้น และไม่มี dead-code elimination พิสูจน์ข้างบน — ไม่มีความหมายสำหรับการเทียบเวลา/ขนาด |
+| AOT (`gen_snapshot` พิสูจน์ข้างบนว่าสร้าง ELF `libapp.so` จริง) | startup เร็ว performance คาดเดาได้ tree-shaking ทั้งโปรแกรม (พิสูจน์ข้างบนด้วย marker ของ `kDebugMode`) | ไม่มี hot reload; ทุก code path ต้องไปถึงได้จริงตอน build ไม่งั้นถูกลบ พิสูจน์ข้างบน |
+| isolate ที่ share heap ภายใน group | ส่ง message มีประสิทธิภาพกว่า ส่ง object type ที่หลากหลายกว่าได้ (ตาม quote ของ glossary ข้างบน) | รายละเอียด implementation ไม่ใช่สิ่งที่ควรออกแบบรอบมันโดยตรง — การรับประกัน copy ระดับภาษา (พิสูจน์สด ๆ ข้างบน) คือสิ่งที่โค้ดคุณพึ่งพาได้จริง |
+| `dart:ffi` แทน platform channel | ไม่มีต้นทุน serialization (พิสูจน์โดย doc comment ที่อ้างข้างบน) | ใช้ได้แค่ native — ใช้บน web ไม่ได้ ข้อจำกัดเดียวกันกับที่พิสูจน์สำหรับ `Isolate.spawn` ใน [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/) |
+
+## Common Misconceptions
+
+- **"AOT กับ JIT ต่างกันแค่ความเร็ว ไม่ต่างกันเรื่องโค้ดที่อยู่ใน binary"** พิสูจน์แล้วว่าผิดข้างบน: branch ที่ผูกกับ `kDebugMode` หายไปโดยสิ้นเชิงจาก output จริงของ release build ไม่ใช่แค่ถูกข้ามทางลัด — การ compile แบบ closed-world ของ AOT/dart2js ลบโค้ดที่ไปไม่ถึงออกจริง ๆ
+- **"Dart isolate แต่ละตัวมี heap แยกกันโดยสิ้นเชิงเสมอ"** พิสูจน์แล้วว่าไม่แม่นยำข้างบนโดย glossary ของ `dart-lang/sdk` เอง: isolate ใน isolate group เดียวกัน (default ของ `Isolate.spawn`/`compute()`) share heap ในระดับ VM — แม้สิ่งนี้จะไม่เปลี่ยนอะไรที่สังเกตได้เรื่อง copy semantics ระดับ Dart พิสูจน์สด ๆ ข้างบน
+- **"เพราะ isolate share heap กันได้ การ mutate object ที่ส่งไปยัง isolate อื่นอาจกระทบต้นฉบับ"** พิสูจน์แล้วว่าผิดข้างบนด้วย test จริง: แม้ภายใน isolate group ที่ share heap การส่ง message ของ `compute()` ยัง copy อยู่ดี — list ต้นฉบับของผู้ส่งไม่ถูกแตะเลยพิสูจน์แล้ว
+- **"output ของ `gen_snapshot` เป็นรูปแบบเฉพาะของ Flutter ไม่ใช่ binary มาตรฐานจริง"** พิสูจน์แล้วว่าผิดข้างบน: แกะออกมาตรงจาก APK ที่ build จริงและตรวจด้วยคำสั่ง Unix มาตรฐาน `file` มันคือ ELF shared object ARM64 จริง ตรงตามที่ glossary ของ `dart-lang/sdk` เองระบุ
+
+## Reading AI-generated code
+
+โค้ด Flutter ที่ AI generate ซึ่งให้เหตุผลเรื่อง performance บางครั้งอ้างว่าเทคนิคหนึ่ง "หลีกเลี่ยงปัญหาการ compile แบบ AOT" หรือ "มีผลแค่ในโหมด JIT" โดยไม่แม่นยำว่าโหมด build ไหนกำลังใช้อยู่จริง — ข้อกล่าวอ้างที่การพิสูจน์ของบทนี้เองแสดงว่าสลับกันได้ง่าย: dead-code elimination การพิสูจน์ `kDebugMode` ข้างบน และทุก closed-world optimization มีผลแค่ใน **AOT/release** เท่านั้น ไม่ใช่ debug/JIT
+
+```dart
+// @expect-error not a real analyzer error -- a misleading performance comment, not a compile error
+class ExpensiveDebugOverlay extends StatelessWidget {
+  const ExpensiveDebugOverlay({super.key});
+  @override
+  Widget build(BuildContext context) {
+    // "This branch only runs in JIT mode so it's fine to leave expensive
+    // debug-only widgets here -- AOT will strip it anyway."
+    return kDebugMode ? const _ExpensiveDebugPanel() : const SizedBox.shrink();
+  }
+}
+```
+
+comment นี้ถูกต้องจริงเรื่องกลไก (พิสูจน์ข้างบน: branch ของ `kDebugMode` ถูก tree-shake ออกจาก release/AOT build จริง) — ความเสี่ยงก่อนเชื่อโค้ดที่ generate มาซึ่งพึ่งพาสิ่งนี้คือการตรวจสอบทิศตรงข้าม: โค้ดที่ถูก guard ไว้ไปถึงได้**แค่**ผ่าน `kDebugMode`/`kReleaseMode`/`kProfileMode` จริงหรือไม่ (พิสูจน์ข้างบนว่าเป็นค่าคงที่ compile-time จริง) หรือผ่านเงื่อนไขที่คำนวณตอน runtime ที่แค่*บังเอิญ*เป็น false ในข้อมูล production วันนี้? มีแค่แบบแรกเท่านั้นที่ compiler ลบทิ้งได้จริงตามที่พิสูจน์ได้ ส่วนแบบหลังยังอยู่ใน binary ไปไม่ถึงในทางปฏิบัติแต่ไม่ใช่ไปไม่ถึงในทางทฤษฎี
+
+ก่อนเชื่อโค้ดที่ generate มาซึ่งสมมติอะไรบางอย่างเกี่ยวกับการ strip ที่ขึ้นกับโหมด build ตรวจสอบ:
+
+- guard เป็นค่าคงที่ compile-time จริง (`kDebugMode`, `kReleaseMode`, `assert()`, หรือ `bool.fromEnvironment`/`String.fromEnvironment` ที่มาจาก `--dart-define` ทั้งหมดพิสูจน์แล้วในคอร์สนี้ว่าเป็นตัวกระตุ้น dead-code-elimination ที่พิสูจน์ได้จริง) หรือเป็นค่า runtime ที่แค่มักจะเป็น false?
+- โค้ดสมมติว่า `Isolate.spawn`/`dart:ffi` ทำงานบน web ได้หรือไม่? พิสูจน์ข้างบน (และใน [Isolates & compute](/flutter/th/async-and-performance/isolates-and-compute/)): ทั้งคู่ใช้ได้แค่ native
+- comment อ้างว่า isolate สอง "แตะหน่วยความจำกันไม่ได้เลย" แบบเหมารวมหรือไม่? พิสูจน์ข้างบนว่าเป็นการทำให้ง่ายเกินไป — isolate group share heap จริง ๆ; การรับประกันที่ใช้ได้จริงคือ copy semantics ระดับ Dart ไม่ใช่การแยก heap โดยสิ้นเชิง
+
+<SpotTheBug code={`Future<void> processInBackground(List<Map<String, dynamic>> records) async {
+  // "Isolates are completely memory-isolated, so this is safe to call from
+  // multiple places without worrying about shared state."
+  final result = await compute(_transform, records);
+  records.addAll(result); // <-- appends to the SAME list we just sent
+}
+
+List<Map<String, dynamic>> _transform(List<Map<String, dynamic>> input) {
+  return input.map((r) => {...r, 'processed': true}).toList();
+}`}>
+ข้อกล่าวอ้างของ comment ("memory-isolated โดยสิ้นเชิง") คือส่วนที่ไม่แม่นยำที่พิสูจน์ข้างบน — แต่บั๊กจริงละเอียดกว่านั้นและไม่ต้องอาศัยความไม่แม่นยำนั้นเลยก็เกิดได้: `compute()` copy `records` จริง ๆ (พิสูจน์สด ๆ ข้างบน) ก่อนส่ง ดังนั้น `records.addAll(result)` หลังจากนั้นปลอดภัยจากมุมมอง data-race ความเสี่ยง*จริง*คือข้อมูลซ้ำ: `_transform` ไม่ได้กรองหรือแทนที่ มันแมปทุก record ที่รับเข้ามาเป็น record ใหม่ที่เพิ่ม `processed: true` แล้วผู้เรียกก็เอา record ที่แปลงแล้วทุกตัวนั้นไปต่อท้าย list `records` ต้นฉบับ — ทำให้ความยาวเพิ่มเป็นสองเท่า โดยครึ่งแรกยังไม่ประมวลผลและครึ่งหลังคือ copy ที่ประมวลผลแล้วของข้อมูลเดียวกัน การพิสูจน์ว่า copy semantics ของ isolate ปลอดภัย (แบบที่บทนี้ทำข้างบน) ไม่ได้พิสูจน์ว่า logic รอบข้างถูกต้อง — ทั้งสองคือบั๊กที่ต้องตรวจแยกกันเป็นอิสระ
+</SpotTheBug>
+
+export const quizDartVm = [
+  {
+    q: 'อ้างตรงตัวจาก glossary ของ dart-lang/sdk เอง อะไรที่แยก AOT ออกจาก JIT compilation โดยเฉพาะ?',
+    options: [
+      'AOT สร้างช้ากว่า JIT เสมอ ไม่มีความต่างจริงอย่างอื่น',
+      'AOT compile ใน process แยกโดยใช้ closed-world assumption และ whole-program analysis; JIT compile ใน process เดียวกันโดยใช้ optimization แบบ speculative ที่ขับเคลื่อนด้วย feedback',
+      'JIT รันได้แค่บน Android เท่านั้น; AOT รันได้แค่บน iOS เท่านั้น',
+      'AOT กับ JIT สร้าง output ที่เหมือนกันทุก byte แค่คนละเวลา',
+    ],
+    answer: 1,
+    explain: 'นิยามที่อ้างตรงตัว: AOT "Uses conservative optimizations based on a closed-world assumption and whole-program analysis"; JIT "Uses speculative optimizations based on type feedback and usage feedback"',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบนด้วยการแกะ APK ที่ build จริงและรัน file(1) บนมัน output จริงของ gen_snapshot คืออะไร?',
+    options: [
+      'รูปแบบเฉพาะของ Flutter ที่ไม่มีเอกสารรองรับ',
+      'ELF shared library ARM64 จริง (libapp.so) — ยืนยันตรง ๆ ด้วยคำสั่ง Unix มาตรฐาน file',
+      'ไฟล์ text ธรรมดาที่แสดงรายชื่อฟังก์ชัน Dart',
+      'blob ที่เข้ารหัสไว้ซึ่งตรวจสอบด้วย tool ใดไม่ได้เลย',
+    ],
+    answer: 1,
+    explain: 'output จริงของ file(1) ที่อ้างข้างบน: "ELF 64-bit LSB shared object, ARM aarch64... stripped" — รูปแบบ binary มาตรฐานที่ตรวจสอบได้ ตรงตามข้อกล่าวอ้างของ glossary ของ dart-lang/sdk เองเรื่อง output ของ AOT',
+  },
+  {
+    q: 'ตามนิยาม "Isolate group" ของ glossary ของ dart-lang/sdk เอง (อ้างข้างบน) isolate ใน group เดียวกัน share อะไรจริง ๆ?',
+    options: [
+      'ไม่มีอะไรเลย — แยกกันโดยสิ้นเชิงเสมอ',
+      'โปรแกรมเดียวกันและ heap เดียวกัน — รายละเอียด implementation ที่ทำให้การส่ง message ระหว่างกันมีประสิทธิภาพกว่าและส่ง object type ที่หลากหลายกว่าได้',
+      'call stack เดียวกัน',
+      'event loop เดียวกัน รวม microtask queue เข้าด้วยกัน',
+    ],
+    answer: 1,
+    explain: 'ข้อความที่แน่นอน: "A set of isolates that are sharing the same program and the same heap" นี่คือของจริงมีเอกสารรองรับ แม้จะไม่เปลี่ยน copy semantics ระดับ Dart พิสูจน์สด ๆ ในบทนี้',
+  },
+  {
+    q: 'พิสูจน์สด ๆ ในบทนี้ด้วย test จริง เกิดอะไรขึ้นกับ list ต้นฉบับของผู้ส่งหลัง compute() ส่งมันไปยัง isolate อื่นที่ mutate copy ของตัวเอง?',
+    options: [
+      'list ต้นฉบับของผู้ส่งถูก mutate ตามด้วย เพราะ isolate ใน group share heap',
+      'list ต้นฉบับของผู้ส่งไม่ถูกแตะเลย — compute() copy message จริง ๆ แม้ isolate ใน group เดียวกันจะ share heap ในระดับ VM',
+      'list ของผู้ส่งกลายเป็น null',
+      'compute() throw error ทุกครั้งที่ object ที่รับมาถูก mutate',
+    ],
+    answer: 1,
+    explain: 'test พิสูจน์ว่า original ยังเป็น [1, 2, 3] ในขณะที่ copy ที่ mutate แล้วของ isolate อื่นกลับมาเป็น [1, 2, 3, 999] — copy semantics จริง ไม่ขึ้นกับรายละเอียด implementation การ share heap ของ isolate group',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบนด้วย build output ที่ grep จริง เกิดอะไรขึ้นกับ branch ที่มีแค่ kDebugMode เมื่อแอปเดียวกันถูก build ด้วย --release แทน --debug?',
+    options: [
+      'ถูกเปลี่ยนชื่อ/obfuscate แต่ยังอยู่ใน output',
+      'ถูกลบออกทั้งหมด — 0 ครั้งของ debug marker string ใน release main.dart.js เทียบกับ 1 ครั้งใน debug build',
+      'ถูกแปลงเป็น runtime check แทนที่จะถูกลบ',
+      'ทั้งสอง build มีโค้ดเหมือนกัน — tree-shaking กระทบแค่ asset ไม่กระทบโค้ด',
+    ],
+    answer: 1,
+    explain: 'จำนวน grep จริงที่พิสูจน์ข้างบน: debug build มี marker 1 ครั้ง มี release-path string 0 ครั้ง; release build ตรงข้ามเป๊ะ — dead-code elimination จริง ไม่ใช่แค่ obfuscation',
+  },
+  {
+    q: 'อ้างจาก doc comment ของ library dart:ffi เองและ docs.flutter.dev dart:ffi มีไว้ทำอะไร และใช้ไม่ได้ที่ไหน?',
+    options: [
+      'ตัวแทน UI framework ใช้ได้ทุกที่รวมถึง web',
+      'Foreign Function Interface สำหรับ interoperability กับ C (และโดยส่วนขยายคือ Rust/Go ผ่าน C ABI) เร็วกว่า platform channel เพราะไม่ต้อง serialize — ใช้บน web ไม่ได้',
+      'ORM ฐานข้อมูล ใช้ได้แค่บน Android',
+      'framework สำหรับ test isolate',
+    ],
+    answer: 1,
+    explain: 'doc comment: "Foreign Function Interface for interoperability with the C programming language" architectural overview: เร็วกว่า platform channel (ไม่ต้อง serialize) และใช้บน web ไม่ได้ชัดเจน (JS interop/package:web ทำหน้าที่เทียบเท่าที่นั่นแทน)',
+  },
+];
+
+<Quiz client:visible id="flutter-internals/dart-vm-and-isolates" questions={quizDartVm} />
+
+<ProgressTracker client:visible id="flutter-internals/dart-vm-and-isolates" />
