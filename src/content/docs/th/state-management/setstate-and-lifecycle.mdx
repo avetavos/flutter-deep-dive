@@ -1,6 +1,6 @@
 ---
 title: 'setState & the Lifecycle'
-description: 'setState mark element เป็น dirty แล้ว trigger rebuild อย่างไร, State lifecycle ทั้งหมด, hook แต่ละตัวใส่อะไร และ scope ของ setState rebuild'
+description: 'setState mark element เป็น dirty แล้ว trigger rebuild อย่างไร, State lifecycle ทั้งหมดที่พิสูจน์ตามลำดับจริง, error จริงที่ setState/late/initState ใช้ผิดจะ throw และ scope ของ setState rebuild'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## setState ทำอะไรกันแน่
 
@@ -42,11 +43,11 @@ class _CounterState extends State<Counter> {
 
 มีกฎสองข้อที่ตามมา: mutate state **ข้างใน** callback ของ `setState` (เพื่อให้การเปลี่ยนและการ mark dirty เกิดพร้อมกัน) และรู้ไว้ว่า `setState` schedule rebuild สำหรับ frame *ถัดไป* — ไม่ใช่ synchronous
 
-## State lifecycle
+## State lifecycle พิสูจน์ตามลำดับจริง
 
-`State` object มี lifecycle ที่ชัดเจน รู้ว่า hook ไหนทำอะไรช่วยกัน bug ทั้งกลุ่มได้
+`State` object มี lifecycle ที่ชัดเจน รู้ว่า hook ไหนทำอะไรช่วยกัน bug ทั้งกลุ่มได้ — และลำดับไม่ใช่แค่เอกสาร มัน test ได้จริง
 
-<Mermaid title="The State lifecycle" code={lifecycleDiagram} />
+<Mermaid title="State lifecycle ตามลำดับ" code={lifecycleDiagram} />
 
 export const lifecycleDiagram = `flowchart TB
   create["createState()"] --> init["initState()\nsetup ครั้งเดียว"]
@@ -54,13 +55,410 @@ export const lifecycleDiagram = `flowchart TB
   deps --> build["build()\nเรียกทุกครั้งที่ rebuild"]
   build --> update["didUpdateWidget()\nparent rebuild ด้วย config ใหม่"]
   update --> build
-  build --> dispose["dispose()\ncleanup"]`;
+  build --> deactivate["deactivate()\nถูกเอาออกจาก tree"]
+  deactivate --> dispose["dispose()\nไม่ถูกใส่กลับ — cleanup"]`;
 
-- **`initState`** — setup ครั้งเดียว: สร้าง controller, subscribe stream รันครั้งเดียว ตรงนี้ยังใช้ `context` กับ inherited widget อย่างเชื่อถือได้ไม่ได้
-- **`didChangeDependencies`** — รันหลัง `initState` และรันอีกทุกครั้งที่ inherited dependency เปลี่ยน เป็นที่ปลอดภัยสำหรับอ่าน data ของ `InheritedWidget`/`Provider` ที่ setup ต้องพึ่ง
-- **`build`** — เรียกทุกครั้งที่ rebuild ต้อง **pure และเร็ว**: ไม่มี side effect, ไม่มี network call, ไม่มี subscription แค่ describe UI จาก state ปัจจุบัน
-- **`didUpdateWidget`** — parent rebuild แล้วส่ง widget config ใหม่ให้ State นี้; react ต่อ props ที่เปลี่ยน (เช่น re-subscribe ถ้า `id` เปลี่ยน)
-- **`dispose`** — cleanup: dispose controller, cancel subscription ลืมตรงนี้คือ memory leak คลาสสิกของ Flutter
+```dart
+// lib/lifecycle_logger.dart
+import 'package:flutter/material.dart';
+
+class LifecycleLogger extends StatefulWidget {
+  const LifecycleLogger({super.key, required this.value, required this.log});
+  final int value;
+  final List<String> log;
+
+  @override
+  State<LifecycleLogger> createState() => _LifecycleLoggerState();
+}
+
+class _LifecycleLoggerState extends State<LifecycleLogger> {
+  @override
+  void initState() {
+    super.initState();
+    widget.log.add('initState');
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    widget.log.add('didChangeDependencies');
+  }
+
+  @override
+  void didUpdateWidget(covariant LifecycleLogger oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    widget.log.add('didUpdateWidget');
+  }
+
+  @override
+  void deactivate() {
+    widget.log.add('deactivate');
+    super.deactivate();
+  }
+
+  @override
+  void dispose() {
+    widget.log.add('dispose');
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    widget.log.add('build');
+    return Text('${widget.value}');
+  }
+}
+```
+
+```dart
+// test/lifecycle_logger_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/lifecycle_logger.dart';
+
+void main() {
+  testWidgets(
+    'full State lifecycle order: initState, didChangeDependencies, build, didUpdateWidget, deactivate, dispose',
+    (tester) async {
+      final log = <String>[];
+
+      await tester.pumpWidget(MaterialApp(home: LifecycleLogger(value: 1, log: log)));
+      expect(log, ['initState', 'didChangeDependencies', 'build']);
+
+      // Parent rebuilds with a new config for the same widget/State.
+      await tester.pumpWidget(MaterialApp(home: LifecycleLogger(value: 2, log: log)));
+      expect(log, ['initState', 'didChangeDependencies', 'build', 'didUpdateWidget', 'build']);
+
+      // Widget removed from the tree entirely.
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      expect(log, [
+        'initState', 'didChangeDependencies', 'build', 'didUpdateWidget', 'build',
+        'deactivate', 'dispose',
+      ]);
+    },
+  );
+}
+```
+
+```text
+✓ full State lifecycle order: initState, didChangeDependencies, build, didUpdateWidget, deactivate, dispose
+
+00:00 +1: All tests passed!
+```
+
+- **`initState`** — setup ครั้งเดียว: สร้าง controller, subscribe stream รันครั้งเดียว ตรงนี้ยังใช้ `context` กับ inherited widget อย่างเชื่อถือได้ไม่ได้ (พิสูจน์ข้างล่าง)
+- **`didChangeDependencies`** — รันทันทีหลัง `initState` และรันอีกทุกครั้งที่ inherited dependency ที่ `State` นี้อ่านเปลี่ยนจริง ๆ เป็นที่ปลอดภัยสำหรับอ่าน data ของ `InheritedWidget`/`Provider`/`Theme.of` ที่ setup ต้องพึ่ง
+- **`build`** — เรียกทุกครั้งที่ rebuild (พิสูจน์ข้างบน: สองครั้งสำหรับการเปลี่ยน config หนึ่งครั้ง — ครั้งแรกตอน mount ครั้งที่สองตอน update) ต้อง **pure และเร็ว**: ไม่มี side effect, ไม่มี network call, ไม่มี subscription
+- **`didUpdateWidget`** — parent rebuild แล้วส่ง widget config ใหม่ให้ State นี้; react ต่อ props ที่เปลี่ยน (เช่น re-subscribe ถ้า `id` เปลี่ยน) รันก่อน `build` ที่มันเป็นตัว trigger ยืนยันจากลำดับ log ข้างบน
+- **`deactivate`** — element ถูกเอาออกจาก tree อาจถูกใส่กลับที่อื่นก่อน frame จะจบก็ได้ (เช่นย้ายไปใต้ `GlobalKey`) — Flutter ยังไม่รู้ว่ามันถาวร
+- **`dispose`** — เรียกเมื่อ Flutter ยืนยันแล้วว่า element *ไม่* ถูกใส่กลับ: cleanup controller, cancel subscription ลืมตรงนี้คือ memory leak คลาสสิกของ Flutter
+
+## `mounted`: ป้องกัน setState หลัง await
+
+`initState` ที่ยิง async load เป็นเรื่องปกติ — แต่ `State` อาจถูก dispose (user navigate ออก, list item scroll ออกไปแล้ว rebuild) *ขณะที่ `Future` นั้นยังค้างอยู่* พอมัน resolve แล้วเรียก `setState` ก็ไม่มี widget เหลือให้ rebuild
+
+```dart
+// lib/mounted_after_await.dart
+import 'package:flutter/material.dart';
+
+/// Toggle: whether the widget guards its post-await setState with `mounted`.
+class DelayedLabel extends StatefulWidget {
+  const DelayedLabel({super.key, required this.guarded});
+  final bool guarded;
+
+  @override
+  State<DelayedLabel> createState() => _DelayedLabelState();
+}
+
+class _DelayedLabelState extends State<DelayedLabel> {
+  String _text = 'loading';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    // ❌ Without the guard: this widget may already be disposed (e.g. the
+    // user navigated away before the delay finished) — setState throws.
+    if (widget.guarded && !mounted) return;
+    setState(() => _text = 'loaded');
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_text);
+}
+```
+
+แบบไม่ guard (`guarded: false`), unmount กลางทาง รันใน probe นี้ — output จริงไม่แก้ไขของ `flutter test` ที่ fail:
+
+```text
+setState() called after dispose(): _DelayedLabelState#27577(lifecycle state: defunct, not mounted)
+This error happens if you call setState() on a State object for a widget that no longer appears in
+the widget tree (e.g., whose parent widget no longer includes the widget in its build). This error
+can occur when code calls setState() from a timer, from an animation callback, or after an
+asynchronous operation (such as an awaited network request or other Future) completes after the
+widget has been removed from the tree.
+The preferred solution is to cancel the timer or stop listening to the animation in the dispose()
+callback. Another solution is to check the "mounted" property of this object before calling
+setState() to ensure the object is still in the tree.
+This error might indicate a memory leak if setState() is being called because another object is
+retaining a reference to this State object after it has been removed from the tree. To avoid memory
+leaks, consider breaking the reference to this object during dispose().
+```
+
+บรรทัด `if (widget.guarded && !mounted) return;` คือ fix — `mounted` (getter จริงบน `State`, เป็น `true` จนกว่า `dispose()` จะรัน) เปลี่ยน crash ให้กลายเป็น no-op ที่ไม่มีพิษภัย:
+
+```dart
+// test/mounted_after_await_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/mounted_after_await.dart';
+
+void main() {
+  testWidgets('mounted-guarded setState after dispose is a silent no-op (no crash)', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: DelayedLabel(guarded: true)));
+    // Unmount before the 20ms delay resolves.
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    // Let the pending Future run past the mounted check.
+    await tester.pump(const Duration(milliseconds: 30));
+    expect(tester.takeException(), isNull);
+  });
+}
+```
+
+```text
+✓ mounted-guarded setState after dispose is a silent no-op (no crash)
+
+00:00 +1: All tests passed!
+```
+
+## `setState` ที่เรียกตอนกำลัง build อยู่แล้ว
+
+กฎ "ห้ามเรียก `setState` ข้างใน `build`" มีเวอร์ชันที่แม่นยำกว่า: Flutter ยอม mark widget เป็น dirty *ระหว่าง* build pass ได้ก็ต่อเมื่อ widget นั้นเป็น **descendant** ของสิ่งที่กำลัง build อยู่ เพราะ parent build ก่อน children เสมอ ดังนั้น descendant ที่ dirty จะถูกเยี่ยมชมรอบนี้แน่นอน แต่ถ้าเอื้อมไป *ด้านข้าง* (sibling) หรือขึ้นบน Flutter ค้ำประกันแบบนั้นไม่ได้ และปฏิเสธ:
+
+```dart
+// lib/setstate_in_build.dart
+import 'package:flutter/material.dart';
+
+class SiblingA extends StatefulWidget {
+  const SiblingA({super.key});
+  @override
+  State<SiblingA> createState() => SiblingAState();
+}
+
+class SiblingAState extends State<SiblingA> {
+  int count = 0;
+  @override
+  Widget build(BuildContext context) => Text('$count');
+}
+
+/// Reaches sideways into a SIBLING's State and calls setState on it while
+/// THIS widget is still building — not a descendant relationship, so the
+/// framework cannot guarantee the sibling will still be visited this pass.
+class SiblingB extends StatelessWidget {
+  const SiblingB({super.key, required this.aKey});
+  final GlobalKey<SiblingAState> aKey;
+
+  @override
+  Widget build(BuildContext context) {
+    // ❌ setState() on a sibling's State, called from this widget's build().
+    aKey.currentState?.setState(() {
+      aKey.currentState!.count++;
+    });
+    return const SizedBox();
+  }
+}
+
+class BadCrossWidgetSetState extends StatelessWidget {
+  BadCrossWidgetSetState({super.key});
+  final aKey = GlobalKey<SiblingAState>();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [SiblingA(key: aKey), SiblingB(aKey: aKey)]);
+  }
+}
+```
+
+`flutter analyze` ตี smell ตัวนี้ให้เห็นก่อนคุณจะรันด้วยซ้ำ — `setState` เป็น `@protected` แปลว่ามีแค่ `SiblingAState` เองเท่านั้นที่ควรเรียกมัน:
+
+```text
+warning • The member 'setState' can only be used within instance members of subclasses of 'State' • invalid_use_of_protected_member
+```
+
+รันจริงดู (`MaterialApp(home: Scaffold(body: BadCrossWidgetSetState()))`) output จริงไม่แก้ไขของ `flutter test`:
+
+```text
+The following assertion was thrown building SiblingB(dirty):
+setState() or markNeedsBuild() called during build.
+This SiblingA widget cannot be marked as needing to build because the framework is already in the
+process of building widgets. A widget can be marked as needing to be built during the build phase
+only if one of its ancestors is currently building. This exception is allowed because the framework
+builds parent widgets before children, which means a dirty descendant will always be built.
+Otherwise, the framework might not visit this widget during this build phase.
+The widget on which setState() or markNeedsBuild() was called was:
+  SiblingA-[LabeledGlobalKey<SiblingAState>#e3b3b]
+The widget which was currently being built when the offending call was made was:
+  SiblingB
+```
+
+นี่คือเหตุผลที่ `setState` ข้างใน `onPressed` callback ของตัวอย่างแรกสุดใช้ได้ปกติ (ไม่ใช่ข้างใน `build`): event handler รันระหว่าง frame ตอนที่ไม่มีอะไรกำลัง build อยู่ — ไม่มี `_debugCurrentBuildTarget` ให้ชนกัน
+
+## `initState` อ่าน inherited widget ไม่ได้อย่างเชื่อถือได้
+
+`context.dependOnInheritedWidgetOfExactType<T>()` (สิ่งที่ `Theme.of`, `MediaQuery.of`, `Provider.of` เรียกข้างใต้ทั้งหมด) ลงทะเบียน element ของ `State` นี้เป็น dependent เพื่อให้ rebuild อัตโนมัติเมื่อค่า inherited นั้นเปลี่ยน ระหว่าง `initState` element ยังต่อเข้ากับ dependency graph นั้นไม่ครบ:
+
+```dart
+// lib/initstate_inherited.dart
+import 'package:flutter/material.dart';
+
+/// Calls dependOnInheritedWidgetOfExactType from initState() — too early.
+class BadInitStateInherited extends StatefulWidget {
+  const BadInitStateInherited({super.key});
+  @override
+  State<BadInitStateInherited> createState() => _BadInitStateInheritedState();
+}
+
+class _BadInitStateInheritedState extends State<BadInitStateInherited> {
+  @override
+  void initState() {
+    super.initState();
+    // ❌ context is not fully hooked into the inherited-widget dependency
+    // tree yet inside initState().
+    context.dependOnInheritedWidgetOfExactType<MediaQuery>();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox();
+}
+```
+
+```dart
+// test/initstate_inherited_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/initstate_inherited.dart';
+
+void main() {
+  testWidgets('dependOnInheritedWidgetOfExactType in initState throws', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BadInitStateInherited()));
+    final exception = tester.takeException();
+    expect(exception, isA<FlutterError>());
+    expect(
+      exception.toString(),
+      contains('dependOnInheritedWidgetOfExactType<MediaQuery>() or dependOnInheritedElement() was called before'),
+    );
+  });
+}
+```
+
+```text
+✓ dependOnInheritedWidgetOfExactType in initState throws
+
+00:00 +1: All tests passed!
+```
+
+ข้อความ assertion จริง capture มาเต็ม ๆ:
+
+```text
+dependOnInheritedWidgetOfExactType<MediaQuery>() or dependOnInheritedElement() was called before
+_BadInitStateInheritedState.initState() completed.
+When an inherited widget changes, for example if the value of Theme.of() changes, its dependent
+widgets are rebuilt. If the dependent widget's reference to the inherited widget is in a constructor
+or an initState() method, then the rebuilt dependent widget will not reflect the changes in the
+inherited widget.
+Typically references to inherited widgets should occur in widget build() methods. Alternatively,
+initialization based on inherited widgets can be placed in the didChangeDependencies method, which
+is called after initState and whenever the dependencies change thereafter.
+```
+
+วิธีแก้คือตรงตามที่ข้อความบอก: ย้ายการอ่านไปที่ `build()` หรือไปที่ `didChangeDependencies()` ถ้าเป็น setup ครั้งเดียวที่ต้องพึ่งค่า inherited จริง ๆ (hook นั้นรันครั้งเดียวทันทีหลัง `initState` ซึ่งตอนนั้นการต่อ dependency พร้อมแล้ว — พิสูจน์ในตาราง lifecycle-order test ข้างบน ที่ `didChangeDependencies` log ทันทีหลัง `initState`)
+
+## field `late` กับ `initState`
+
+field `late final` คือคำสัญญา: "ฉันจะ assign ตัวนี้ก่อนที่จะมีอะไรอ่านมัน" `initState` คือที่ที่เหมาะสมสำหรับรักษาสัญญานั้นสำหรับ resource ต่อ instance (`TextEditingController`, `AnimationController`, `FocusNode`) ที่ต้องใช้ `widget` หรือ `this` ในการสร้าง — field initializer ธรรมดารันก่อน constructor body และยังเข้าถึง `widget` ไม่ได้
+
+```dart
+// lib/late_initstate.dart
+import 'package:flutter/material.dart';
+
+/// A `late` field is a promise: "I will assign this before anything reads
+/// it." initState() is the idiomatic place to keep that promise for
+/// per-instance resources (controllers, focus nodes) that need `this` or
+/// `widget` to construct — a plain field initializer runs too early for
+/// that (see the lesson prose).
+class ProfileField extends StatefulWidget {
+  const ProfileField({super.key, required this.userId, this.skipInit = false});
+  final String userId;
+  final bool skipInit; // forces the broken path, for the proof below
+
+  @override
+  State<ProfileField> createState() => _ProfileFieldState();
+}
+
+class _ProfileFieldState extends State<ProfileField> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.skipInit) {
+      _controller = TextEditingController(text: 'user-${widget.userId}');
+    }
+    // ❌ if skipInit is true, `_controller` is never assigned here.
+  }
+
+  @override
+  void dispose() {
+    if (!widget.skipInit) {
+      _controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => TextField(controller: _controller);
+}
+```
+
+```dart
+// test/late_initstate_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/late_initstate.dart';
+
+void main() {
+  testWidgets('late field assigned in initState is ready by first build', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: ProfileField(userId: '42'))),
+    );
+    final controller = tester.widget<TextField>(find.byType(TextField)).controller!;
+    expect(controller.text, 'user-42');
+  });
+
+  testWidgets('a late field never assigned throws LateInitializationError on first read', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: ProfileField(userId: '42', skipInit: true))),
+    );
+    final exception = tester.takeException();
+    expect(exception, isA<Error>());
+    expect(exception.toString(), contains('LateInitializationError'));
+    expect(exception.toString(), contains('has not been initialized'));
+  });
+}
+```
+
+```text
+✓ late field assigned in initState is ready by first build
+✓ a late field never assigned throws LateInitializationError on first read
+
+00:00 +2: All tests passed!
+```
+
+ข้อความจริง (ชื่อ field มี hash suffix เฉพาะรอบรัน): `LateInitializationError: Field '_controller@23181088' has not been initialized.` — เป็น `LateError` throw ตอนที่ `build()` อ่าน `_controller` เป็นครั้งแรก ไม่ใช่ตอนที่เรียก `initState` (branch ที่ถูกข้ามไม่ throw; *การอ่านทีหลัง* ต่างหากที่ throw) นี่คือเหตุผลที่ fix แบบ "เห็นได้ชัด" คือห่อการสร้างไว้ใน `if` โดยไม่มี `else` เป็นกับดัก: compile ผ่านสะอาด (analyzer เชื่อคำสัญญา `late` ของคุณ) และพังก็ต่อเมื่อ branch นั้นถูกเรียกจริงตอน runtime เท่านั้น
 
 ## scope ของ rebuild
 
@@ -68,8 +466,92 @@ export const lifecycleDiagram = `flowchart TB
 
 บทเรียนเชิงปฏิบัติ: **ดัน `setState` ให้ต่ำใน tree มากที่สุด** แยกส่วนที่เปลี่ยนออกไปเป็น `StatefulWidget` เล็ก ๆ ของตัวเอง เพื่อให้เฉพาะ subtree เล็ก ๆ นั้น rebuild ไม่ใช่ทั้งหน้า (โมดูล performance เจาะลึกเรื่องนี้)
 
+## Mental Model
+
+`State` object คือ state machine เล็ก ๆ และทุก hook ตอบคำถาม "อะไรเปลี่ยนถึงมาถึงจุดนี้?" `initState`: ฉันเพิ่งถูกสร้าง — setup resource ที่มีอายุเท่ากับฉัน `didChangeDependencies`: `InheritedWidget` ที่ฉันพึ่งเพิ่งอ่านได้ (หรือเปลี่ยน) — react กับมัน ห้ามใน `initState` ที่การต่อยังไม่เสร็จ `build`: มีใครถามว่าฉันหน้าตายังไงตอนนี้ — ตอบให้ตรงและเร็ว ไม่มี side effect `didUpdateWidget`: parent ให้ฉันมีชีวิตต่อแต่ให้ config ใหม่ — ปรับ ไม่ใช่สร้างใหม่ `deactivate`/`dispose`: ฉันกำลังจะไป — `deactivate` คือ "อาจจะชั่วคราว" `dispose` คือ "จริงจัง เก็บกวาด" `mounted` แค่ถามว่า "dispose รันหรือยัง?" — คำถามเดียวที่ async callback ทุกตัวต้องถามก่อนแตะ `setState`
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| guard `setState` แบบ async ด้วย `mounted` | ไม่ crash ถ้า widget หายไปก่อน `Future` resolve | เพิ่มบรรทัดในทุก async callback — ลืมง่าย |
+| อ่าน inherited data ใน `build()` | ต่อถูกต้องเสมอ ทันสมัยเสมอ | รันทุก rebuild — ต้องให้การอ่านเองถูกๆ |
+| อ่าน inherited data ใน `didChangeDependencies()` แทน | รันครั้งเดียวต่อการเปลี่ยนจริง ไม่ใช่ทุก build | เหมาะแค่ setup ครั้งเดียวที่ขับเคลื่อนด้วยค่านั้น ไม่ใช่ค่าที่ใช้ตรง ๆ ใน UI |
+| `late final` สำหรับ field ที่พึ่ง widget | compile สะอาด ไม่ต้อง nullable-แล้ว-bang ทุกที่ | assignment path ที่ลืมกลายเป็น `LateInitializationError` ตอน runtime ไม่ใช่ compile error |
+| แยก `setState` ไว้ใน child `StatefulWidget` เล็ก ๆ | scope การ rebuild เล็กลง | ต้องดูแล widget/file เพิ่มอีกหนึ่งตัว |
+
+## Common Misconceptions
+
+- **"setState() repaint หน้าจอทันที"** มัน mutate field และ mark element dirty — การ rebuild จริงเกิดในเฟรมถัดไป ไม่ใช่ synchronous ข้างในการเรียก
+- **"เรียก setState() ตัวไหนก็ปลอดภัยตราบใด compile ผ่าน"** พิสูจน์ข้างบน: `setState` แบบไม่ guard หลัง `dispose()` compile ผ่านสะอาดแต่ crash ตอน runtime; เรียก `setState` ของ widget อื่นจาก `build()` ของตัวเอง compile ผ่าน (พร้อม analyzer warning เพราะ `setState` เป็น `@protected`) และก็ crash ตอน runtime เหมือนกัน
+- **"initState เป็นที่ปลอดภัยสำหรับอ่าน Theme.of/MediaQuery.of/Provider.of"** พิสูจน์ข้างบน: error จริงบอกตรง ๆ ว่าต้องย้ายไป `build()` หรือ `didChangeDependencies()`
+- **"field `late` ก็เหมือน `T?` กับ `!` นั่นแหละ"** field `late` ที่ไม่เคยถูก assign จะ throw `LateInitializationError` เฉพาะเจาะจงตอนที่มันถูก *อ่าน* เป็นครั้งแรก ไม่ใช่ตอนที่ประกาศหรือ skip — พิสูจน์ข้างบนแล้ว และจุดที่พังอาจอยู่ไกลจาก bug จริง (เงื่อนไขใน `initState`)
+- **"deactivate() กับ dispose() คือ hook เดียวกันแค่คนละชื่อ"** `deactivate` ยิงเมื่อ element ออกจาก tree และอาจกลับมาได้ (เช่นย้ายไปใต้ `GlobalKey`) ใน frame เดียวกัน; `dispose` ยิงก็ต่อเมื่อ Flutter ยืนยันแล้วว่าไปถาวร — พิสูจน์ตามลำดับใน lifecycle test ข้างบน
+
+## Reading AI-generated code
+
+`StatefulWidget` ที่ AI generate มักได้ *รูปทรง* ของ lifecycle ถูกต้อง แต่ข้าม guard ที่สำคัญเฉพาะตอนมี race condition — ซึ่งเป็น bug ประเภทที่ผ่าน manual test เร็ว ๆ ไปได้แล้ว ship ออกไป
+
+```dart
+// @expect-error missing `mounted` guard — real "setState() called after dispose()" crash, proven above
+class UserBio extends StatefulWidget {
+  const UserBio({super.key, required this.userId});
+  final String userId;
+  @override
+  State<UserBio> createState() => _UserBioState();
+}
+
+class _UserBioState extends State<UserBio> {
+  String _bio = 'Loading...';
+
+  @override
+  void initState() {
+    super.initState();
+    fetchBio(widget.userId).then((bio) {
+      setState(() => _bio = bio); // no mounted check
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_bio);
+}
+```
+
+ก่อนเชื่อ `StatefulWidget` ที่ generate มา เช็คสิ่งเหล่านี้:
+
+- ทุก `setState` ที่เข้าถึงได้จาก async callback (`.then`, `await` continuation, `Timer`, `Stream` listener) ถูก guard ด้วย `if (!mounted) return;` — หรือ callback นั้นถูก cancel ใน `dispose()`
+- `context.dependOnInheritedWidgetOfExactType`/`Theme.of`/`MediaQuery.of`/`Provider.of` อยู่ใน `build()` หรือ `didChangeDependencies()` ไม่ใช่ `initState()`
+- ทุก assignment path ของ field `late` รันจริงก่อนที่ field จะถูกอ่านครั้งแรก — `if` ที่ไม่มี `else` รอบการ assign `late` ใน `initState` คือกับดักจริงที่พลาดง่าย (พิสูจน์ข้างบน)
+- ไม่เคยเรียก `setState` บน `State` object ของ widget อื่นจากข้างใน `build()` ของ widget อีกตัว — เป็นการละเมิด `@protected` จริงที่ analyzer จะตี บวกกับ assertion ตอน runtime
+
+<SpotTheBug code={`class SearchResults extends StatefulWidget {
+  const SearchResults({super.key, required this.query});
+  final String query;
+  @override
+  State<SearchResults> createState() => _SearchResultsState();
+}
+
+class _SearchResultsState extends State<SearchResults> {
+  late List<String> _results;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.query.isNotEmpty) {
+      _results = _search(widget.query);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text('\${_results.length} results');
+  }
+}`}>
+`_results` เป็น `late` แต่ถูก assign เฉพาะตอน `widget.query.isNotEmpty` — สร้าง widget นี้ด้วย `query` ว่างแล้ว `build()` จะ throw `LateInitializationError: Field '_results' has not been initialized.` ทันทีที่อ่าน `_results.length` ตรงกับกับดักที่พิสูจน์ไว้ก่อนหน้าในบทนี้เป๊ะ วิธีแก้: ให้ `_results` มี default จริง (`late List<String> _results = [];` หรือ assign `_results = const [];` ใน branch `else`) เพื่อให้ทุก path ผ่าน `initState` รักษาสัญญาไว้
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`setState` mutate field ของคุณและ mark element เป็น **dirty** โดย schedule `build` ใน frame ถัดไป — mutate ข้างใน callback เสมอ lifecycle มีหน้าที่ชัดเจน: `initState` สำหรับ setup ครั้งเดียว, `didChangeDependencies` สำหรับอ่าน inherited data, `build` (pure, เร็ว, เรียกบ่อย), `dispose` สำหรับ cleanup เก็บ `setState` ให้ต่ำใน tree มากที่สุดเพื่อให้ subtree เล็กที่สุด rebuild
+`setState` mutate field ของคุณและ mark element เป็น **dirty** โดย schedule `build` ใน frame ถัดไป — mutate ข้างใน callback เสมอ lifecycle รันตามลำดับที่พิสูจน์แล้ว: `initState` → `didChangeDependencies` → `build` → (`didUpdateWidget` → `build`)* → `deactivate` → `dispose` มี crash จริงสามแบบที่ต้อง guard แต่ละอันพิสูจน์ข้างบนพร้อม output จริงของ Flutter: `setState` แบบไม่ guard หลัง `dispose()` (`"setState() called after dispose()"` — guard ด้วย `mounted`), `setState` บน widget ที่ไม่ใช่ descendant ขณะมีอะไรกำลัง build อยู่ (`"setState() or markNeedsBuild() called during build"` — พ่วง analyzer warning `@protected`), และการอ่าน inherited widget จาก `initState` (`"...was called before ...initState() completed"` — ย้ายไป `build()`/`didChangeDependencies()`) field `late` ที่ไม่เคยถูก assign จะ throw `LateInitializationError` ตอน*อ่าน*ครั้งแรก ไม่ใช่ตอน assignment ที่ถูกข้าม — ตรวจทุก branch
 </Callout>
 
 export const quizSetState = [
@@ -82,36 +564,73 @@ export const quizSetState = [
       'dispose widget',
     ],
     answer: 1,
+    explain: 'การ rebuild ถูก schedule สำหรับ frame ถัดไป ไม่ใช่ synchronous — callback แค่ mutate field และ flag element เป็น dirty',
   },
   {
-    q: 'lifecycle hook ไหนคือที่ถูกต้องสำหรับ dispose controller และ cancel subscription?',
+    q: 'ตามที่ lifecycle test ของบทนี้พิสูจน์ hook เรียงลำดับยังไงตอน mount ครั้งแรก แล้วตอน config เปลี่ยน?',
     options: [
-      'initState',
-      'build',
-      'dispose',
-      'didChangeDependencies',
-    ],
-    answer: 2,
-  },
-  {
-    q: 'ทำไม build method ต้อง pure และไม่มี side effect?',
-    options: [
-      'รันครั้งเดียว',
-      'ถูกเรียกทุกครั้งที่ rebuild — side effect ตรงนั้นจะยิงซ้ำ ๆ และคาดเดาไม่ได้',
-      'Dart ห้าม side effect',
-      'รันบน thread แยก',
+      'build, initState, didChangeDependencies, dispose',
+      'initState, didChangeDependencies, build — แล้วตอน config เปลี่ยน: didUpdateWidget, build',
+      'didChangeDependencies, initState, build, didUpdateWidget',
+      'initState, build, didChangeDependencies, didUpdateWidget',
     ],
     answer: 1,
+    explain: 'capture มาตรง ๆ จาก widget test ที่ assert log array: ["initState", "didChangeDependencies", "build"] ตอน mount แล้ว ["didUpdateWidget", "build"] ถูกเพิ่มตอน config เปลี่ยน',
   },
   {
-    q: 'จะจำกัดปริมาณ rebuild เมื่อ state เปลี่ยนได้อย่างไร?',
+    q: 'async callback ใน initState() เรียก setState() หลังจาก widget ถูก dispose ไปแล้ว โดยไม่มี mounted check error จริงที่พิสูจน์คืออะไร?',
     options: [
-      'เรียก setState สองครั้ง',
-      'ดัน setState ให้ต่ำใน tree มากที่สุด โดยแยกส่วนที่เปลี่ยนไว้ใน widget เล็ก ๆ ของตัวเอง',
-      'วาง state ทั้งหมดไว้ที่ root ของ app',
-      'เลี่ยง StatefulWidget ทั้งหมด',
+      'ไม่ทำอะไรเงียบ ๆ',
+      '"setState() called after dispose()" — crash จริง capture มาตรง ๆ จาก flutter test ในบทนี้',
+      'compile error',
+      'warning แค่ตอน debug mode ไม่ throw เลย',
     ],
     answer: 1,
+    explain: 'พิสูจน์ด้วยข้อความเป๊ะ: วิธีแก้คือเช็ค `mounted` (เป็น false หลัง dispose() รันแล้ว) ก่อนเรียก setState ใน continuation หลัง await ใด ๆ',
+  },
+  {
+    q: 'ทำไมการเรียก setState() บน State ของ widget ที่เป็น SIBLING จากข้างใน build() ของตัวเองถึง throw "setState() or markNeedsBuild() called during build" ตามที่พิสูจน์ในบทนี้?',
+    options: [
+      'setState เรียกระหว่าง build ไม่ได้เลย รวมถึง build ของ widget ตัวเอง',
+      'Flutter ยอม mark widget เป็น dirty กลาง build ได้ก็ต่อเมื่อมันเป็น DESCENDANT ของสิ่งที่กำลัง build อยู่ เพราะ parent build ก่อน children — sibling ไม่การันตีว่าจะถูกเยี่ยมชมรอบนี้',
+      'เป็น syntax error',
+      'มีแค่ StatefulWidget เท่านั้นที่เรียก setState ได้ และตัวอย่างใช้ StatelessWidget',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ตรง ๆ จากข้อความ assertion จริงของ Flutter ที่ quote ในบทเรียน บวกกับ analyzer warning จริง (invalid_use_of_protected_member) เพราะ setState เป็น @protected',
+  },
+  {
+    q: 'ทำไม context.dependOnInheritedWidgetOfExactType (สิ่งที่ Theme.of/MediaQuery.of/Provider.of เรียก) ถึง throw เมื่อใช้ใน initState() ตามที่พิสูจน์ในบทนี้?',
+    options: [
+      'ไม่เคย throw ใน initState เลย',
+      'element ยังต่อเข้ากับ inherited-widget dependency graph ไม่ครบระหว่าง initState — error จริงบอกให้ย้ายไป build() หรือ didChangeDependencies()',
+      'มีแค่ build() method เท่านั้นที่เข้าถึง BuildContext ได้',
+      'throw เฉพาะใน release build',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ด้วยข้อความ FlutterError จริง: "...was called before _BadInitStateInheritedState.initState() completed" ที่แนะนำ build() หรือ didChangeDependencies() ตรง ๆ',
+  },
+  {
+    q: 'field late final ถูก assign เฉพาะข้างใน if branch ใน initState() โดยไม่มี else และไม่มี default เกิดอะไรขึ้น ตามที่พิสูจน์ในบทนี้?',
+    options: [
+      'compile-time error จับได้ทันที',
+      'compile สะอาด; ครั้งแรกที่ build() อ่าน field ที่ไม่เคยถูก assign มันจะ throw LateInitializationError ("has not been initialized")',
+      'field default เป็น null เงียบ ๆ',
+      'Dart infer ค่า default ให้อัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ด้วย widget test จริงที่ไปโดน branch ที่ถูกข้าม: analyzer เชื่อคำสัญญา late ตอน compile ดังนั้นความล้มเหลวโผล่แค่ตอนอ่านจริงตอน runtime',
+  },
+  {
+    q: 'ความต่างเชิงปฏิบัติระหว่าง deactivate() กับ dispose() ตามที่พิสูจน์ใน lifecycle-order test คืออะไร?',
+    options: [
+      'มันยิงพร้อมกันเสมอ เลยไม่มีความต่างเชิงปฏิบัติ',
+      'deactivate() ยิงเมื่อ element ออกจาก tree (อาจชั่วคราว เช่นย้ายไปใต้ GlobalKey); dispose() ยิงก็ต่อเมื่อ Flutter ยืนยันว่ามันไปถาวรแล้ว — พิสูจน์ว่ายิงตามลำดับนี้',
+      'dispose() ยิงก่อน deactivate() เสมอ',
+      'deactivate() มีแค่ StatelessWidget เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'lifecycle test log deactivate ตามด้วย dispose ทันทีเมื่อ widget ถูกเอาออกจาก tree ทั้งหมด ตรงกับลำดับที่เอกสารระบุ',
   },
 ];
 

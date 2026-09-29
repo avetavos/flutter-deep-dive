@@ -1,6 +1,6 @@
 ---
 title: 'setState & the Lifecycle'
-description: 'How setState marks an element dirty and triggers a rebuild, the full State lifecycle, what belongs in each hook, and the scope of a setState rebuild.'
+description: 'How setState marks an element dirty and triggers a rebuild, the full State lifecycle proven in order, the real errors setState/late/initState misuse throws, and the scope of a setState rebuild.'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## What setState actually does
 
@@ -42,9 +43,9 @@ class _CounterState extends State<Counter> {
 
 Two rules fall out of this: mutate state **inside** the `setState` callback (so the change and the dirty-marking happen together), and know that `setState` schedules a rebuild for the *next frame* — it is not synchronous.
 
-## The State lifecycle
+## The State lifecycle, proven in order
 
-A `State` object has a well-defined lifecycle. Knowing which hook does what prevents a whole class of bugs.
+A `State` object has a well-defined lifecycle. Knowing which hook does what prevents a whole class of bugs — and the order isn't just documentation, it's testable.
 
 <Mermaid title="The State lifecycle" code={lifecycleDiagram} />
 
@@ -54,13 +55,410 @@ export const lifecycleDiagram = `flowchart TB
   deps --> build["build()\ncalled on every rebuild"]
   build --> update["didUpdateWidget()\nparent rebuilt with new config"]
   update --> build
-  build --> dispose["dispose()\ncleanup"]`;
+  build --> deactivate["deactivate()\nremoved from the tree"]
+  deactivate --> dispose["dispose()\nnot reinserted — cleanup"]`;
 
-- **`initState`** — one-time setup: create controllers, subscribe to streams. Runs once. You cannot use `context` for inherited widgets here reliably.
-- **`didChangeDependencies`** — runs after `initState` and again whenever an inherited dependency changes. The safe place to read `InheritedWidget`/`Provider` data that setup depends on.
-- **`build`** — called on every rebuild. Must be **pure and fast**: no side effects, no network calls, no subscriptions. Just describe the UI from current state.
-- **`didUpdateWidget`** — the parent rebuilt and gave this State a new widget config; react to changed props (e.g. re-subscribe if an `id` changed).
-- **`dispose`** — clean up: dispose controllers, cancel subscriptions. Forgetting this is the classic Flutter memory leak.
+```dart
+// lib/lifecycle_logger.dart
+import 'package:flutter/material.dart';
+
+class LifecycleLogger extends StatefulWidget {
+  const LifecycleLogger({super.key, required this.value, required this.log});
+  final int value;
+  final List<String> log;
+
+  @override
+  State<LifecycleLogger> createState() => _LifecycleLoggerState();
+}
+
+class _LifecycleLoggerState extends State<LifecycleLogger> {
+  @override
+  void initState() {
+    super.initState();
+    widget.log.add('initState');
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    widget.log.add('didChangeDependencies');
+  }
+
+  @override
+  void didUpdateWidget(covariant LifecycleLogger oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    widget.log.add('didUpdateWidget');
+  }
+
+  @override
+  void deactivate() {
+    widget.log.add('deactivate');
+    super.deactivate();
+  }
+
+  @override
+  void dispose() {
+    widget.log.add('dispose');
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    widget.log.add('build');
+    return Text('${widget.value}');
+  }
+}
+```
+
+```dart
+// test/lifecycle_logger_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/lifecycle_logger.dart';
+
+void main() {
+  testWidgets(
+    'full State lifecycle order: initState, didChangeDependencies, build, didUpdateWidget, deactivate, dispose',
+    (tester) async {
+      final log = <String>[];
+
+      await tester.pumpWidget(MaterialApp(home: LifecycleLogger(value: 1, log: log)));
+      expect(log, ['initState', 'didChangeDependencies', 'build']);
+
+      // Parent rebuilds with a new config for the same widget/State.
+      await tester.pumpWidget(MaterialApp(home: LifecycleLogger(value: 2, log: log)));
+      expect(log, ['initState', 'didChangeDependencies', 'build', 'didUpdateWidget', 'build']);
+
+      // Widget removed from the tree entirely.
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      expect(log, [
+        'initState', 'didChangeDependencies', 'build', 'didUpdateWidget', 'build',
+        'deactivate', 'dispose',
+      ]);
+    },
+  );
+}
+```
+
+```text
+✓ full State lifecycle order: initState, didChangeDependencies, build, didUpdateWidget, deactivate, dispose
+
+00:00 +1: All tests passed!
+```
+
+- **`initState`** — one-time setup: create controllers, subscribe to streams. Runs once. You cannot reliably use `context` for inherited widgets here (proven below).
+- **`didChangeDependencies`** — runs right after `initState`, and again whenever an inherited dependency this `State` reads actually changes. The safe place to read `InheritedWidget`/`Provider`/`Theme.of` data that setup depends on.
+- **`build`** — called on every rebuild (proven above: twice for one config change — once for the initial mount, once for the update). Must be **pure and fast**: no side effects, no network calls, no subscriptions.
+- **`didUpdateWidget`** — the parent rebuilt and gave this `State` a new widget config; react to changed props (e.g. re-subscribe if an `id` changed). Runs **before** the `build` it triggers, confirmed by the log order above.
+- **`deactivate`** — the element was removed from the tree. It might still be reinserted elsewhere before the frame ends (e.g. moved under a `GlobalKey`) — Flutter doesn't yet know it's permanent.
+- **`dispose`** — called once Flutter confirms the element was *not* reinserted: clean up controllers, cancel subscriptions. Forgetting this is the classic Flutter memory leak.
+
+## `mounted`: guarding setState after an await
+
+`initState` kicking off an async load is common — but the `State` can be disposed (user navigates away, list item scrolled out and rebuilt) *while that `Future` is still pending*. When it resolves and calls `setState`, there is no widget left to rebuild.
+
+```dart
+// lib/mounted_after_await.dart
+import 'package:flutter/material.dart';
+
+/// Toggle: whether the widget guards its post-await setState with `mounted`.
+class DelayedLabel extends StatefulWidget {
+  const DelayedLabel({super.key, required this.guarded});
+  final bool guarded;
+
+  @override
+  State<DelayedLabel> createState() => _DelayedLabelState();
+}
+
+class _DelayedLabelState extends State<DelayedLabel> {
+  String _text = 'loading';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    // ❌ Without the guard: this widget may already be disposed (e.g. the
+    // user navigated away before the delay finished) — setState throws.
+    if (widget.guarded && !mounted) return;
+    setState(() => _text = 'loaded');
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_text);
+}
+```
+
+Unguarded (`guarded: false`), unmounted mid-flight, run in this probe — the real, unedited `flutter test` failure:
+
+```text
+setState() called after dispose(): _DelayedLabelState#27577(lifecycle state: defunct, not mounted)
+This error happens if you call setState() on a State object for a widget that no longer appears in
+the widget tree (e.g., whose parent widget no longer includes the widget in its build). This error
+can occur when code calls setState() from a timer, from an animation callback, or after an
+asynchronous operation (such as an awaited network request or other Future) completes after the
+widget has been removed from the tree.
+The preferred solution is to cancel the timer or stop listening to the animation in the dispose()
+callback. Another solution is to check the "mounted" property of this object before calling
+setState() to ensure the object is still in the tree.
+This error might indicate a memory leak if setState() is being called because another object is
+retaining a reference to this State object after it has been removed from the tree. To avoid memory
+leaks, consider breaking the reference to this object during dispose().
+```
+
+The `if (widget.guarded && !mounted) return;` line is the fix — `mounted` (a real getter on `State`, `true` until `dispose()` runs) turns the crash into a harmless no-op:
+
+```dart
+// test/mounted_after_await_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/mounted_after_await.dart';
+
+void main() {
+  testWidgets('mounted-guarded setState after dispose is a silent no-op (no crash)', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: DelayedLabel(guarded: true)));
+    // Unmount before the 20ms delay resolves.
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    // Let the pending Future run past the mounted check.
+    await tester.pump(const Duration(milliseconds: 30));
+    expect(tester.takeException(), isNull);
+  });
+}
+```
+
+```text
+✓ mounted-guarded setState after dispose is a silent no-op (no crash)
+
+00:00 +1: All tests passed!
+```
+
+## `setState` called while something is already building
+
+The rule "never call `setState` inside `build`" has a precise version: Flutter allows marking a widget dirty *during* a build pass only if that widget is a **descendant** of whatever is currently building — because parents build before children, so a dirty descendant is guaranteed to still be visited this pass. Reach *sideways* (a sibling) or upward, and Flutter can't make that guarantee, and refuses:
+
+```dart
+// lib/setstate_in_build.dart
+import 'package:flutter/material.dart';
+
+class SiblingA extends StatefulWidget {
+  const SiblingA({super.key});
+  @override
+  State<SiblingA> createState() => SiblingAState();
+}
+
+class SiblingAState extends State<SiblingA> {
+  int count = 0;
+  @override
+  Widget build(BuildContext context) => Text('$count');
+}
+
+/// Reaches sideways into a SIBLING's State and calls setState on it while
+/// THIS widget is still building — not a descendant relationship, so the
+/// framework cannot guarantee the sibling will still be visited this pass.
+class SiblingB extends StatelessWidget {
+  const SiblingB({super.key, required this.aKey});
+  final GlobalKey<SiblingAState> aKey;
+
+  @override
+  Widget build(BuildContext context) {
+    // ❌ setState() on a sibling's State, called from this widget's build().
+    aKey.currentState?.setState(() {
+      aKey.currentState!.count++;
+    });
+    return const SizedBox();
+  }
+}
+
+class BadCrossWidgetSetState extends StatelessWidget {
+  BadCrossWidgetSetState({super.key});
+  final aKey = GlobalKey<SiblingAState>();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [SiblingA(key: aKey), SiblingB(aKey: aKey)]);
+  }
+}
+```
+
+`flutter analyze` already flags the smell before you even run it — `setState` is `@protected`, meaning only `SiblingAState` itself is supposed to call it:
+
+```text
+warning • The member 'setState' can only be used within instance members of subclasses of 'State' • invalid_use_of_protected_member
+```
+
+Running it anyway (`MaterialApp(home: Scaffold(body: BadCrossWidgetSetState()))`), the real, unedited `flutter test` output:
+
+```text
+The following assertion was thrown building SiblingB(dirty):
+setState() or markNeedsBuild() called during build.
+This SiblingA widget cannot be marked as needing to build because the framework is already in the
+process of building widgets. A widget can be marked as needing to be built during the build phase
+only if one of its ancestors is currently building. This exception is allowed because the framework
+builds parent widgets before children, which means a dirty descendant will always be built.
+Otherwise, the framework might not visit this widget during this build phase.
+The widget on which setState() or markNeedsBuild() was called was:
+  SiblingA-[LabeledGlobalKey<SiblingAState>#e3b3b]
+The widget which was currently being built when the offending call was made was:
+  SiblingB
+```
+
+This is also why the very first example's own `setState` inside its `onPressed` callback (not inside `build`) is fine: an event handler runs *between* frames, when nothing is building — there is no `_debugCurrentBuildTarget` to conflict with.
+
+## `initState` can't reliably read inherited widgets
+
+`context.dependOnInheritedWidgetOfExactType<T>()` (what `Theme.of`, `MediaQuery.of`, `Provider.of` all call under the hood) registers this `State`'s element as a dependent, so it rebuilds automatically when that inherited value changes. During `initState`, the element isn't fully wired into that dependency graph yet:
+
+```dart
+// lib/initstate_inherited.dart
+import 'package:flutter/material.dart';
+
+/// Calls dependOnInheritedWidgetOfExactType from initState() — too early.
+class BadInitStateInherited extends StatefulWidget {
+  const BadInitStateInherited({super.key});
+  @override
+  State<BadInitStateInherited> createState() => _BadInitStateInheritedState();
+}
+
+class _BadInitStateInheritedState extends State<BadInitStateInherited> {
+  @override
+  void initState() {
+    super.initState();
+    // ❌ context is not fully hooked into the inherited-widget dependency
+    // tree yet inside initState().
+    context.dependOnInheritedWidgetOfExactType<MediaQuery>();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox();
+}
+```
+
+```dart
+// test/initstate_inherited_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/initstate_inherited.dart';
+
+void main() {
+  testWidgets('dependOnInheritedWidgetOfExactType in initState throws', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BadInitStateInherited()));
+    final exception = tester.takeException();
+    expect(exception, isA<FlutterError>());
+    expect(
+      exception.toString(),
+      contains('dependOnInheritedWidgetOfExactType<MediaQuery>() or dependOnInheritedElement() was called before'),
+    );
+  });
+}
+```
+
+```text
+✓ dependOnInheritedWidgetOfExactType in initState throws
+
+00:00 +1: All tests passed!
+```
+
+The real assertion text, captured in full:
+
+```text
+dependOnInheritedWidgetOfExactType<MediaQuery>() or dependOnInheritedElement() was called before
+_BadInitStateInheritedState.initState() completed.
+When an inherited widget changes, for example if the value of Theme.of() changes, its dependent
+widgets are rebuilt. If the dependent widget's reference to the inherited widget is in a constructor
+or an initState() method, then the rebuilt dependent widget will not reflect the changes in the
+inherited widget.
+Typically references to inherited widgets should occur in widget build() methods. Alternatively,
+initialization based on inherited widgets can be placed in the didChangeDependencies method, which
+is called after initState and whenever the dependencies change thereafter.
+```
+
+The fix is exactly what the message says: move the read into `build()`, or into `didChangeDependencies()` if it's one-time setup that genuinely needs the inherited value (that hook runs once right after `initState`, by which point the dependency wiring is ready — proven in the lifecycle-order test above, where `didChangeDependencies` logged immediately after `initState`).
+
+## `late` fields and `initState`
+
+A `late final` field is a promise: "I will assign this before anything reads it." `initState` is the idiomatic place to keep that promise for per-instance resources (`TextEditingController`, `AnimationController`, `FocusNode`) that need `widget` or `this` to construct — a plain field initializer runs before the constructor body and can't reach `widget` yet.
+
+```dart
+// lib/late_initstate.dart
+import 'package:flutter/material.dart';
+
+/// A `late` field is a promise: "I will assign this before anything reads
+/// it." initState() is the idiomatic place to keep that promise for
+/// per-instance resources (controllers, focus nodes) that need `this` or
+/// `widget` to construct — a plain field initializer runs too early for
+/// that (see the lesson prose).
+class ProfileField extends StatefulWidget {
+  const ProfileField({super.key, required this.userId, this.skipInit = false});
+  final String userId;
+  final bool skipInit; // forces the broken path, for the proof below
+
+  @override
+  State<ProfileField> createState() => _ProfileFieldState();
+}
+
+class _ProfileFieldState extends State<ProfileField> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.skipInit) {
+      _controller = TextEditingController(text: 'user-${widget.userId}');
+    }
+    // ❌ if skipInit is true, `_controller` is never assigned here.
+  }
+
+  @override
+  void dispose() {
+    if (!widget.skipInit) {
+      _controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => TextField(controller: _controller);
+}
+```
+
+```dart
+// test/late_initstate_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/late_initstate.dart';
+
+void main() {
+  testWidgets('late field assigned in initState is ready by first build', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: ProfileField(userId: '42'))),
+    );
+    final controller = tester.widget<TextField>(find.byType(TextField)).controller!;
+    expect(controller.text, 'user-42');
+  });
+
+  testWidgets('a late field never assigned throws LateInitializationError on first read', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: ProfileField(userId: '42', skipInit: true))),
+    );
+    final exception = tester.takeException();
+    expect(exception, isA<Error>());
+    expect(exception.toString(), contains('LateInitializationError'));
+    expect(exception.toString(), contains('has not been initialized'));
+  });
+}
+```
+
+```text
+✓ late field assigned in initState is ready by first build
+✓ a late field never assigned throws LateInitializationError on first read
+
+00:00 +2: All tests passed!
+```
+
+The real message (the field name gets a run-specific hash suffix): `LateInitializationError: Field '_controller@23181088' has not been initialized.` — a `LateError`, thrown the first time `build()` reads `_controller`, not at the `initState` call site itself (the skipped branch doesn't throw; the *later read* does). This is exactly why the "obvious" fix of wrapping construction in an `if` without an `else` is a trap: it compiles clean (the analyzer trusts your `late` promise), and only fails the first time that branch is actually hit at runtime.
 
 ## The scope of a rebuild
 
@@ -68,8 +466,92 @@ export const lifecycleDiagram = `flowchart TB
 
 The practical lesson: **push `setState` as low in the tree as possible.** Isolate the changing bit into its own small `StatefulWidget` so only that tiny subtree rebuilds, not the whole page. (The performance module goes deeper on this.)
 
+## Mental Model
+
+A `State` object is a little state machine, and every hook answers "what changed to get me here?" `initState`: I was just created — set up resources that live as long as I do. `didChangeDependencies`: an `InheritedWidget` I depend on just became readable (or changed) — react to it, never in `initState` where that wiring isn't finished. `build`: someone asked what I look like right now — answer honestly and quickly, no side effects. `didUpdateWidget`: my parent kept me alive but gave me new configuration — reconcile, don't recreate. `deactivate`/`dispose`: I'm leaving — `deactivate` is "maybe temporarily," `dispose` is "for real, clean up." `mounted` is just "has `dispose` run yet?" — the one question every async callback must ask before touching `setState`.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| Guard async `setState` with `mounted` | No crash if the widget is gone by the time a `Future` resolves | One more line at every async callback site — easy to forget |
+| Read inherited data in `build()` | Always correctly wired, always current | Runs on every rebuild — keep the read itself cheap |
+| Read inherited data in `didChangeDependencies()` instead | Runs once per actual dependency change, not every build | Only right for one-time setup driven by that value, not for values used directly in the UI |
+| `late final` for widget-dependent fields | Compiles clean, no nullable-then-bang everywhere | A forgotten assignment path becomes a runtime `LateInitializationError`, not a compile error |
+| Isolate `setState` in a small child `StatefulWidget` | Smaller rebuild scope | One more widget/file to maintain |
+
+## Common Misconceptions
+
+- **"setState() redraws the screen immediately."** It mutates fields and marks the element dirty — the actual rebuild happens on the next frame, not synchronously inside the call.
+- **"Any setState() call is safe as long as it compiles."** Proven above: an unguarded `setState` after `dispose()` compiles fine and crashes at runtime; calling another widget's `setState` from your own `build()` compiles fine (with an analyzer warning, since `setState` is `@protected`) and crashes at runtime too.
+- **"initState is a safe place to read Theme.of/MediaQuery.of/Provider.of."** Proven above: the real error is explicit that this must move to `build()` or `didChangeDependencies()`.
+- **"A `late` field is basically the same as `T?` with `!`."** A `late` field that's never assigned throws a specific `LateInitializationError` the first time it's *read*, not when it's declared or skipped — proven above, and the failure point can be far from the actual bug (a conditional in `initState`).
+- **"deactivate() and dispose() are the same hook with two names."** `deactivate` fires when an element leaves the tree and might still come back (e.g. moved under a `GlobalKey`) this same frame; `dispose` only fires once Flutter has confirmed it's gone for good — proven in order in the lifecycle test above.
+
+## Reading AI-generated code
+
+AI-generated `StatefulWidget`s tend to get the *shape* of the lifecycle right but skip the guard that only matters under a race condition — which is exactly the kind of bug that passes a quick manual test and ships.
+
+```dart
+// @expect-error missing `mounted` guard — real "setState() called after dispose()" crash, proven above
+class UserBio extends StatefulWidget {
+  const UserBio({super.key, required this.userId});
+  final String userId;
+  @override
+  State<UserBio> createState() => _UserBioState();
+}
+
+class _UserBioState extends State<UserBio> {
+  String _bio = 'Loading...';
+
+  @override
+  void initState() {
+    super.initState();
+    fetchBio(widget.userId).then((bio) {
+      setState(() => _bio = bio); // no mounted check
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(_bio);
+}
+```
+
+Before trusting a generated `StatefulWidget`, check for:
+
+- Every `setState` reachable from an async callback (`.then`, `await` continuation, `Timer`, `Stream` listener) guarded by `if (!mounted) return;` — or the callback itself cancelled in `dispose()`.
+- `context.dependOnInheritedWidgetOfExactType`/`Theme.of`/`MediaQuery.of`/`Provider.of` calls living in `build()` or `didChangeDependencies()`, never `initState()`.
+- A `late` field's every assignment path actually runs before the field is first read — an `if` without an `else` around a `late` assignment in `initState` is a real, easy-to-miss trap (proven above).
+- `setState` never called on another widget's `State` object from inside a different widget's `build()` — a real `@protected` violation the analyzer will flag, on top of the runtime assertion.
+
+<SpotTheBug code={`class SearchResults extends StatefulWidget {
+  const SearchResults({super.key, required this.query});
+  final String query;
+  @override
+  State<SearchResults> createState() => _SearchResultsState();
+}
+
+class _SearchResultsState extends State<SearchResults> {
+  late List<String> _results;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.query.isNotEmpty) {
+      _results = _search(widget.query);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text('\${_results.length} results');
+  }
+}`}>
+`_results` is `late` but only assigned when `widget.query.isNotEmpty` — construct this widget with an empty `query` and `build()` throws `LateInitializationError: Field '_results' has not been initialized.` the moment it reads `_results.length`, exactly the trap proven earlier in this lesson. The fix: give `_results` a real default (`late List<String> _results = [];` or assign `_results = const [];` in the `else` branch) so every path through `initState` leaves the promise kept.
+</SpotTheBug>
+
 <Callout title="The one-line takeaway">
-`setState` mutates your fields and marks the element **dirty**, scheduling a `build` on the next frame — always mutate inside the callback. The lifecycle has clear jobs: `initState` for one-time setup, `didChangeDependencies` for inherited-data reads, `build` (pure, fast, called often), `dispose` for cleanup. Keep `setState` as low in the tree as possible so the smallest subtree rebuilds.
+`setState` mutates your fields and marks the element **dirty**, scheduling a `build` on the next frame — always mutate inside the callback. The lifecycle runs in a proven order: `initState` → `didChangeDependencies` → `build` → (`didUpdateWidget` → `build`)* → `deactivate` → `dispose`. Three real crashes to guard against, each proven above with the exact Flutter output: unguarded `setState` after `dispose()` (`"setState() called after dispose()"` — guard with `mounted`), `setState` on a non-descendant while something is building (`"setState() or markNeedsBuild() called during build"` — also an analyzer `@protected` warning), and reading inherited widgets from `initState` (`"...was called before ...initState() completed"` — move to `build()`/`didChangeDependencies()`). A `late` field never assigned throws `LateInitializationError` on first *read*, not at the skipped assignment — audit every branch.
 </Callout>
 
 export const quizSetState = [
@@ -82,36 +564,73 @@ export const quizSetState = [
       'Disposes the widget',
     ],
     answer: 1,
+    explain: 'The rebuild is scheduled for the next frame, not synchronous — the callback just mutates fields and flags the element dirty.',
   },
   {
-    q: 'Which lifecycle hook is the right place to dispose controllers and cancel subscriptions?',
+    q: 'Proven in this lesson\'s lifecycle test, in what order do the hooks fire on first mount and then a config change?',
     options: [
-      'initState',
-      'build',
-      'dispose',
-      'didChangeDependencies',
-    ],
-    answer: 2,
-  },
-  {
-    q: 'Why must the build method stay pure and side-effect-free?',
-    options: [
-      'It only runs once',
-      'It is called on every rebuild — side effects there fire repeatedly and unpredictably',
-      'Dart forbids side effects',
-      'It runs on a separate thread',
+      'build, initState, didChangeDependencies, dispose',
+      'initState, didChangeDependencies, build — then on a config change: didUpdateWidget, build',
+      'didChangeDependencies, initState, build, didUpdateWidget',
+      'initState, build, didChangeDependencies, didUpdateWidget',
     ],
     answer: 1,
+    explain: 'Captured directly from a widget test asserting the log array: ["initState", "didChangeDependencies", "build"] on mount, then ["didUpdateWidget", "build"] appended on a config change.',
   },
   {
-    q: 'How do you limit how much rebuilds when state changes?',
+    q: 'An async initState() callback calls setState() after the widget has already been disposed, with no mounted check. What is the real, proven error?',
     options: [
-      'Call setState twice',
-      'Push setState as low in the tree as possible, isolating the changing part in its own small widget',
-      'Put all state at the app root',
-      'Avoid StatefulWidget entirely',
+      'It silently does nothing',
+      '"setState() called after dispose()" — a real crash captured verbatim from flutter test in this lesson',
+      'A compile error',
+      'It only warns in debug mode, never throws',
     ],
     answer: 1,
+    explain: 'Proven with the exact message: the fix is checking `mounted` (false once dispose() has run) before calling setState in any post-await continuation.',
+  },
+  {
+    q: 'Why does calling setState() on a SIBLING widget\'s State from inside your own build() throw "setState() or markNeedsBuild() called during build", proven in this lesson?',
+    options: [
+      'setState can never be called during any build, including your own widget\'s',
+      'Flutter only allows marking a widget dirty mid-build if it is a DESCENDANT of the widget currently building, since parents build before children — a sibling is not guaranteed to still be visited this pass',
+      'It is a syntax error',
+      'Only StatefulWidgets can call setState, and the example uses StatelessWidget',
+    ],
+    answer: 1,
+    explain: 'Proven directly from the real Flutter assertion text quoted in the lesson, plus a real analyzer warning (invalid_use_of_protected_member) since setState is @protected.',
+  },
+  {
+    q: 'Why does context.dependOnInheritedWidgetOfExactType (what Theme.of/MediaQuery.of/Provider.of call) throw when used in initState(), proven in this lesson?',
+    options: [
+      'It never throws in initState',
+      'The element is not fully wired into the inherited-widget dependency graph yet during initState — the real error says to move the call to build() or didChangeDependencies()',
+      'Only build() methods can access BuildContext at all',
+      'It throws only in release builds',
+    ],
+    answer: 1,
+    explain: 'Proven with the real FlutterError text: "...was called before _BadInitStateInheritedState.initState() completed", explicitly recommending build() or didChangeDependencies().',
+  },
+  {
+    q: 'A late final field is assigned only inside an if branch in initState(), with no else and no default. What happens, proven in this lesson?',
+    options: [
+      'A compile-time error, caught immediately',
+      'It compiles clean; the first time build() actually reads the unassigned field, it throws a LateInitializationError ("has not been initialized")',
+      'The field silently defaults to null',
+      'Dart automatically infers a default value',
+    ],
+    answer: 1,
+    explain: 'Proven with a real widget test hitting the skipped branch: the analyzer trusts the late promise at compile time, so the failure only surfaces at the first runtime read.',
+  },
+  {
+    q: 'What is the practical difference between deactivate() and dispose(), proven in the lifecycle-order test?',
+    options: [
+      'They always fire in the same call, so there is no practical difference',
+      'deactivate() fires when the element leaves the tree (possibly temporary, e.g. moved under a GlobalKey); dispose() only fires once Flutter confirms it is permanently gone — proven to fire in that order',
+      'dispose() always fires before deactivate()',
+      'deactivate() is only for StatelessWidget',
+    ],
+    answer: 1,
+    explain: 'The lifecycle test logs deactivate immediately followed by dispose when a widget is removed from the tree entirely, matching the documented order.',
   },
 ];
 
