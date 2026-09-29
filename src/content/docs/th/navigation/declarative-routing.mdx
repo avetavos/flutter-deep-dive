@@ -1,6 +1,6 @@
 ---
 title: 'Declarative Routing'
-description: 'Navigator 2.0 และ go_router — routing ที่ขับเคลื่อนด้วย app state, URL sync สำหรับเว็บ, deep linking, nested shell route และ auth redirect'
+description: 'go_router 18 — stack แยกต่อ branch ของ StatefulShellRoute.indexedStack, trap ของ /pets/:id เทียบ /pets/new, redirect + refreshListenable auth guard, context.go เทียบ push เทียบ Navigator.push แบบ imperative และ typed route ผ่าน go_router_builder — พิสูจน์ทั้งหมดด้วย widget test จริง'
 sidebar:
   order: 3
 ---
@@ -9,22 +9,23 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## ทำไม imperative push/pop ถึงพังเมื่อเจอ deep link
+## ทำไม imperative push/pop ถึงพังตอนใช้จริง
 
-navigation แบบ imperative ทำงานได้ดีจนกว่าคุณต้องทำ **deep link** เมื่อ user เปิด `myapp.com/orders/42` จาก cold start ไม่มีลำดับการ `push` ที่เกิดขึ้นมาก่อน — คุณต้องประกอบ stack ทั้งหมด (Home → Orders → Order 42) ขึ้นมาใหม่จาก URL การทำแบบนั้นด้วยมือด้วย `Navigator.push` เจ็บปวดและผิดพลาดง่าย
+Imperative navigation ทำงานได้ดีจนกว่าคุณจะต้องการ **deep link** เมื่อ user เปิด `myapp.com/orders/42` จาก cold start ไม่มีลำดับการเรียก `push` ที่เคยเกิดขึ้นเลย — คุณต้องสร้าง stack ทั้งหมด (Home → Orders → Order 42) ขึ้นมาใหม่จาก URL การทำแบบนั้นด้วยมือผ่าน `Navigator.push` นั้นยุ่งยากและมีโอกาสผิดพลาดสูง
 
-ทางแก้คือทำให้ route stack เป็น **ฟังก์ชันของ state แบบ declarative**: กำหนด URL หรือ app state ปัจจุบันมา แล้วคำนวณ stack ออกมา นี่คือ Navigator 2.0 และเพราะ API ดิบ ๆ ของตัวเอง verbose เกือบทุกคนจึงใช้ **`go_router`** ที่เป็น package ทางการที่สร้างทับ Navigator 2.0 อีกที
+ทางแก้คือทำให้ route stack เป็น **function ของ state แบบ declarative** — กำหนด URL หรือ app state ปัจจุบัน แล้วคำนวณ stack ออกมา นี่คือ Navigator 2.0 (บทก่อนหน้าครอบคลุมฝั่ง `Router`/`RouterDelegate`) เพราะ raw API ยาวมาก เกือบทุกคนเลยใช้ **`go_router`** (คอร์สนี้ pin ไว้ที่ 18.0.1 ใน probe; pub.dev ปัจจุบันตอนที่เขียนคือ 18.0.2 — การ pin เป็นแค่ snapshot ของ lockfile ไม่ใช่การอ้างว่า 18.0.1 เป็นตัวล่าสุด) ซึ่งเป็น package ทางการที่สร้างอยู่บนมัน
 
-<Mermaid title="declarative routing derive stack จาก state" code={declDiagram} />
+<Mermaid title="Declarative routing คำนวณ stack จาก state" code={declDiagram} />
 
 export const declDiagram = `flowchart LR
   state["app state / URL\n/orders/42"] --> router["go_router\n(route table)"]
   router --> stack["computed stack\nHome then Orders then Order 42"]`;
 
-## การตั้งค่า go_router
+## การ config go_router
 
-คุณ declare route ครั้งเดียวในรูปของ data `go_router` map path ไป builder, รองรับ path parameter ที่มี type และ sync URL ของ browser ให้อัตโนมัติบนเว็บ
+คุณประกาศ route ครั้งเดียวเป็น data `go_router` map path ไปยัง builder รองรับ typed path parameter และ sync browser URL อัตโนมัติบน web
 
 ```dart
 final router = GoRouter(
@@ -44,11 +45,11 @@ final router = GoRouter(
 context.go('/orders/42');
 ```
 
-`context.go('/orders/42')` set location; router คำนวณ stack ใหม่ บนเว็บ URL bar อัปเดตให้ตรง และการ paste URL นั้นจะประกอบหน้าจอเดิมขึ้นมาใหม่ — ได้ deep linking มาฟรี
+`context.go('/orders/42')` ตั้ง location; router คำนวณ stack ใหม่ บน web, URL bar อัปเดตให้ตรงกัน และการ paste URL นั้นสร้างหน้าจอเดียวกันขึ้นมาใหม่ — deep linking ได้มาฟรี [คู่มือ deep-linking ของ Flutter เอง](https://docs.flutter.dev/ui/navigation/deep-linking) ครอบคลุมการต่อสาย platform-side (intent filter ใน `AndroidManifest.xml`, iOS Universal Links) ที่ต้องมีบน mobile — go_router จัดการฝั่ง Flutter route matching เมื่อ link มาถึงแอปคุณแล้ว
 
-## nested / shell route
+## Nested / shell route และ `StatefulShellRoute.indexedStack`
 
-**shell route** ห่อชุดของ route ไว้ใน UI ร่วมกัน — แอปแบบ bottom-navigation คลาสสิกที่ tab bar อยู่คงที่ ส่วนเนื้อหาข้างในเปลี่ยนไป shell ยังคง mount อยู่ มีแต่ child route ที่สลับ
+**shell route** ห่อ route กลุ่มหนึ่งด้วย UI ที่ใช้ร่วมกัน — แอป bottom-navigation แบบคลาสสิกที่ tab bar อยู่คงที่ในขณะที่เนื้อหาข้างในเปลี่ยน
 
 ```dart
 ShellRoute(
@@ -60,67 +61,718 @@ ShellRoute(
 );
 ```
 
-## redirect เป็น auth guard
-
-`redirect` รันก่อน route จะ build และส่ง user ไปที่อื่นได้ — เป็นที่ที่เหมาะที่สุดสำหรับ authentication guard return path ใหม่เพื่อ redirect หรือ `null` เพื่อไปต่อ
+`ShellRoute` ใช้ `Navigator` ตัวเดียวร่วมกันทุก branch — สลับ tab ก็แค่ขยับภายใน stack *เดียวกัน* ดังนั้น route ที่ push ไว้ใต้ `/feed` จะหายไปทันทีที่คุณออกจาก branch นั้น สำหรับแอป bottom-nav ที่ **แต่ละ tab ต้องมี back-stack เป็นของตัวเองอิสระจากกัน** (สลับไป Profile, เจาะลึกเข้า Settings, สลับกลับ Feed, สลับกลับ Profile — Settings ควรยังอยู่) ทางแก้คือ `StatefulShellRoute.indexedStack`: มันให้ทุก branch มี **`Navigator` ของตัวเองแยกกัน** และเก็บทุกตัวไว้ให้ยังทำงานพร้อมกันใน `IndexedStack` — แสดงแค่ `Navigator` ของ branch ที่ active อยู่เท่านั้น แต่ไม่มีตัวไหนถูก dispose เพราะการสลับ tab เลย
 
 ```dart
-GoRouter(
-  redirect: (context, state) {
-    final loggedIn = auth.isLoggedIn;
-    final goingToLogin = state.matchedLocation == '/login';
-    if (!loggedIn && !goingToLogin) return '/login'; // guard
-    if (loggedIn && goingToLogin) return '/';         // already in
-    return null;                                      // no redirect
-  },
-  routes: [ /* ... */ ],
+// lib/shell_app.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+GoRouter buildShellRouter() => GoRouter(
+  initialLocation: '/a',
+  routes: [
+    StatefulShellRoute.indexedStack(
+      builder: (context, state, navigationShell) =>
+          ShellScaffold(navigationShell: navigationShell),
+      branches: [
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/a',
+              builder: (context, state) => const BranchAScreen(),
+              routes: [
+                GoRoute(path: 'detail', builder: (context, state) => const BranchADetailScreen()),
+              ],
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(path: '/b', builder: (context, state) => const BranchBScreen()),
+          ],
+        ),
+      ],
+    ),
+  ],
 );
+
+class ShellScaffold extends StatelessWidget {
+  const ShellScaffold({super.key, required this.navigationShell});
+  final StatefulNavigationShell navigationShell;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: navigationShell,
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: navigationShell.currentIndex,
+        onTap: (index) => navigationShell.goBranch(index),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Tab A'),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Tab B'),
+        ],
+      ),
+    );
+  }
+}
+
+class BranchAScreen extends StatelessWidget {
+  const BranchAScreen({super.key});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: TextButton(
+        onPressed: () => context.push('/a/detail'),
+        child: const Text('A root — go to detail'),
+      ),
+    ),
+  );
+}
+
+class BranchADetailScreen extends StatelessWidget {
+  const BranchADetailScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Center(child: Text('A detail')));
+}
+
+class BranchBScreen extends StatelessWidget {
+  const BranchBScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Center(child: Text('B root')));
+}
 ```
 
+```dart
+// test/shell_app_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/shell_app.dart';
+
+void main() {
+  testWidgets(
+    "StatefulShellRoute.indexedStack keeps each branch's own navigator stack alive across tab switches",
+    (tester) async {
+      final router = buildShellRouter();
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      expect(find.text('A root — go to detail'), findsOneWidget);
+
+      await tester.tap(find.text('A root — go to detail'));
+      await tester.pumpAndSettle();
+      expect(find.text('A detail'), findsOneWidget);
+
+      await tester.tap(find.text('Tab B'));
+      await tester.pumpAndSettle();
+      expect(find.text('B root'), findsOneWidget);
+      expect(find.text('A detail'), findsNothing);
+
+      await tester.tap(find.text('Tab A'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('A detail'),
+        findsOneWidget,
+        reason: "IndexedStack kept branch A's Navigator — and its pushed Detail route — alive while tab B was visible",
+      );
+    },
+  );
+}
+```
+
+```text
+✓ StatefulShellRoute.indexedStack keeps each branch's own navigator stack alive across tab switches
+
+00:00 +1: All tests passed!
+```
+
+ถ้านี่เป็น `ShellRoute` ธรรมดา การสลับไป Tab B แล้วกลับมาจะเห็น `BranchAScreen` อีกครั้ง ไม่ใช่ `BranchADetailScreen` — จะมี `Navigator` ที่ใช้ร่วมกันแค่ตัวเดียว และการสลับ branch ไม่ได้ push/pop มันเลย มันแค่สลับว่า `GoRoute` ระดับบนสุดตัวไหน active อยู่ข้างใต้
+
+## trap ของ `/pets/:id` เทียบ `/pets/new`
+
+`go_router` match route **ตามลำดับที่ประกาศ** และใช้ตัวที่ match **ตัวแรก** — มันไม่ได้ให้ priority กับ path segment ที่เป็น literal เหนือกว่าตัวที่มี parameter โดยอัตโนมัติ ประกาศ route ที่มี parameter ก่อน sibling ที่เป็น literal แล้ว parameter จะกลืนมันไป
+
+```dart
+// lib/pets_router.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+/// BUGGY order: '/pets/:id' is declared BEFORE '/pets/new', so ':id' matches
+/// "new" as a literal id — a real trap AI-generated route tables fall into.
+GoRouter buildPetsRouterWrongOrder() => GoRouter(
+  initialLocation: '/pets',
+  errorBuilder: (context, state) => const NotFoundScreen(),
+  routes: [
+    GoRoute(path: '/pets', builder: (context, state) => const PetsListScreen()),
+    GoRoute(
+      path: '/pets/:id',
+      builder: (context, state) => PetDetailScreen(id: state.pathParameters['id']!),
+    ),
+    GoRoute(path: '/pets/new', builder: (context, state) => const NewPetScreen()),
+  ],
+);
+
+/// FIXED order: the literal segment '/pets/new' is declared BEFORE the
+/// parameterized '/pets/:id' — first match wins, so the literal must come first.
+GoRouter buildPetsRouterFixedOrder() => GoRouter(
+  initialLocation: '/pets',
+  errorBuilder: (context, state) => const NotFoundScreen(),
+  routes: [
+    GoRoute(path: '/pets', builder: (context, state) => const PetsListScreen()),
+    GoRoute(path: '/pets/new', builder: (context, state) => const NewPetScreen()),
+    GoRoute(
+      path: '/pets/:id',
+      builder: (context, state) => PetDetailScreen(id: state.pathParameters['id']!),
+    ),
+  ],
+);
+
+class PetsListScreen extends StatelessWidget {
+  const PetsListScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Pets list'));
+}
+
+class NewPetScreen extends StatelessWidget {
+  const NewPetScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('New pet form'));
+}
+
+class PetDetailScreen extends StatelessWidget {
+  const PetDetailScreen({super.key, required this.id});
+  final String id;
+  @override
+  Widget build(BuildContext context) => Scaffold(body: Text('Pet id: $id'));
+}
+
+class NotFoundScreen extends StatelessWidget {
+  const NotFoundScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('404 — route not found'));
+}
+```
+
+```dart
+// test/pets_router_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/pets_router.dart';
+
+void main() {
+  testWidgets("declaring '/pets/:id' before '/pets/new' makes :id swallow the literal 'new' segment", (tester) async {
+    final router = buildPetsRouterWrongOrder();
+    router.go('/pets/new');
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.pumpAndSettle();
+    expect(find.text('Pet id: new'), findsOneWidget, reason: ':id matched first and treated "new" as a literal id — the real bug');
+    expect(find.text('New pet form'), findsNothing);
+  });
+
+  testWidgets("declaring '/pets/new' before '/pets/:id' fixes it — literal segments must come first", (tester) async {
+    final router = buildPetsRouterFixedOrder();
+    router.go('/pets/new');
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.pumpAndSettle();
+    expect(find.text('New pet form'), findsOneWidget);
+    expect(find.text('Pet id: new'), findsNothing);
+  });
+
+  testWidgets('errorBuilder renders a fallback screen for an unmatched path', (tester) async {
+    final router = buildPetsRouterFixedOrder();
+    router.go('/does-not-exist');
+    await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+    await tester.pumpAndSettle();
+    expect(find.text('404 — route not found'), findsOneWidget);
+  });
+}
+```
+
+```text
+✓ declaring '/pets/:id' before '/pets/new' makes :id swallow the literal 'new' segment
+✓ declaring '/pets/new' before '/pets/:id' fixes it — literal segments must come first
+✓ errorBuilder renders a fallback screen for an unmatched path
+
+00:00 +3: All tests passed!
+```
+
+## Redirect เป็น auth guard และ `refreshListenable`
+
+`redirect` รันก่อน route จะ build และส่ง user ไปที่อื่นได้ — เป็นที่ที่เหมาะสมสำหรับ authentication guard return path ใหม่เพื่อ redirect หรือ `null` เพื่อดำเนินต่อ ตามลำพัง `redirect` จะ re-run แค่ตอนที่ *มีการ navigate เกิดขึ้น* เท่านั้น — มันไม่มีทางรู้ว่า auth state ของคุณเปลี่ยน **ด้วยตัวเอง** (token หมดอายุ, login สำเร็จจาก background stream) `refreshListenable` ปิดช่องว่างนั้น: ส่ง `Listenable` อะไรก็ได้เข้าไป (ส่วนใหญ่คือ `ChangeNotifier`) แล้ว router จะ re-evaluate `redirect` ทุกครั้งที่ listenable นั้น notify — โดยไม่ต้องมีการเรียก navigate เองเลย
+
+```dart
+// lib/auth_redirect_router.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+class AuthNotifier extends ChangeNotifier {
+  bool loggedIn = false;
+  void logIn() {
+    loggedIn = true;
+    notifyListeners();
+  }
+}
+
+GoRouter buildAuthRouter(AuthNotifier auth) => GoRouter(
+  initialLocation: '/',
+  refreshListenable: auth,
+  redirect: (context, state) {
+    final goingToLogin = state.matchedLocation == '/login';
+    if (!auth.loggedIn && !goingToLogin) return '/login';
+    if (auth.loggedIn && goingToLogin) return '/';
+    return null;
+  },
+  routes: [
+    GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+    GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
+  ],
+);
+
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Home (protected)'));
+}
+
+class LoginScreen extends StatelessWidget {
+  const LoginScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Login'));
+}
+```
+
+```dart
+// test/auth_redirect_router_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/auth_redirect_router.dart';
+
+void main() {
+  testWidgets(
+    'redirect sends a logged-out user to /login, and refreshListenable re-evaluates it on external state change alone',
+    (tester) async {
+      final auth = AuthNotifier();
+      final router = buildAuthRouter(auth);
+      await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+      await tester.pumpAndSettle();
+      expect(find.text('Login'), findsOneWidget, reason: 'redirect ran before the / route ever built, because loggedIn was false');
+
+      auth.logIn(); // no navigation call at all — only external state changes
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Home (protected)'),
+        findsOneWidget,
+        reason: 'refreshListenable told the router to re-run redirect() when auth notified, without any go()/push() call',
+      );
+    },
+  );
+}
+```
+
+```text
+✓ redirect sends a logged-out user to /login, and refreshListenable re-evaluates it on external state change alone
+
+00:00 +1: All tests passed!
+```
+
+## `context.go` เทียบ `context.push` เทียบ `Navigator.push` แบบ imperative — ปนกันในแอปเดียว
+
+ทั้งสามแบบอยู่ร่วมกันใต้ `MaterialApp.router` ได้ และพฤติกรรมต่างกันในแบบที่สำคัญ:
+
+- **`context.go(path)`** ตั้ง *location* — stack ที่ได้คือสิ่งที่ route table ของ `go_router` บอกว่า location นั้นควรมี stack เป็นอะไร สำหรับ top-level sibling route สองตัว การไปจาก `/` เป็น `/detail` จะ **แทนที่** stack เลย ไม่มีอะไรข้างล่างให้ pop กลับไป
+- **`context.push(path)`** push entry *เพิ่มเติม* ขึ้นบน stack ปัจจุบัน โดย `go_router` ติดตามมันในฐานะ `ImperativeRouteMatch` คู่กับ match แบบ declarative ปกติของมัน
+- **`Navigator.of(context).push(...)`** push ตรงบน Flutter `Navigator` ที่อยู่ข้างใต้ — มันขยาย widget-tree stack เหมือนกับ `context.push` เป๊ะ แต่ `go_router` ไม่เห็นมันเลย ความรู้เรื่อง "location ปัจจุบัน" ของมันไม่ถูกแตะเลย เพราะ route นั้นไม่เคยผ่าน route matching เลย
+
+```dart
+// lib/mixed_navigation_router.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+GoRouter buildMixedRouter() => GoRouter(
+  initialLocation: '/',
+  routes: [
+    GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+    GoRoute(path: '/detail', builder: (context, state) => const GoDetailScreen()),
+  ],
+);
+
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextButton(
+            onPressed: () => context.go('/detail'),
+            child: const Text('context.go to Detail'),
+          ),
+          TextButton(
+            onPressed: () => context.push('/detail'),
+            child: const Text('context.push to Detail'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (context) => const ImperativeDetailScreen()),
+            ),
+            child: const Text('Navigator.push to Detail (imperative)'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class GoDetailScreen extends StatelessWidget {
+  const GoDetailScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Detail (via go_router)'));
+}
+
+class ImperativeDetailScreen extends StatelessWidget {
+  const ImperativeDetailScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Detail (imperative Navigator.push)'));
+}
+```
+
+```dart
+// test/mixed_navigation_router_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/mixed_navigation_router.dart';
+
+void main() {
+  testWidgets(
+    'context.go replaces the location (no back stack); context.push and imperative Navigator.push both grow the stack, but only context.push is known to go_router',
+    (tester) async {
+      final goRouter = buildMixedRouter();
+      await tester.pumpWidget(MaterialApp.router(routerConfig: goRouter));
+      await tester.tap(find.text('context.go to Detail'));
+      await tester.pumpAndSettle();
+      expect(find.text('Detail (via go_router)'), findsOneWidget);
+      var navigator = tester.state<NavigatorState>(find.byType(Navigator).first);
+      expect(navigator.canPop(), isFalse, reason: 'go() replaced the current location — / and /detail are siblings, not parent/child, so nothing is left to pop to');
+      expect(goRouter.routerDelegate.currentConfiguration.uri.toString(), '/detail');
+
+      final pushRouter = buildMixedRouter();
+      await tester.pumpWidget(MaterialApp.router(routerConfig: pushRouter));
+      await tester.tap(find.text('context.push to Detail'));
+      await tester.pumpAndSettle();
+      expect(find.text('Detail (via go_router)'), findsOneWidget);
+      navigator = tester.state<NavigatorState>(find.byType(Navigator).first);
+      expect(navigator.canPop(), isTrue, reason: 'push() adds a new entry on top — Home is still underneath');
+
+      final imperativeRouter = buildMixedRouter();
+      await tester.pumpWidget(MaterialApp.router(routerConfig: imperativeRouter));
+      await tester.tap(find.text('Navigator.push to Detail (imperative)'));
+      await tester.pumpAndSettle();
+      expect(find.text('Detail (imperative Navigator.push)'), findsOneWidget);
+      navigator = tester.state<NavigatorState>(find.byType(Navigator).first);
+      expect(navigator.canPop(), isTrue, reason: 'the raw Flutter Navigator stack grew, same as context.push, at the widget-tree level');
+      expect(
+        imperativeRouter.routerDelegate.currentConfiguration.uri.toString(),
+        '/',
+        reason: "go_router's OWN known location is still / — it never saw this push; it went straight to the Navigator, bypassing route matching entirely",
+      );
+    },
+  );
+}
+```
+
+```text
+✓ context.go replaces the location (no back stack); context.push and imperative Navigator.push both grow the stack, but only context.push is known to go_router
+
+00:00 +1: All tests passed!
+```
+
+นี่คือเหตุผลที่ทั้งสองสไตล์ "ชนกัน" ในแอปเดียวเป็น bug class จริง ๆ ไม่ใช่แค่เรื่อง style: โค้ดที่รู้จัก go_router ที่อ่าน `GoRouterState.of(context)` หรือพึ่ง URL bar (web) ให้สะท้อนหน้าจอปัจจุบัน จะพลาดหน้าจอที่ไปถึงผ่าน `Navigator.push` แบบ imperative อย่างเงียบ ๆ ในทางกลับกัน static flag ของ `GoRouter` เอง `optionURLReflectsImperativeAPIs` (ยกจาก doc comment ตรง ๆ จาก source 18.0.1 ที่ติดตั้งอยู่ `lib/src/router.dart`) ควบคุมขอบเขตเดียวกันสำหรับ imperative API **ของ go_router เอง**: *"Whether the imperative API affects browser URL bar. The Imperative APIs refer to push, pushReplacement, or replace. ... Defaults to false. ... This option only affects web platform."* — แม้แต่ `context.push` (ของ go_router เอง ไม่ใช่ `Navigator.push` ดิบ ๆ) ก็ **ไม่** อัปเดต browser URL โดย default; default นั้นมีอยู่เพราะเหตุผลตรง ๆ ว่า URL ของ route ที่ push แบบ imperative "is not always deeplink-able" ตาม comment เดียวกัน
+
+## Typed route ด้วย `go_router_builder`
+
+`state.pathParameters['id']!` ที่พิมพ์เองเป็นการ lookup runtime ที่ key ด้วย `String` — พิมพ์ key ผิดแล้วได้ null-check crash ไม่ใช่ compile error `go_router_builder` (ปัจจุบัน: 4.5.0 บน pub.dev) generate `GoRouteData` subclass ที่ typed ต่อ route จาก annotation `@TypedGoRoute` ดังนั้น path parameter กลายเป็น field ของ constructor จริง ๆ
+
+```yaml
+# pubspec.yaml
+dev_dependencies:
+  go_router_builder: ^4.5.0
+  build_runner: ^2.16.1
+```
+
+```dart
+// lib/typed_routes.dart
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+part 'typed_routes.g.dart';
+
+@TypedGoRoute<HomeRoute>(path: '/')
+class HomeRoute extends GoRouteData with $HomeRoute {
+  const HomeRoute();
+
+  @override
+  Widget build(BuildContext context, GoRouterState state) => const HomeScreen();
+}
+
+@TypedGoRoute<PetDetailRoute>(path: '/pets/:id')
+class PetDetailRoute extends GoRouteData with $PetDetailRoute {
+  const PetDetailRoute({required this.id});
+  final String id;
+
+  @override
+  Widget build(BuildContext context, GoRouterState state) => PetDetailScreen(id: id);
+}
+
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Home'));
+}
+
+class PetDetailScreen extends StatelessWidget {
+  const PetDetailScreen({super.key, required this.id});
+  final String id;
+  @override
+  Widget build(BuildContext context) => Scaffold(body: Text('Pet $id'));
+}
+```
+
+รันตัว generator (`dart run build_runner build`, output จริงจากโปรเจกต์ scratch ที่ pin เวอร์ชัน package เดียวกับ probe ของคอร์สนี้):
+
+```text
+  13s compiling builders/aot
+  0s go_router_builder on 3 inputs; lib/main.dart
+  3s go_router_builder on 3 inputs: 1 no-op; spent 2s analyzing; lib/typed_routes.dart
+  5s go_router_builder on 3 inputs: 1 output, 1 no-op; spent 4s analyzing; test/widget_test.dart
+  6s go_router_builder on 3 inputs: 1 output, 2 no-op; spent 4s analyzing, 1s resolving
+  0s source_gen:combining_builder on 3 inputs; lib/main.dart
+  0s source_gen:combining_builder on 3 inputs: 1 output, 2 no-op
+  Built with build_runner/aot in 20s; wrote 2 outputs.
+```
+
+ไฟล์ generated จริง ไม่ได้แก้อะไรเลย — `GoRouteData`/`TypedGoRoute` ถูก export มาจาก `go_router` เอง (ไม่ใช่ `go_router_builder` ซึ่งเป็นเครื่องมือ codegen แบบ dev-only) ดังนั้นมัน compile ได้ใน probe ของบทนี้โดยไม่ต้องมี runtime dependency เพิ่ม:
+
+```dart
+// lib/typed_routes.g.dart
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'typed_routes.dart';
+
+// **************************************************************************
+// GoRouterGenerator
+// **************************************************************************
+
+List<RouteBase> get $appRoutes => [$homeRoute, $petDetailRoute];
+
+RouteBase get $homeRoute => GoRouteData.$route(
+  path: '/',
+  hasOverriddenOnExit: false,
+  factory: $HomeRoute._fromState,
+);
+
+mixin $HomeRoute on GoRouteData {
+  static HomeRoute _fromState(GoRouterState state) => const HomeRoute();
+
+  @override
+  String get location => GoRouteData.$location('/');
+
+  @override
+  void go(BuildContext context) => context.go(location);
+
+  @override
+  Future<T?> push<T>(BuildContext context) => context.push<T>(location);
+
+  @override
+  void pushReplacement(BuildContext context) =>
+      context.pushReplacement(location);
+
+  @override
+  void replace(BuildContext context) => context.replace(location);
+}
+
+RouteBase get $petDetailRoute => GoRouteData.$route(
+  path: '/pets/:id',
+  hasOverriddenOnExit: false,
+  factory: $PetDetailRoute._fromState,
+);
+
+mixin $PetDetailRoute on GoRouteData {
+  static PetDetailRoute _fromState(GoRouterState state) =>
+      PetDetailRoute(id: state.pathParameters['id']!);
+
+  PetDetailRoute get _self => this as PetDetailRoute;
+
+  @override
+  String get location =>
+      GoRouteData.$location('/pets/${Uri.encodeComponent(_self.id)}');
+
+  @override
+  void go(BuildContext context) => context.go(location);
+
+  @override
+  Future<T?> push<T>(BuildContext context) => context.push<T>(location);
+
+  @override
+  void pushReplacement(BuildContext context) =>
+      context.pushReplacement(location);
+
+  @override
+  void replace(BuildContext context) => context.replace(location);
+}
+```
+
+```dart
+// test/typed_routes_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/typed_routes.dart';
+
+void main() {
+  test('PetDetailRoute(id:) builds the URL — a typo in a field name is a compile error, not a runtime 404', () {
+    expect(const PetDetailRoute(id: '42').location, '/pets/42');
+    expect(const HomeRoute().location, '/');
+  });
+}
+```
+
+```text
+✓ PetDetailRoute(id:) builds the URL — a typo in a field name is a compile error, not a runtime 404
+
+00:00 +1: All tests passed!
+```
+
+สังเกตว่า `_fromState` อ่าน `state.pathParameters['id']!` แค่ครั้งเดียว ที่ generate ไว้ข้างใน `$PetDetailRoute` — คุณไม่ต้องเขียน lookup นั้นเองเลย การอ่าน id ที่เหลือทั้งหมดคือ field `id` แบบ typed navigate ด้วย `const PetDetailRoute(id: '42').go(context)` แทน `context.go('/pets/42')` — path segment ที่เปลี่ยนชื่อหรือสลับตำแหน่งจะกลายเป็น build error ที่ call site ทุกจุด ไม่ใช่ string ที่พังแบบเงียบ ๆ ที่ไหนสักแห่ง
+
+## Mental Model
+
+`go_router` คำนวณ `Navigator` stack ทั้งหมดจาก **state ชิ้นเดียว**: location ปัจจุบัน (บวกกับ imperative push ใด ๆ ที่ซ้อนอยู่ข้างบน) `redirect` คือ pure function ที่ veto หรือเขียน location ใหม่ก่อนที่อะไรจะ build ได้ `refreshListenable` ก็แค่ "รัน pure function นั้นอีกครั้ง" ที่ถูก trigger ด้วยอะไรก็ได้ที่ไม่ใช่ navigation `StatefulShellRoute.indexedStack` ขยายไอเดียเดียวกันต่อ branch: แทนที่จะมี location เดียวสร้าง stack เดียว แต่ละ branch เป็นเจ้าของ location-to-stack mapping ของตัวเอง และ `IndexedStack` คือสิ่งที่ทำให้ทุกตัวยัง resident อยู่ ดังนั้นการสลับ branch คือ **การเปลี่ยนความมองเห็น** ไม่ใช่การ rebuild trap ของ ordering กับความต่างของ `context.go`/`push`/`Navigator.push` ทั้งคู่มาจากข้อเท็จจริงเดียวกัน: **`go_router` ก็แค่ list อีกอันที่ถูก evaluate จากบนลงล่าง และมันรู้จักแค่ path ที่มันได้ evaluate เท่านั้น**
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `ShellRoute` | ง่าย, `Navigator` ตัวเดียวใช้ร่วมกัน | branch ไม่มี state/stack เป็นของตัวเองแยกกัน |
+| `StatefulShellRoute.indexedStack` | แต่ละ branch เก็บ stack และ scroll/form state ของตัวเองข้ามการสลับ tab ได้ | widget tree ของทุก branch ยัง resident อยู่ (memory), setup มากกว่า |
+| `redirect` เดี่ยว ๆ | ง่าย รันทุกครั้งที่ navigate | มองไม่เห็น state change ที่ไม่ได้ trigger จาก navigation |
+| `redirect` + `refreshListenable` | ตอบสนอง auth/state change ได้โดยไม่ต้องเรียก navigate เพิ่ม | ต้อง wire object เพิ่มอีกหนึ่งตัว (`ChangeNotifier`) และดูแลให้ sync |
+| `state.pathParameters['id']!` แบบพิมพ์เอง | ไม่มีขั้นตอน codegen | เป็น string-typed; พิมพ์ผิดคือ null-check crash ตอน runtime ไม่ใช่ compile error |
+| typed route ของ `go_router_builder` | สร้าง path แบบ compile-time-safe, มีจุด lookup เดียวแทนที่จะกระจัดกระจาย | มี `build_runner` อยู่ในลูป, generated code คือโค้ดจริงที่ analyzer ตรวจ |
+| ปน `context.push`/`context.go` กับ `Navigator.push` ดิบ ๆ | ไม่มี — นี่คือ trap ไม่ใช่ตัวเลือก | go_router หลุด track หน้าจอที่ push แบบ imperative; URL/state อาจ drift ไปจากสิ่งที่แสดงอยู่จริง |
+
+## Common Misconceptions
+
+- **"`ShellRoute` กับ `StatefulShellRoute.indexedStack` พฤติกรรมเหมือนกัน แค่ syntax ใหม่กว่า"** ไม่จริง: `ShellRoute` ใช้ `Navigator` ตัวเดียวร่วมกันทุก branch (สลับ tab ไม่เคยรักษา sub-route ที่ push ไว้); `StatefulShellRoute.indexedStack` ให้แต่ละ branch มีของตัวเอง พิสูจน์แล้วข้างบนด้วย Detail screen ที่รอดจากการสลับ tab
+- **"go_router เลือก route ที่ specific กว่าเหนือกว่า route ที่มี parameter โดยอัตโนมัติ"** ไม่จริง — มันคือ first-match-in-declaration-order พิสูจน์แล้วข้างบน (`/pets/:id` ที่ประกาศก่อนกลืน `/pets/new` จริง ๆ)
+- **"`redirect` เดี่ยว ๆ ก็พอสำหรับ auth guard ที่ต้องตอบสนองต่อ login state ที่เปลี่ยนใน background"** `redirect` re-run แค่ตอน navigate เท่านั้น ถ้าไม่มี `refreshListenable` การ login ที่เสร็จจาก background stream จะทิ้ง user ไว้ที่ `/login` จนกว่าจะ trigger navigation *อะไรก็ได้*
+- **"`context.go` กับ `context.push` ใช้แทนกันได้ แค่ verb ต่างกัน"** `go` แทนที่ stack ทั้งหมดของ location ปัจจุบัน (พิสูจน์แล้วข้างบน: `canPop()` เป็น `false`); `push` เพิ่มขึ้นบน (`canPop()` เป็น `true`) — UX ของปุ่ม/gesture back ต่างกันมาก
+- **"เพราะ go_router คือ routing ที่ config ให้ `MaterialApp.router` แล้ว `Navigator.push` ใด ๆ ในแอปนั้นจะถูกมันติดตามโดยอัตโนมัติด้วย"** พิสูจน์แล้วว่าไม่จริงข้างบน: `Navigator.push` แบบ imperative ขยาย widget-tree stack จริง แต่ `currentConfiguration.uri` ของ `go_router` เองไม่เปลี่ยนเลย — มันข้าม route matching ของ go_router ไปทั้งหมด
+
+## Reading AI-generated code
+
+route table ที่ AI-generated เจอบ่อยมาก เขียนหน้าจอตามลำดับที่ถูกขอ ไม่ใช่ตามลำดับความ specific — เป็น trap เดียวกับที่พิสูจน์ไว้ข้างบนเป๊ะ
+
+```dart
+// AI-generated: "add a route for editing a specific order, and one for creating a new order"
+GoRoute(path: '/orders/:orderId', builder: (context, state) => OrderDetailScreen(id: state.pathParameters['orderId']!)),
+GoRoute(path: '/orders/new', builder: (context, state) => const NewOrderScreen()),
+```
+
+โค้ดนี้ analyze ผ่านสะอาด — ไม่มี error อะไรที่ `flutter analyze` จับได้เลย เพราะทั้งสอง path ถูกต้องแยกกัน bug จะโผล่ตอน runtime เท่านั้น เหมือนที่พิสูจน์ไว้ข้างบนสำหรับ `/pets/new` เป๊ะ การสลับสองบรรทัดนี้คือ fix ทั้งหมด — ไม่ต้องแก้โค้ดอื่นเลย
+
+<SpotTheBug code={`// AI-generated: "guard the settings page behind login"
+final router = GoRouter(
+  initialLocation: '/settings',
+  redirect: (context, state) {
+    if (!auth.isLoggedIn) return '/login';
+    return null;
+  },
+  routes: [
+    GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
+    GoRoute(path: '/settings', builder: (context, state) => const SettingsScreen()),
+  ],
+);`}>
+โค้ดนี้ compile ผ่านและ redirect ถูกต้องด้วยตอนโหลดครั้งแรก — แต่ถ้า user อยู่ที่ `/login` อยู่แล้วในสถานะ logged out ทุกครั้งที่ `redirect` ถูก re-evaluate (รวมถึงครั้งที่เกิดจากการ navigate ไปยัง `/login` เอง) จะ return `'/login'` อีกครั้ง เพราะเงื่อนไขไม่เคยยกเว้น route ของ login เองเลย ในแอป go_router จริง กรณีนี้ไม่ infinite-loop (go_router ตรวจจับ redirect ที่ map location กลับไปยังตัวเองแล้วหยุด) แต่มันหมายความว่า user ที่ login แล้วจะไม่มีทางถูก redirect ออกจาก `/login` หลัง login เลย เพราะไม่มี branch `if (auth.isLoggedIn && goingToLogin) return '/'` ทางแก้คือรูปแบบสองสาขาที่ใช้ข้างบน: เช็ค `state.matchedLocation == '/login'` แล้วจัดการทั้งสองทิศทางตรง ๆ เหมือนที่ `buildAuthRouter` ทำในบทนี้เป๊ะ
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-deep link ทำให้ imperative `push`/`pop` พัง เพราะไม่มีประวัติการ push ให้เล่นซ้ำ — คุณต้องประกอบ stack จาก URL declarative routing ทำให้ **stack เป็นฟังก์ชันของ state** และ `go_router` คือวิธีมาตรฐานในการทำ: declare route เป็น data พร้อม path parameter ที่มี type, ได้ **web URL sync และ deep linking** มาฟรี, ห่อ UI ที่ใช้ร่วมกันด้วย **shell route** และวาง **auth guard** ไว้ใน `redirect`
+`go_router` คำนวณ stack จาก state แทนที่จะเป็นประวัติ `push`/`pop` ซึ่งเป็นสิ่งที่ทำให้ deep link และ URL sync เป็นไปได้ `StatefulShellRoute.indexedStack` (ไม่ใช่ `ShellRoute` ธรรมดา) คือสิ่งที่ให้ tab ของ bottom-nav มี back-stack เป็นอิสระจากกัน — พิสูจน์แล้วข้างบน route match กัน **ตามลำดับที่ประกาศ** ตัวแรกที่ match ชนะ — route ที่มี parameter ประกาศก่อน sibling ที่เป็น literal จะกลืนมัน (`/pets/:id` ก่อน `/pets/new` กิน "new" เป็น id จริง พิสูจน์แล้วข้างบน); `errorBuilder` คือ fallback ของคุณสำหรับอะไรก็ตามที่ไม่ match เลย `redirect` guard การ navigate; จับคู่กับ `refreshListenable` เพื่อตอบสนองต่อ state change ที่ไม่ใช่ navigation เลย การปน `context.go`/`context.push` กับ `Navigator.push` ดิบ ๆ ในแอป go_router คือ trap จริง ไม่ใช่ทางเลือกด้าน style — imperative push มองไม่เห็นโดย state ของ go_router เอง พิสูจน์แล้วข้างบน `go_router_builder` แลก codegen step กับการสร้าง route แบบ compile-time-safe
 </Callout>
 
 export const quizDecl = [
   {
-    q: 'ทำไม navigation แบบ imperative push/pop ถึงมีปัญหากับ deep link?',
+    q: 'ทำไม imperative push/pop navigation ถึงมีปัญหากับ deep link?',
     options: [
       'deep link ยาวเกินไป',
-      'การเปิด URL จาก cold start ไม่มีประวัติการ push ให้เล่นซ้ำ — ต้องประกอบ stack ทั้งหมดขึ้นใหม่จาก URL',
-      'push/pop แสดง animation ไม่ได้',
-      'deep link ทำงานเฉพาะบนเว็บ',
+      'การเปิด URL จาก cold start ไม่มี push history ให้เล่นซ้ำ — ต้องสร้าง stack ทั้งหมดขึ้นมาใหม่จาก URL',
+      'push/pop animate ไม่ได้',
+      'deep link ทำงานได้แค่บน web',
     ],
     answer: 1,
+    explain: 'Declarative routing แก้ปัญหานี้โดยทำให้ stack เป็น function ที่คำนวณจาก URL/state แทนที่จะเป็นลำดับการเรียกแบบ imperative',
   },
   {
-    q: 'แนวคิดหลักของ declarative routing คืออะไร?',
+    q: 'StatefulShellRoute.indexedStack ให้อะไรที่ ShellRoute ธรรมดาให้ไม่ได้ ตามที่ widget test ในบทนี้พิสูจน์?',
     options: [
-      'push แต่ละหน้าจอด้วยมือ',
-      'route stack ถูกคำนวณเป็นฟังก์ชันของ app state / URL ปัจจุบัน',
-      'เก็บ route ไว้ใน database',
-      'ทุกหน้าจอเป็น isolate',
+      'page transition ที่เร็วกว่า',
+      'แต่ละ branch มี Navigator stack เป็นของตัวเองแยกกัน เก็บไว้ให้ทำงานอยู่ใน IndexedStack ข้ามการสลับ tab',
+      'มี authentication อัตโนมัติ',
+      'ไม่ต้องมี Scaffold',
     ],
     answer: 1,
+    explain: 'test push หน้า Detail ใน branch A, สลับไป branch B, สลับกลับมา และ Detail ยังแสดงอยู่ — ShellRoute ธรรมดาใช้ Navigator ร่วมกันตัวเดียวและจะเสียสถานะนั้นไป',
   },
   {
-    q: 'shell route ใช้ทำอะไร?',
+    q: "route table ประกาศ GoRoute(path: '/pets/:id') ก่อน GoRoute(path: '/pets/new') เกิดอะไรขึ้นเมื่อ user navigate ไป /pets/new ตาม test ในบทนี้?",
     options: [
-      'รันคำสั่ง shell',
-      'ห่อชุดของ route ไว้ใน UI ร่วมกันที่คงอยู่ (เช่น bottom nav bar) ส่วนเนื้อหาข้างในสลับไปมา',
-      'เข้ารหัส route',
-      'native code',
+      'go_router ฉลาดพอที่จะ match route literal /pets/new',
+      '\':id\' match ก่อน (ลำดับการประกาศ, ตัวแรกที่ match ชนะ) และปฏิบัติกับ "new" เป็น id ตัวหนึ่ง — เป็น bug จริง ไม่ใช่สมมติฐาน',
+      'มันจะ throw compile-time error',
+      'ทั้งสอง route render พร้อมกัน',
     ],
     answer: 1,
+    explain: 'พิสูจน์ด้วย widget test: เมื่อ route ที่มี parameter อยู่ก่อน การ navigate ไป /pets/new แสดง \'Pet id: new\' ไม่ใช่ฟอร์ม New Pet การสลับสอง GoRoute คือ fix ทั้งหมด',
   },
   {
-    q: 'ใน go_router ควรวาง authentication guard ไว้ที่ไหน?',
+    q: 'ทำไมต้องมี refreshListenable นอกเหนือจาก redirect สำหรับ auth guard จริง ตาม test ในบทนี้?',
     options: [
-      'ใน build method ของทุกหน้าจอ',
-      'ใน callback `redirect` ที่ส่ง user ไปที่อื่นได้ก่อน route จะ build',
-      'ใน main() เท่านั้น',
-      'ใน platform channel',
+      'redirect ไม่มีอยู่จริงถ้าไม่มีมัน',
+      'redirect re-run แค่ตอน navigate เท่านั้น; refreshListenable ทำให้ router re-evaluate redirect เมื่อ Listenable ภายนอก (เช่น auth ChangeNotifier) notify โดยไม่มีการเรียก navigate เลย',
+      'refreshListenable แทนที่ redirect ไปเลย',
+      'ต้องใช้แค่บน web เท่านั้น',
     ],
     answer: 1,
+    explain: 'test เรียก auth.logIn() (ไม่มี go()/push() เลย) แล้วหน้าจอยังอัปเดตจาก Login เป็น Home — พิสูจน์ว่า refreshListenable trigger การ re-evaluate ของ redirect ด้วยตัวเอง',
+  },
+  {
+    q: 'ตาม identity/state test ในบทนี้ เกิดอะไรขึ้นกับ currentConfiguration.uri หลังจาก Navigator.of(context).push() แบบ imperative ใน MaterialApp.router ที่ขับเคลื่อนด้วย go_router?',
+    options: [
+      'มันอัปเดตให้สะท้อนหน้าจอที่ push เหมือนกับ context.push',
+      'มันไม่เปลี่ยนเลย — location ที่ go_router ติดตามเองไม่เคยเห็น imperative push นี้ ซึ่งไปตรงที่ Flutter Navigator เลยโดยข้าม route matching',
+      'มัน throw exception',
+      'มัน reset กลับไปที่ route แรกสุดของแอป',
+    ],
+    answer: 1,
+    explain: "test assert ตรง ๆ ว่า routerDelegate.currentConfiguration.uri ยังเป็น '/' หลัง imperative Navigator.push ในขณะที่ canPop() ของ widget-tree Navigator เป็น true เหมือน context.push — สองระบบไม่ตรงกันว่าเกิดอะไรขึ้น",
+  },
+  {
+    q: "context.go('/detail') ทำอะไรกับ Navigator stack เมื่อ navigate ระหว่างสอง top-level sibling route ตามการ assert canPop() ในบทนี้?",
+    options: [
+      'มัน push /detail ขึ้นบน ดังนั้น canPop() เป็น true หลังจากนั้น',
+      'มันแทนที่ location ปัจจุบัน — canPop() เป็น false หลังจากนั้น เพราะ / กับ /detail เป็น sibling ไม่มีอะไรข้างล่างให้ pop',
+      'มัน throw เพราะ sibling navigate หากันไม่ได้',
+      'มันเหมือนกับ context.push ทุกกรณี',
+    ],
+    answer: 1,
+    explain: "test assert ว่า navigator.canPop() เป็น false ทันทีหลัง context.go('/detail') จาก Home — เทียบตรง ๆ กับ context.push ที่ canPop() เป็น true",
+  },
+  {
+    q: 'go_router_builder generate อะไรจาก GoRouteData subclass ที่มี annotation @TypedGoRoute ตามไฟล์ .g.dart จริงและ test ในบทนี้?',
+    options: [
+      'ไม่มีอะไรใช้ได้เลยถ้าไม่มี go_router_builder เป็น runtime dependency ด้วย',
+      "subclass แบบ typed ที่ field ของมันสร้าง URL (เช่น PetDetailRoute(id: '42').location == '/pets/42') — GoRouteData/TypedGoRoute เองมาจาก go_router ไม่ใช่ go_router_builder",
+      'REST API client เต็มรูปแบบ',
+      'Navigator implementation ใหม่',
+    ],
+    answer: 1,
+    explain: 'typed_routes.g.dart ที่ generate จริงและ test ทั้งคู่รันได้ใน probe ของบทนี้โดยมีแค่ go_router เป็น runtime dependency — go_router_builder เป็นเครื่องมือ codegen แบบ dev-only เท่านั้น พิสูจน์โดย fence ที่ compile ได้โดยไม่ต้องลิสต์มันเป็น dependency ปกติ',
   },
 ];
 
