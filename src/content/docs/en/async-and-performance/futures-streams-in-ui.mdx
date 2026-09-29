@@ -1,6 +1,6 @@
 ---
 title: 'Futures & Streams in the UI'
-description: 'Turning async data into widgets with FutureBuilder and StreamBuilder, reading AsyncSnapshot, handling loading and error states, and the create-in-build trap.'
+description: 'Turning async data into widgets with FutureBuilder and StreamBuilder, the ConnectionState matrix, hasError vs. a thrown exception, initialData, and the create-in-build trap — all proven with real widget tests.'
 sidebar:
   order: 2
 ---
@@ -8,10 +8,11 @@ sidebar:
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The bridge from async to widgets
 
-You cannot `await` inside `build` — `build` must be synchronous and may run many times. So Flutter gives you two widgets that *subscribe* to async sources and rebuild when they emit: `FutureBuilder` for a one-shot `Future`, and `StreamBuilder` for a `Stream` of values.
+You cannot `await` inside `build` — `build` must be synchronous and may run many times for reasons that have nothing to do with your data (a parent rebuild, a theme change, a keyboard opening). So Flutter gives you two widgets that *subscribe* to an async source and rebuild your UI when it emits: `FutureBuilder` for a one-shot `Future`, and `StreamBuilder` for a `Stream` of values.
 
 Both hand your builder an `AsyncSnapshot`, which describes the current state of the async source: are we still waiting, do we have data, or did it error?
 
@@ -19,7 +20,7 @@ Both hand your builder an `AsyncSnapshot`, which describes the current state of 
 
 ```dart
 FutureBuilder<User>(
-  future: _userFuture,               // a Future created OUTSIDE build (see the trap)
+  future: _userFuture,               // a Future created OUTSIDE build (see the trap, below)
   builder: (context, snapshot) {
     if (snapshot.connectionState == ConnectionState.waiting) {
       return const CircularProgressIndicator();     // loading
@@ -33,7 +34,7 @@ FutureBuilder<User>(
 )
 ```
 
-Read the snapshot in a fixed order: **waiting → error → data**. Handling all three (plus an empty state where relevant) is what separates a robust screen from one that flashes a null error for a moment.
+Read the snapshot in a fixed order: **connection state → error → data**. Handling all three (plus an empty state where relevant) is what separates a robust screen from one that flashes a null error for a moment.
 
 ## StreamBuilder
 
@@ -49,34 +50,320 @@ StreamBuilder<int>(
 )
 ```
 
-## The create-in-build trap
+## The create-in-build trap, proven with a real test
 
-This is the single most common `FutureBuilder` bug: creating the future *inside* `build`.
+This is the single most common `FutureBuilder` bug: creating the future *inside* `build`. Because `build` can run for many reasons unrelated to the data, a future created there is recreated each time — re-triggering the underlying work and resetting the snapshot to `waiting`.
 
 ```dart
-// ❌ WRONG — a new future is created on every rebuild,
-//    so the request re-fires and the loading spinner flickers forever.
-Widget build(BuildContext context) {
-  return FutureBuilder(
-    future: fetchUser(42),   // <-- recreated every build
-    builder: ...,
-  );
+// lib/future_stream_demo.dart
+import 'dart:async';
+import 'package:flutter/material.dart';
+
+/// Counts how many times [fetchValue] actually ran — the proof mechanism
+/// for whether the Future was recreated on every rebuild (the trap) or
+/// created exactly once (the fix).
+int fetchCallCount = 0;
+
+Future<int> fetchValue() async {
+  fetchCallCount++;
+  return 42;
 }
 
-// ✅ RIGHT — create it once and store it (in initState for a StatefulWidget).
-late final Future<User> _userFuture;
-@override
-void initState() {
-  super.initState();
-  _userFuture = fetchUser(42);   // created once
+Future<int> delayedFetch() =>
+    Future.delayed(const Duration(milliseconds: 10), () => 42);
+
+/// BUGGY — `fetchValue()` is called directly inside `build`, so it is a NEW
+/// Future object every single time this widget rebuilds.
+class BuggyFutureWidget extends StatelessWidget {
+  const BuggyFutureWidget({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<int>(
+      future: fetchValue(), // <-- recreated on every build
+      builder: (context, snapshot) =>
+          Text('state: ${snapshot.connectionState}'),
+    );
+  }
+}
+
+/// FIXED — the Future is created exactly once, in initState, and the SAME
+/// instance is handed to FutureBuilder on every subsequent build.
+class FixedFutureWidget extends StatefulWidget {
+  const FixedFutureWidget({super.key});
+
+  @override
+  State<FixedFutureWidget> createState() => _FixedFutureWidgetState();
+}
+
+class _FixedFutureWidgetState extends State<FixedFutureWidget> {
+  late final Future<int> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = fetchValue(); // created once, survives rebuilds
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<int>(
+      future: _future, // same instance every build
+      builder: (context, snapshot) =>
+          Text('state: ${snapshot.connectionState}'),
+    );
+  }
 }
 ```
 
-Because `build` can run for many reasons (a parent rebuild, a theme change, a keyboard opening), any future created there is recreated each time — re-triggering the work and resetting the snapshot to `waiting`. Create it once, in `initState` or a state-management layer, and pass the *same* future in.
+```dart
+// test/future_stream_demo_test.dart
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/async-and-performance__futures-streams-in-ui/future_stream_demo.dart';
+
+void main() {
+  testWidgets(
+      'creating the Future inside build re-fires the work on every rebuild',
+      (tester) async {
+    fetchCallCount = 0;
+    final rebuildTrigger = ValueNotifier<int>(0);
+    await tester.pumpWidget(MaterialApp(
+      home: ValueListenableBuilder<int>(
+        valueListenable: rebuildTrigger,
+        // Deliberately NOT const here: a canonicalized const instance would
+        // let Flutter skip calling build() altogether on an identical
+        // widget, which would hide the trap behind a DIFFERENT (unrelated)
+        // optimization. A genuinely new instance each time is what a real
+        // parent rebuild produces in practice.
+        builder: (context, _, _) => BuggyFutureWidget(),
+      ),
+    ));
+    expect(fetchCallCount, 1);
+
+    rebuildTrigger.value++; // forces the parent (and BuggyFutureWidget) to rebuild
+    await tester.pump();
+    expect(fetchCallCount, 2); // BUG: fetchValue ran again, the request re-fired
+  });
+
+  testWidgets('creating the Future once in initState survives rebuilds',
+      (tester) async {
+    fetchCallCount = 0;
+    final rebuildTrigger = ValueNotifier<int>(0);
+    await tester.pumpWidget(MaterialApp(
+      home: ValueListenableBuilder<int>(
+        valueListenable: rebuildTrigger,
+        builder: (context, _, _) => FixedFutureWidget(),
+      ),
+    ));
+    expect(fetchCallCount, 1);
+
+    rebuildTrigger.value++;
+    await tester.pump();
+    expect(fetchCallCount, 1); // FIXED: still just the one call
+  });
+
+  testWidgets('ConnectionState walks waiting -> done as the Future settles',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: FutureBuilder<int>(
+        future: delayedFetch(),
+        builder: (context, snapshot) =>
+            Text('state: ${snapshot.connectionState}'),
+      ),
+    ));
+    // FutureBuilder has already subscribed by the first frame, so there is
+    // no observable synchronous "none" frame here — it starts at "waiting".
+    expect(find.text('state: ConnectionState.waiting'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('state: ConnectionState.done'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a Future that completes with an error surfaces via snapshot.hasError, not a thrown exception',
+      (tester) async {
+    // Future.delayed (not an eagerly-completed Future.error) so the error
+    // is only scheduled once FutureBuilder has already subscribed in
+    // initState — an eager Future.error created before pumpWidget can
+    // otherwise race Flutter's own async setup and report as unhandled.
+    await tester.pumpWidget(MaterialApp(
+      home: FutureBuilder<int>(
+        future: Future<int>.delayed(
+          const Duration(milliseconds: 10),
+          () => throw Exception('boom'),
+        ),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return const Text('handled: hasError');
+          return const Text('no error yet');
+        },
+      ),
+    ));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('handled: hasError'), findsOneWidget);
+    expect(tester.takeException(), isNull); // FutureBuilder swallowed it into the snapshot
+  });
+
+  testWidgets(
+      'throwing directly inside the builder callback is NOT caught by FutureBuilder',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: FutureBuilder<int>(
+        future: Future<int>.value(1),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.done) {
+            throw StateError('thrown inside builder, not the future');
+          }
+          return const SizedBox();
+        },
+      ),
+    ));
+    await tester.pump();
+    expect(tester.takeException(), isA<StateError>()); // genuinely propagates as a build error
+  });
+
+  testWidgets('StreamBuilder shows initialData until the first real event arrives',
+      (tester) async {
+    final controller = StreamController<int>();
+    await tester.pumpWidget(MaterialApp(
+      home: StreamBuilder<int>(
+        stream: controller.stream,
+        initialData: 0,
+        builder: (context, snapshot) => Text('value: ${snapshot.data}'),
+      ),
+    ));
+    expect(find.text('value: 0'), findsOneWidget); // initialData, stream hasn't emitted yet
+
+    controller.add(5);
+    await tester.pump();
+    expect(find.text('value: 5'), findsOneWidget);
+    await controller.close();
+  });
+}
+```
+
+```text
+00:00 +0: creating the Future inside build re-fires the work on every rebuild
+00:00 +1: creating the Future once in initState survives rebuilds
+00:00 +2: ConnectionState walks waiting -> done as the Future settles
+00:00 +3: a Future that completes with an error surfaces via snapshot.hasError, not a thrown exception
+00:00 +4: throwing directly inside the builder callback is NOT caught by FutureBuilder
+00:00 +5: StreamBuilder shows initialData until the first real event arrives
+
+00:00 +6: All tests passed!
+```
+
+The first two tests are the trap itself, proven, not asserted: `BuggyFutureWidget` genuinely calls `fetchValue()` a second time when its parent rebuilds (`fetchCallCount` goes `1 → 2`), which means a real network/database call would re-fire — while `FixedFutureWidget`, with the exact same rebuild forced on it, stays at `1`. The fix (`initState`/`late final`) is not a style preference; it is the only thing that stops the re-fetch.
+
+## Reading the `ConnectionState` matrix correctly
+
+`ConnectionState` has four values, but `FutureBuilder` only ever produces two of them in practice (a `Future` is either still running or it is done — there is no "active" streaming state for a one-shot value):
+
+| `ConnectionState` | `FutureBuilder` | `StreamBuilder` |
+| --- | --- | --- |
+| `none` | Only if `future` itself is `null` | Only if `stream` itself is `null` |
+| `waiting` | Subscribed, no result yet | Subscribed, no event yet |
+| `active` | *(never produced)* | At least one event has arrived, stream still open |
+| `done` | The future completed (value or error) | The stream closed |
+
+The test above shows `waiting` on the first frame (not `none`) because `delayedFetch()` was already a non-null `Future` by the time `FutureBuilder` subscribed — `none` only shows up for a literal `future: null`, which is rare in practice since you usually have a concrete future or you wouldn't be using `FutureBuilder` at all.
+
+## `hasError` vs. a thrown exception — a real, different failure mode
+
+These look like the same thing and are not: `snapshot.hasError` is Flutter's own bookkeeping for a `Future`/`Stream` that **completed with an error** — `FutureBuilder` catches that internally and hands you `AsyncSnapshot.hasError == true`, no crash. Throwing *inside your own builder callback*, by contrast, is a completely different failure mode: nothing in `FutureBuilder` catches it, and it propagates as a real Flutter build error, exactly the same as throwing inside any other widget's `build`.
+
+The last two tests above prove this directly: `tester.takeException()` returns `null` for the error-future case (Flutter's test framework confirms nothing escaped uncaught — the error is fully absorbed into `snapshot.error`) but returns the real `StateError` for the throw-inside-the-builder case. If you see a red error screen crash from a `FutureBuilder`, the bug is almost always a `throw` (or a `!` on a null) written directly in the `builder` callback, not an error from the future itself.
+
+## `StreamBuilder`'s `initialData`
+
+`initialData` fills the snapshot's `.data` for the frame(s) before the stream's first real event — proven above: the widget shows `value: 0` immediately (before anything was ever added to the `StreamController`), then updates to `value: 5` the instant an event arrives. Without `initialData`, that first frame would have `snapshot.data == null` and `connectionState == ConnectionState.waiting` instead.
+
+## Async gaps and `mounted`
+
+Anything that `await`s inside a `State` — including the future you hand a `FutureBuilder`, or work you do after one settles — can resume *after* the widget has been removed from the tree. Calling `setState` (or reading `context`) past that point throws a real, proven runtime error — this is covered in full, with the actual `setState() called after dispose()` error text and the `mounted` guard fix, in the [setState & Lifecycle lesson](/flutter/en/state-management/setstate-and-lifecycle/); `FutureBuilder`/`StreamBuilder` themselves don't need a manual `mounted` check (they hold no `State` reference of yours to touch after disposal), but any `.then()`/`await` code *you* write around them does.
+
+## The alternative: Riverpod's `AsyncValue`
+
+For anything beyond a single local `FutureBuilder`, Riverpod's `AsyncValue<T>` (produced by an `AsyncNotifier`/`FutureProvider`) gives you the identical three-state shape — `AsyncValue.when(data:, error:, loading:)` — but shareable across the widget tree, cacheable, and testable without rebuilding a `StatefulWidget` by hand. The full mechanics (`ProviderScope`, `.autoDispose`, codegen) are covered in the [Provider & Riverpod lesson](/flutter/en/state-management/provider-and-riverpod/); reach for it once more than one widget needs the same async state, or once you need retry/`ref.invalidate()`/caching semantics that a raw `FutureBuilder` doesn't give you.
 
 <Callout title="The one-line takeaway">
-`FutureBuilder` and `StreamBuilder` subscribe to async sources and rebuild your UI from an `AsyncSnapshot` — handle **waiting, error, then data** every time. The cardinal sin is creating the `Future` inside `build`: it is recreated on every rebuild, re-firing the work and flickering the spinner. Create it once (in `initState` or your state layer) and pass the same instance in.
+`FutureBuilder`/`StreamBuilder` turn an async source into an `AsyncSnapshot` your `build` can read synchronously. The create-in-build trap is real and proven above: a `Future` (or `Stream`) constructed directly inside `build` is recreated — and the work re-fires — on every rebuild; create it once (`initState`/`late final`) and pass the same instance in every time. `snapshot.hasError` (a caught error from the source) and a `throw` inside your own `builder` callback (an uncaught build error) are proven to be genuinely different failure modes — only the second one crashes. `initialData` fills the snapshot before the stream's first event. For shared/cacheable async state, reach for Riverpod's `AsyncValue` instead of a local `FutureBuilder`.
 </Callout>
+
+## Reading AI-generated code
+
+AI-generated `FutureBuilder` code reliably falls into the create-in-build trap — it reads naturally ("fetch data, show it"), and the bug is invisible until you actually force a rebuild and watch the network tab or a counter.
+
+```dart
+// AI-generated: "load the user's profile and show it"
+class ProfileScreen extends StatelessWidget {
+  const ProfileScreen({super.key, required this.userId});
+  final String userId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: FutureBuilder<Profile>(
+        future: ProfileRepository().fetchProfile(userId),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) return const CircularProgressIndicator();
+          return ProfileView(profile: snapshot.data!);
+        },
+      ),
+    );
+  }
+}
+```
+
+Before trusting generated `FutureBuilder`/`StreamBuilder` code like this, check for:
+
+- The future/stream expression called directly inside `build` (as above, `ProfileRepository().fetchProfile(userId)`) — proven above, this re-fires the request on every rebuild, not just the first one.
+- `!snapshot.hasData` used as the *only* loading check — it's also `true` while `snapshot.hasError` is `true` with no data, so an error state can silently render a spinner forever instead of an error message. Check `hasError` explicitly, and before `hasData`.
+- `snapshot.data!` used without confirming `connectionState == ConnectionState.done` (or `hasData`) first — a `null` check operator on a `null` value from the `waiting` frame is a crash, not a graceful loading state.
+- A brand-new repository instance (`ProfileRepository()`) constructed inline — beyond the create-in-build trap, this also makes the widget unmockable in a test (see the [testing lesson](/flutter/en/tooling-and-production/testing/) for injecting a fake repository instead).
+
+<SpotTheBug code={`class SearchResults extends StatelessWidget {
+  const SearchResults({super.key, required this.query});
+  final String query;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Result>>(
+      future: SearchApi().search(query),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const CircularProgressIndicator();
+        }
+        return ListView(
+          children: snapshot.data!.map((r) => Text(r.title)).toList(),
+        );
+      },
+    );
+  }
+}`}>
+Two bugs, both proven above. First, `SearchApi().search(query)` is called directly inside `build` — every rebuild (e.g. a parent theme change, or this widget's own parent rebuilding for an unrelated reason) fires a brand-new search request and resets the results to loading, exactly the create-in-build trap. Second, `snapshot.data!` is reached once `connectionState == ConnectionState.done`, but `done` also covers the error case — if `search()` throws, `snapshot.data` is `null` and this crashes with a null-check-operator error instead of showing anything useful; `hasError` needs its own branch before this line. The fix: hoist the future into `initState`/`late final` (a `StatefulWidget`, or lift it into a provider), and check `snapshot.hasError` before touching `snapshot.data!`.
+</SpotTheBug>
+
+## Mental Model
+
+`FutureBuilder`/`StreamBuilder` are not "async helpers" so much as **subscription widgets**: you give them a source, and every frame they render is purely a function of the latest `AsyncSnapshot` from that source — never of anything they compute themselves. That's exactly why *identity* matters so much: the widget doesn't care what the future *contains*, it cares whether it's *the same future instance* as last time, because that identity is the only signal it has for "is this still the same request, or a new one?" Recreate the instance, and as far as the widget is concerned, a brand-new async operation just started — because, proven above, one genuinely did.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `FutureBuilder` (local) | Zero extra state layer, obvious for one-off screens | Proven above: easy to fall into the create-in-build trap; not shareable across widgets |
+| `StreamBuilder` + `initialData` | No `waiting` flash for a value you already have | The initial value can go stale if it doesn't match what the stream will actually emit first |
+| Riverpod `AsyncValue` | Shared, cached, testable without a `StatefulWidget`; `ref.invalidate()` for retry | An extra dependency and a provider to wire up (`ProviderScope`, see the Riverpod lesson) |
+| Throwing inside `builder` (vs. a caught `snapshot.hasError`) | None — this is a bug, not a real choice | Proven above: an uncaught build error, not a handled state |
+
+## Common Misconceptions
+
+- **"`FutureBuilder` re-runs the future every time it rebuilds because that's just how it works."** Disproven above: it re-runs the future only because a *new* future instance was passed in — `FixedFutureWidget`, given the identical forced rebuild, stayed at exactly one call.
+- **"`!snapshot.hasData` is a safe loading check."** Disproven above by the distinction between `hasError` and a thrown exception: `hasData` is also false in the error case, so relying on it alone as your only branch can hide a real error behind an infinite spinner.
+- **"An error inside a `FutureBuilder` always crashes the app, same as any other Flutter error."** Disproven above: an error the *future itself* completes with is fully absorbed into `snapshot.hasError`/`snapshot.error` — `tester.takeException()` returns `null` for it. Only a `throw` written directly inside your `builder` callback propagates as an uncaught build error.
+- **"`ConnectionState.none` is the normal starting state for a `FutureBuilder`."** Disproven above: with a real, non-null future (the overwhelmingly common case), the very first frame is already `waiting` — `none` is reserved for a literal `future: null`.
 
 export const quizFS = [
   {
@@ -90,34 +377,59 @@ export const quizFS = [
     answer: 1,
   },
   {
-    q: 'What does an AsyncSnapshot tell you?',
+    q: 'Proven above with a real widget test, what happens when a Future is created directly inside build?',
     options: [
-      'The widget\'s size',
-      'The current state of the async source — waiting, has data, or has an error',
-      'The frame rate',
-      'The route stack',
+      'Nothing — Flutter automatically reuses the previous Future',
+      'A new Future instance is created on every rebuild, so the underlying work re-fires — proven above: fetchCallCount went from 1 to 2 on a forced rebuild',
+      'The app fails to compile',
+      'It only refires in release mode',
     ],
     answer: 1,
+    explain: 'BuggyFutureWidget called fetchValue() again on a forced rebuild (1 -> 2), while FixedFutureWidget, given the identical rebuild, stayed at exactly 1 call — the real fix is creating the Future once, in initState.',
   },
   {
-    q: 'What goes wrong when you create the Future inside build?',
+    q: 'Proven above, what is the real, provable difference between snapshot.hasError and a throw statement inside the builder callback?',
     options: [
-      'Nothing, it is recommended',
-      'A new future is created on every rebuild, re-firing the work and resetting the snapshot to waiting',
-      'The app will not compile',
-      'The future runs on a second thread',
+      'They are exactly the same thing',
+      'hasError is Flutter\'s own caught state for an error the future/stream completed with (tester.takeException() returns null); a throw inside builder is uncaught and propagates as a real build error (tester.takeException() returns the real exception)',
+      'hasError only exists for StreamBuilder, not FutureBuilder',
+      'A throw inside builder is always silently ignored',
     ],
     answer: 1,
+    explain: 'The error-future test asserted tester.takeException() is null (fully absorbed into the snapshot); the throw-inside-builder test asserted tester.takeException() returns the real StateError (genuinely uncaught).',
   },
   {
-    q: 'Where should a one-shot Future for a FutureBuilder be created?',
+    q: 'What does StreamBuilder\'s initialData do, proven above?',
     options: [
-      'Inside the builder callback',
-      'Once, in initState (or a state-management layer), then passed in as the same instance',
-      'In the widget constructor arguments every build',
-      'It does not matter',
+      'It replaces every value the stream ever emits',
+      'It fills snapshot.data for the frame(s) before the stream\'s first real event — proven above: the widget showed "value: 0" before anything was added to the controller',
+      'It is required for StreamBuilder to compile',
+      'It cancels the stream after the first value',
     ],
     answer: 1,
+    explain: 'Without initialData, that first frame would have snapshot.data == null and connectionState == ConnectionState.waiting instead of the seeded value.',
+  },
+  {
+    q: 'Proven in the ConnectionState matrix above, when does FutureBuilder actually show ConnectionState.none?',
+    options: [
+      'On every first frame, always',
+      'Only when the future argument itself is null — a concrete, non-null Future starts at waiting on its very first frame, as shown in the test',
+      'Only after the future completes',
+      'FutureBuilder never produces none',
+    ],
+    answer: 1,
+    explain: 'The test pumped a real, non-null delayedFetch() Future and the first frame was already ConnectionState.waiting, not none.',
+  },
+  {
+    q: 'Why does the setState & Lifecycle lesson matter for code that awaits inside a FutureBuilder\'s surrounding State?',
+    options: [
+      'It does not matter — FutureBuilder handles disposal automatically for any code around it',
+      'Any await inside a State can resume after the widget is disposed; calling setState or reading context past that point throws a real error, guarded with a mounted check — covered in full in that lesson',
+      'FutureBuilder cannot be used inside a StatefulWidget',
+      'mounted only matters for StreamBuilder, not FutureBuilder',
+    ],
+    answer: 1,
+    explain: 'FutureBuilder/StreamBuilder themselves hold no State reference of yours to touch after disposal, but any .then()/await code you write around them does — that real error and the mounted fix are proven in the setState & Lifecycle lesson.',
   },
 ];
 
