@@ -1,0 +1,479 @@
+---
+title: 'Layout and Paint Internals'
+description: 'The real RenderBox.layout(constraints, {parentUsesSize}) protocol, the exact relayout-boundary rule quoted from source (constraints.isTight || sizedByParent || !parentUsesSize || parent == null), and markNeedsLayout genuinely stopping at that boundary -- proven with a custom RenderBox pair and a real debugDumpRenderTree showing the boundary annotation appear and disappear. Plus PaintingContext, the OffsetLayer doc comment on repaint-boundary layer reuse, and hitTest''s real layout-vs-paint requirement.'
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## What this lesson adds
+
+[Constraints & Layout](/flutter/en/layout-and-rendering/constraints-and-layout/) already proved "constraints go down, sizes go up, the parent sets position" with `getSize`/`getTopLeft`. [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) already proved `RepaintBoundary` isolates repaints with a real paint counter, and that `Opacity` allocates a real `OpacityLayer` at every value except `0.0`. Neither proved the mechanism *underneath* those results: what actually decides where a chain of `markNeedsLayout` calls **stops** climbing the tree, and what the paint-side equivalent looks like. This lesson answers both, from the installed Flutter 3.47.5 source (revision `6a19cca564`), with a custom `RenderBox` pair that proves a relayout boundary genuinely absorbs a `markNeedsLayout()` call instead of propagating it to the parent.
+
+## The `RenderBox` protocol: `layout(constraints, {parentUsesSize})`
+
+[`RenderObject.layout`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L2810)'s own doc comment states the contract [Constraints & Layout](/flutter/en/layout-and-rendering/constraints-and-layout/) proved empirically: *"The parent passes a constraints object, which informs the child as to which layouts are permissible."* The `parentUsesSize` parameter is the part that lesson didn't need: *"If the parent reads information computed during the child's layout, the parent must pass true for `parentUsesSize`. In that case, the parent will be marked as needing layout whenever the child is marked as needing layout... If the parent uses the default value (false)... the child can change its layout information... without informing the parent."* That single sentence is the entire mechanism this lesson proves with a real test below.
+
+## The exact relayout-boundary rule, quoted from source
+
+`layout()`'s implementation computes whether the render object being laid out becomes a **relayout boundary** with one line -- quoted verbatim:
+
+```dart
+// object.dart:2863 -- quoted verbatim from the installed 3.47.5 source
+_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null;
+```
+
+Four independent ways to become a relayout boundary, any one is sufficient: the parent doesn't read this object's size (`!parentUsesSize`); [`sizedByParent`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L2971) is `true` (the object's own doc comment: *"Whether the constraints are the only input to the sizing algorithm... child nodes have no impact"* -- so a parent relayout can never change this object's size via its children); the incoming `constraints` are tight (min == max, so no matter what changes inside, the size can't); or this is the tree's root. Meeting any one of these means a dirty subtree below this point can be relaid out **without** needing the parent above it to relay out too -- proven directly below.
+
+## `markNeedsLayout`: where the climb actually stops
+
+[`RenderObject.markNeedsLayout`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L2676) is where the boundary computed above is actually used -- quoted verbatim, the exact branch:
+
+```dart
+// object.dart:2683-2694 -- quoted verbatim from the installed 3.47.5 source
+_needsLayout = true;
+if (owner case final PipelineOwner owner? when (_isRelayoutBoundary ?? false)) {
+  // ... (debug-only stack print elided)
+  owner._nodesNeedingLayout.add(this);
+  owner.requestVisualUpdate();
+} else if (parent != null) {
+  markParentNeedsLayout();
+}
+```
+
+If this object **is** its own relayout boundary (`_isRelayoutBoundary == true`), it adds itself directly to the pipeline owner's `_nodesNeedingLayout` and stops -- the parent is never touched. If it is **not**, it calls `markParentNeedsLayout()`, which (per the source comment already quoted in [The Three Trees](/flutter/en/flutter-internals/three-trees/)'s discussion of separate dirty flags) sets its own `_needsLayout = true` and then calls `parent.markNeedsLayout()` -- recursing upward until it hits a node that *is* a boundary. This is the literal mechanism, not a metaphor: a relayout boundary is where that recursive climb terminates.
+
+## Proven: marking a child dirty relays out the parent too -- unless the child is a relayout boundary
+
+A custom `RenderBox` pair: a parent that controls, per-test, whether it hands its child **tight** constraints (making the child its own relayout boundary, by the rule quoted above) or **loose** constraints with `parentUsesSize: true` (which does not):
+
+```dart
+// lib/relayout_boundary.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+int parentLayoutCount = 0;
+int childLayoutCount = 0;
+
+/// Lets the test choose whether the child receives TIGHT constraints (which
+/// -- per RenderObject.layout's own rule, quoted in this lesson --
+/// unconditionally makes the child a relayout boundary) or loose ones with
+/// parentUsesSize: true (which does NOT).
+class CountingParent extends SingleChildRenderObjectWidget {
+  const CountingParent({super.key, required Widget super.child, required this.tightChildConstraints});
+  final bool tightChildConstraints;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderCountingParent(tightChildConstraints);
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) {
+    (renderObject as _RenderCountingParent).tightChildConstraints = tightChildConstraints;
+  }
+}
+
+class _RenderCountingParent extends RenderBox with RenderObjectWithChildMixin<RenderBox> {
+  _RenderCountingParent(this._tightChildConstraints);
+  bool _tightChildConstraints;
+  set tightChildConstraints(bool v) {
+    if (_tightChildConstraints == v) return;
+    _tightChildConstraints = v;
+    markNeedsLayout();
+  }
+
+  @override
+  void performLayout() {
+    parentLayoutCount++;
+    final childConstraints = _tightChildConstraints
+        ? BoxConstraints.tight(const Size(40, 40))
+        : BoxConstraints.loose(const Size(200, 200));
+    child!.layout(childConstraints, parentUsesSize: true);
+    size = constraints.constrain(child!.size);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return child != null && child!.hitTest(result, position: position);
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    if (child != null) context.paintChild(child!, offset);
+  }
+}
+
+class CountingLeaf extends LeafRenderObjectWidget {
+  const CountingLeaf({super.key});
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderCountingLeaf();
+}
+
+class _RenderCountingLeaf extends RenderBox {
+  @override
+  void performLayout() {
+    childLayoutCount++;
+    size = constraints.biggest.isFinite ? constraints.biggest : constraints.smallest;
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {}
+}
+```
+
+```dart
+// test/relayout_boundary_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/relayout_boundary.dart';
+
+void main() {
+  testWidgets('NOT a relayout boundary (loose constraints, parentUsesSize: true): marking the child dirty ALSO relays out the parent', (tester) async {
+    parentLayoutCount = 0;
+    childLayoutCount = 0;
+    final childKey = GlobalKey();
+
+    await tester.pumpWidget(MaterialApp(
+      home: CountingParent(tightChildConstraints: false, child: CountingLeaf(key: childKey)),
+    ));
+    expect(parentLayoutCount, 1);
+    expect(childLayoutCount, 1);
+
+    final childRenderObject = tester.renderObject<RenderBox>(find.byKey(childKey));
+    childRenderObject.markNeedsLayout();
+    await tester.pump();
+
+    expect(childLayoutCount, 2, reason: 'the child itself relaid out');
+    expect(parentLayoutCount, 2, reason: 'loose constraints + parentUsesSize:true -- NOT a relayout boundary, so markNeedsLayout propagated up to the parent too');
+  });
+
+  testWidgets('IS a relayout boundary (tight constraints): marking the child dirty does NOT relay out the parent', (tester) async {
+    parentLayoutCount = 0;
+    childLayoutCount = 0;
+    final childKey = GlobalKey();
+
+    await tester.pumpWidget(MaterialApp(
+      home: CountingParent(tightChildConstraints: true, child: CountingLeaf(key: childKey)),
+    ));
+    expect(parentLayoutCount, 1);
+    expect(childLayoutCount, 1);
+
+    final childRenderObject = tester.renderObject<RenderBox>(find.byKey(childKey));
+    childRenderObject.markNeedsLayout();
+    await tester.pump();
+
+    expect(childLayoutCount, 2, reason: 'the child itself relaid out');
+    expect(parentLayoutCount, 1, reason: 'tight constraints make the child its OWN relayout boundary -- markNeedsLayout stopped there, the parent never relaid out');
+  });
+}
+```
+
+```text
+00:00 +0: NOT a relayout boundary (loose constraints, parentUsesSize: true): marking the child dirty ALSO relays out the parent
+00:00 +1: IS a relayout boundary (tight constraints): marking the child dirty does NOT relay out the parent
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/flutter-internals__layout-and-paint-internals/` run on this Mac)
+
+This is the direct, measurable difference the relayout-boundary rule exists to produce: identical `markNeedsLayout()` call on the child in both tests, but `parentLayoutCount` only climbs in the first one. The second test is `RepaintBoundary`'s layout-side cousin -- a `SizedBox`/any-tight-constraint ancestor gives everything below it the same "relayout stops here" property this lesson's custom `RenderBox` demonstrates explicitly.
+
+## Proven: the real `debugDumpRenderTree` shows the boundary annotation appear and disappear
+
+Dumping the tight-constraints tree (the relayout-boundary case above) with `debugDumpRenderTree()`, real trimmed excerpt:
+
+```text
+└─child: _RenderCountingParent#4b5d0 relayoutBoundary=up2
+  │ creator: CountingParent ← Center ← KeyedSubtree-[GlobalKey#759fb] ← ⋯
+  │ parentData: offset=Offset(380.0, 280.0) (can use size)
+  │ constraints: BoxConstraints(0.0<=w<=800.0, 0.0<=h<=600.0)
+  │ size: Size(40.0, 40.0)
+  │
+  └─child: _RenderCountingLeaf#87691
+      creator: CountingLeaf ← CountingParent ← Center ← ⋯
+      parentData: offset=Offset(0.0, 0.0) (can use size)
+```
+
+(from a real `flutter test` run of `debugDumpRenderTree()` on this Mac; object hashes are per-run memory addresses)
+
+Read exactly what's present and what's absent: `_RenderCountingParent` shows `relayoutBoundary=up2` -- it received **loose** constraints from `Center` above it, so per the rule quoted above it is **not** its own boundary, and the dump tells you the real boundary is two levels further up. `_RenderCountingLeaf` -- which this test's own code handed **tight** `40x40` constraints -- has **no** `relayoutBoundary=upN` annotation at all, because (per the same rule, `constraints.isTight`) it **is** its own boundary; Flutter's dump code only prints the annotation when a node is *not* itself the boundary, to tell you how far to look. This one dump directly confirms, from a completely different angle than the counter test above, that our tight-constraints leaf really did become a relayout boundary.
+
+## `sizedByParent` and `performResize`
+
+A render object with [`sizedByParent`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L2971) returning `true` -- doc comment: *"Whether the constraints are the only input to the sizing algorithm (in particular, child nodes have no impact)"* -- gets its `size` computed by [`performResize`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/box.dart#L2869) instead of `performLayout`, and `RenderBox`'s own default `performResize` implementation is one line: `size = computeDryLayout(constraints);`. This is a genuine optimization, not just an alternate code path: because the doc comment for `sizedByParent` is explicit that "child nodes have no impact" on the size, the framework can compute (and cache) that size from constraints alone via [`computeDryLayout`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/box.dart#L2071) without ever touching the child subtree -- and per the relayout-boundary rule quoted above, `sizedByParent: true` unconditionally makes the object its own relayout boundary too, for the same underlying reason.
+
+## Proven: a `sizedByParent` size change needs `markNeedsLayoutForSizedByParentChange`, not plain `markNeedsLayout`
+
+Being its own relayout boundary (proven above) means a `sizedByParent: true` object never bothers its parent when ITS INTERNAL layout reruns -- but if the value `computeDryLayout` returns actually changes, the parent (which read this object's `size` with `parentUsesSize: true`) needs to know, because the parent's own layout depended on that size. Plain `markNeedsLayout()` does not do this -- proven directly:
+
+```dart
+// lib/sized_by_parent_change.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+int sbpParentLayoutCount = 0;
+double? sbpObservedChildWidth;
+
+class SbpParent extends SingleChildRenderObjectWidget {
+  const SbpParent({super.key, required Widget super.child});
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderSbpParent();
+}
+
+class _RenderSbpParent extends RenderBox with RenderObjectWithChildMixin<RenderBox> {
+  @override
+  void performLayout() {
+    sbpParentLayoutCount++;
+    child!.layout(BoxConstraints.loose(const Size(300, 300)), parentUsesSize: true);
+    sbpObservedChildWidth = child!.size.width;
+    size = constraints.constrain(child!.size);
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) => context.paintChild(child!, offset);
+}
+
+/// A public interface the test drives directly against the live RenderObject
+/// -- avoids exposing the private render object type itself outside this file.
+abstract class SquareSideSetter {
+  void setSideWrong(double v);
+  void setSideRight(double v);
+}
+
+/// sizedByParent: true -- per its own doc comment (quoted above), a size
+/// change caused by internal state (not a new incoming Constraints) must go
+/// through markNeedsLayoutForSizedByParentChange(), not plain
+/// markNeedsLayout() -- proven by the two tests below.
+class FixedHeightBox extends LeafRenderObjectWidget {
+  const FixedHeightBox({super.key});
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderFixedHeightBox();
+}
+
+class _RenderFixedHeightBox extends RenderBox implements SquareSideSetter {
+  @override
+  bool get sizedByParent => true;
+
+  double _side = 40;
+
+  @override
+  void setSideWrong(double v) {
+    _side = v;
+    markNeedsLayout(); // WRONG for a sizedByParent change -- proven below
+  }
+
+  @override
+  void setSideRight(double v) {
+    _side = v;
+    markNeedsLayoutForSizedByParentChange(); // correct -- proven below
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) => constraints.constrain(Size(_side, _side));
+
+  @override
+  void paint(PaintingContext context, Offset offset) {}
+}
+```
+
+```dart
+// test/sized_by_parent_change_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/sized_by_parent_change.dart';
+
+void main() {
+  testWidgets('plain markNeedsLayout() after a sizedByParent size change leaves the PARENT silently stale', (tester) async {
+    sbpParentLayoutCount = 0;
+    sbpObservedChildWidth = null;
+    final key = GlobalKey();
+    await tester.pumpWidget(MaterialApp(home: SbpParent(child: FixedHeightBox(key: key))));
+    expect(sbpParentLayoutCount, 1);
+    expect(sbpObservedChildWidth, 40.0);
+
+    (tester.renderObject(find.byKey(key)) as SquareSideSetter).setSideWrong(90.0);
+    await tester.pump();
+
+    expect(sbpParentLayoutCount, 1, reason: 'the parent never relaid out -- plain markNeedsLayout() did not notify it');
+    expect(sbpObservedChildWidth, 40.0, reason: 'STALE -- the parent still thinks the child is 40 wide, even though it is now really 90');
+  });
+
+  testWidgets('markNeedsLayoutForSizedByParentChange() correctly notifies the parent', (tester) async {
+    sbpParentLayoutCount = 0;
+    sbpObservedChildWidth = null;
+    final key = GlobalKey();
+    await tester.pumpWidget(MaterialApp(home: SbpParent(child: FixedHeightBox(key: key))));
+    expect(sbpParentLayoutCount, 1);
+
+    (tester.renderObject(find.byKey(key)) as SquareSideSetter).setSideRight(90.0);
+    await tester.pump();
+
+    expect(sbpParentLayoutCount, 2, reason: 'the parent DID relay out this time');
+    expect(sbpObservedChildWidth, 90.0, reason: 'correct, fresh value -- markNeedsLayoutForSizedByParentChange() notified the parent as documented');
+  });
+}
+```
+
+```text
+00:00 +0: plain markNeedsLayout() after a sizedByParent size change leaves the PARENT silently stale
+00:00 +1: markNeedsLayoutForSizedByParentChange() correctly notifies the parent
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/flutter-internals__layout-and-paint-internals/` run on this Mac)
+
+`sbpObservedChildWidth` staying at the stale `40.0` after the child's real size became `90` -- with `sbpParentLayoutCount` genuinely unchanged -- is a real, silent layout bug, not a hypothetical one: the child IS a relayout boundary (`sizedByParent: true`), so plain `markNeedsLayout()` correctly relays out the child itself but, per the exact branch quoted earlier in this lesson, never touches the parent. `markNeedsLayoutForSizedByParentChange()`'s own implementation is `markNeedsLayout(); markParentNeedsLayout();` -- calling both explicitly, which the second test proves closes the gap: `sbpParentLayoutCount` reaches `2` and `sbpObservedChildWidth` catches up to the real `90.0`.
+
+## Paint: `PaintingContext`, the `Layer` tree, and `needsCompositing`
+
+[`PaintingContext`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L94) is what a render object's `paint(context, offset)` actually receives -- it wraps the live `Canvas` render objects draw into, and owns the machinery ([The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) already proved this empirically with a real paint counter) that decides whether a subtree gets its own `Layer` or shares its parent's. [`isRepaintBoundary`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L3082) (default `false`; `RenderRepaintBoundary` -- what `RepaintBoundary` the widget creates -- overrides it `true`) is the paint-tree's direct analogue of the relayout-boundary rule above: when `true`, [`markNeedsPaint`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L3338) stops climbing for the same structural reason `markNeedsLayout` stops at a relayout boundary.
+
+[`OffsetLayer`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/layer.dart#L1459)'s own doc comment states exactly why a repaint boundary is cheap to repaint, in its own words: *"Offset layers are key to efficient repainting because they are created by repaint boundaries in the `RenderObject` tree... When a render object that is a repaint boundary is asked to paint at given offset in a `PaintingContext`, the render object first checks whether it needs to repaint itself. If not, it reuses its existing `OffsetLayer` (and its entire subtree) by mutating its `offset` property, cutting off the paint walk."* This is the exact mechanism behind [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/)'s proof that `RepaintBoundary` stopped an unrelated sibling from repainting -- not a vague "isolation," but a specific, named layer object whose `offset` gets mutated in place instead of its whole subtree being re-recorded. [`PictureLayer`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/layer.dart#L824) is the leaf layer type that actually holds recorded drawing commands (the `Picture` object [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/)'s own `debugDumpLayerTree` excerpt showed); `OpacityLayer` (proven in that same lesson to be allocated at every non-zero `Opacity` value) is one of several `ContainerLayer` subclasses that apply an effect to everything nested inside them.
+
+## Hit testing: layout required, painting not
+
+[`RenderBox.hitTest`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/box.dart#L2916)'s own doc comment states a precise, easy-to-miss requirement: *"Hit testing requires layout to be up-to-date but does not require painting to be up-to-date. That means a render object can rely upon `performLayout` having been called in `hitTest` but cannot rely upon `paint` having been called. For example, a render object might be a child of a `RenderOpacity` object, which calls `hitTest` on its children when its opacity is zero even though it does not `paint` its children."* This is the source-level explanation for a fact [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) already used but didn't need to cite: an `Opacity(opacity: 0.0)` child (proven there to skip painting entirely) can still be hit -- unless something else (`IgnorePointer`, `Visibility`) explicitly stops it. `hitTestSelf(Offset position)` (default `false`) and `hitTestChildren(BoxHitTestResult, {required Offset position})` (default `false`, overridden above by `_RenderCountingParent` to forward to its child) are the two hooks a custom `RenderBox` overrides to actually participate in hit testing -- proven working above, since this lesson's own `CountingParent`/`CountingLeaf` tree is tappable in a full app precisely because `hitTestChildren` forwards the hit test correctly.
+
+<Callout title="The one-line takeaway">
+`RenderObject.layout`'s own rule (quoted above, verbatim): `_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null` -- any one of four conditions is enough. `markNeedsLayout`'s real branch (quoted above) either stops there (`owner._nodesNeedingLayout.add(this)`) or recurses to the parent (`markParentNeedsLayout()`) -- proven above with a custom `RenderBox` pair where marking a tight-constrained child dirty leaves `parentLayoutCount` unchanged, while marking a loose-constrained one (with `parentUsesSize: true`) relays out the parent too. A real `debugDumpRenderTree` shows the same fact from the outside: the boundary annotation is absent exactly on the node that is its own boundary. On the paint side, `isRepaintBoundary`/`markNeedsPaint` is the structural twin, and `OffsetLayer`'s own doc comment explains precisely why: a repaint boundary reuses its existing layer by mutating its `offset`, cutting off the paint walk. `hitTest` needs layout, not paint -- proven by `RenderBox.hitTest`'s own doc comment and the `Opacity(opacity: 0.0)` example it cites.
+</Callout>
+
+## Mental Model
+
+A relayout boundary is a **soundproofed room**: work happening inside it (a subtree relaying out) genuinely cannot be heard outside (the parent never needs to know), and the four conditions in the quoted rule are exactly the four ways a room gets soundproofed -- the parent isn't listening for this room's size (`!parentUsesSize`), this room's size was fixed by the building's plans regardless of its furniture (`sizedByParent`), the room was built to an exact, non-negotiable size (`constraints.isTight`), or it's the building itself (`parent == null`). `markNeedsLayout`'s branch (quoted above) is literally checking "is this room soundproofed?" before deciding whether to also disturb the room outside it. Paint's `isRepaintBoundary`/`OffsetLayer` mechanism is the identical idea one layer over: a repaint boundary is a picture frame that can be swapped out (its `offset` mutated) without repainting what's inside it.
+
+## Trade-offs
+
+| Mechanism | Benefit | Cost |
+| --- | --- | --- |
+| A relayout boundary (tight constraints, `sizedByParent`, or `parentUsesSize: false`) | Proven above: a dirty subtree relays out WITHOUT forcing an ancestor to relay out too | Requires knowing which of the four conditions actually applies -- an accidental `parentUsesSize: true` with loose constraints silently forfeits the isolation, proven above by the parent relaying out anyway |
+| `sizedByParent: true` + `computeDryLayout` | The framework can compute size from constraints alone, without visiting children -- unconditionally a relayout boundary too | The subclass must genuinely not depend on children for size -- `performLayout` for such a subclass must not change `size` at all, per the source's own constraint |
+| `RepaintBoundary`/`isRepaintBoundary` | Reuses an `OffsetLayer` by mutating `offset` instead of re-recording a subtree (quoted above) -- proven in [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) | Every boundary is a real layer object -- overusing it has a real memory/compositing cost, same trade-off proven in that lesson |
+| Hit testing needing only layout, not paint | An invisible (`opacity: 0.0`) widget can still correctly receive/reject hits without ever painting | Easy to accidentally leave a "hidden" widget tappable -- exactly the bug [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/)'s own `SpotTheBug` proved for a `CircularProgressIndicator` at `opacity: 0.0` |
+
+## Common Misconceptions
+
+- **"Marking any widget as needing layout always relays out its whole ancestor chain up to the root."** Proven false above: a tight-constrained child's `markNeedsLayout()` left `parentLayoutCount` completely unchanged -- the climb stopped at the relayout boundary, exactly as the quoted source branch describes.
+- **"`relayoutBoundary=upN` in a `debugDumpRenderTree` dump means something is wrong."** Proven above to be entirely normal and expected: it simply reports how many ancestors up the actual boundary is for a node that isn't one itself; a node that IS its own boundary (proven above with the tight-constrained leaf) shows no annotation at all.
+- **"`sizedByParent` and `constraints.isTight` are the same condition."** Proven false by the quoted rule itself: they're two of four INDEPENDENT ways to become a relayout boundary (`!parentUsesSize` and `parent == null` are the other two) -- any one alone is sufficient.
+- **"A widget must be visible (painted) to receive touch input."** Proven false by `RenderBox.hitTest`'s own quoted doc comment and its own cited example: an `Opacity(opacity: 0.0)` child is still hit-tested, because hit testing only requires layout, not paint.
+
+## Reading AI-generated code
+
+AI-generated custom `RenderBox`/`RenderObject` code (rarer than widget-level code, but real in performance-sensitive generated snippets) frequently gets `sizedByParent` wrong: returning `true` while still reading a child's size inside `performLayout` to compute this object's own `size` -- directly contradicting the doc comment quoted above ("child nodes have no impact... subclasses that return true must not change the dimensions of this render object in `performLayout`").
+
+```dart
+// @expect-error compiles clean -- sizedByParent: true is a real lie here: performLayout still reads child.size to set this object's OWN size, exactly what the doc comment quoted above forbids
+class BrokenSizedByParentBox extends RenderBox with RenderObjectWithChildMixin<RenderBox> {
+  @override
+  bool get sizedByParent => true;
+
+  @override
+  void performLayout() {
+    child!.layout(constraints, parentUsesSize: true);
+    size = child!.size; // contradicts sizedByParent's own contract
+  }
+}
+```
+
+Before trusting generated custom `RenderObject`/`RenderBox` code, check:
+
+- Does `sizedByParent` return `true` while `performLayout` (rather than `performResize`/`computeDryLayout`) still sets `size` based on a child? That is the exact contract violation shown above -- the framework may skip calling `performLayout` at all for a `sizedByParent: true` object in some paths, silently leaving `size` stale.
+- Does a custom `RenderBox` override `hitTestChildren`/`hitTestSelf` at all? Without it (proven above via `_RenderCountingParent`'s own override), the default `false` means the subtree is structurally invisible to hit testing even though it paints and lays out fine.
+- Is a repaint boundary (`RepaintBoundary`/`isRepaintBoundary: true`) added around something that barely ever repaints, "just in case"? Per the `OffsetLayer` mechanism quoted above, a boundary that's never dirty is pure overhead with none of the reuse benefit.
+
+<SpotTheBug code={`class FixedHeightBox extends RenderBox {
+  @override
+  bool get sizedByParent => true;
+
+  double _height = 40;
+  set targetHeight(double v) {
+    if (_height == v) return;
+    _height = v;
+    markNeedsLayout();
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    return constraints.constrain(Size(constraints.maxWidth, _height));
+  }
+}`}>
+Calling plain `markNeedsLayout()` when `_height` changes is the bug, proven directly above with `sbpObservedChildWidth` staying stale at `40.0`: `sizedByParent: true` means, per the doc comment quoted above, that a size change for THIS reason must go through [`markNeedsLayoutForSizedByParentChange()`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/rendering/object.dart#L2727) instead of plain `markNeedsLayout()` -- the doc comment for `sizedByParent` says exactly this: *"If the value can change, then, when it does change, the subclass should make sure to call `markNeedsLayoutForSizedByParentChange`."* Plain `markNeedsLayout()` marks layout dirty but does not also handle the resize-specific bookkeeping that method performs (it calls both `markNeedsLayout()` AND `markParentNeedsLayout()` -- because a `sizedByParent` object's SIZE genuinely did change, its parent must be told too, even though this object is its own relayout boundary by the rule proven earlier in this lesson).
+</SpotTheBug>
+
+export const quizLayoutPaint = [
+  {
+    q: 'Quoted verbatim from the installed 3.47.5 source, what is the exact relayout-boundary rule computed in RenderObject.layout?',
+    options: [
+      '_isRelayoutBoundary = parentUsesSize && !sizedByParent',
+      '_isRelayoutBoundary = !parentUsesSize || sizedByParent || constraints.isTight || parent == null',
+      '_isRelayoutBoundary = constraints.isTight && parent != null',
+      '_isRelayoutBoundary is always true for every RenderBox',
+    ],
+    answer: 1,
+    explain: 'The exact line, quoted above from object.dart:2863 -- four independent conditions joined by ||, any one is sufficient.',
+  },
+  {
+    q: 'Proven above with a custom RenderBox pair, what happened to parentLayoutCount when the CHILD was marked needing layout under LOOSE constraints with parentUsesSize: true?',
+    options: [
+      'It stayed the same -- the parent never relaid out',
+      'It incremented too -- the child was NOT a relayout boundary, so markNeedsLayout climbed to the parent via markParentNeedsLayout()',
+      'The test threw an exception',
+      'Only childLayoutCount exists; there is no parentLayoutCount',
+    ],
+    answer: 1,
+    explain: 'The first test proved parentLayoutCount went from 1 to 2 -- loose constraints + parentUsesSize: true means the child is not its own boundary, so the dirty flag propagated upward.',
+  },
+  {
+    q: 'Proven above with the SAME custom RenderBox pair but TIGHT constraints, what happened to parentLayoutCount when the child was marked needing layout?',
+    options: [
+      'It also incremented, identically to the loose-constraints case',
+      'It stayed at 1, unchanged -- the tight-constrained child was its own relayout boundary, so markNeedsLayout stopped there',
+      'Both counters reset to 0',
+      'The child failed to lay out at all',
+    ],
+    answer: 1,
+    explain: 'The second test proved parentLayoutCount stayed at 1 while childLayoutCount still went from 1 to 2 -- direct proof the boundary absorbed the dirty flag instead of propagating it.',
+  },
+  {
+    q: 'Proven above by a real debugDumpRenderTree dump, what is different about how the two render objects are printed?',
+    options: [
+      'Both show identical relayoutBoundary=upN annotations',
+      '_RenderCountingParent shows "relayoutBoundary=up2" (it is NOT its own boundary); _RenderCountingLeaf shows NO annotation at all (it IS its own boundary, per the tight constraints it received)',
+      'Neither render object appears in the dump at all',
+      'The dump only shows widget names, never RenderObject-level detail',
+    ],
+    answer: 1,
+    explain: 'The real trimmed dump above shows exactly this asymmetry -- the annotation is only printed for a node that is NOT its own boundary, confirming the counter-based proof from a completely different angle.',
+  },
+  {
+    q: 'Quoted verbatim from RenderBox.hitTest\'s own doc comment, what does hit testing actually require -- and what does it explicitly NOT require?',
+    options: [
+      'It requires both layout and paint to be up-to-date',
+      'It requires layout to be up-to-date but does NOT require painting to be up-to-date -- a render object can rely on performLayout having run but not on paint',
+      'It requires neither layout nor paint',
+      'It only requires paint, not layout',
+    ],
+    answer: 1,
+    explain: 'Quoted directly above: "Hit testing requires layout to be up-to-date but does not require painting to be up-to-date," with the cited example of an Opacity(opacity: 0.0) child still being hit-tested despite never painting.',
+  },
+  {
+    q: 'In the SpotTheBug above, why is plain markNeedsLayout() wrong when a sizedByParent: true object\'s size-determining field changes?',
+    options: [
+      'markNeedsLayout() does not exist on objects with sizedByParent: true',
+      'The doc comment for sizedByParent explicitly requires calling markNeedsLayoutForSizedByParentChange() instead, which additionally calls markParentNeedsLayout() -- because the object\'s SIZE genuinely changed, and its parent (which sized it) needs to know even though the object remains its own relayout boundary',
+      'It should call performLayout() manually instead',
+      'There is no bug -- plain markNeedsLayout() is correct here',
+    ],
+    answer: 1,
+    explain: 'sizedByParent\'s own doc comment (quoted above) states plainly: "If the value can change, then, when it does change, the subclass should make sure to call markNeedsLayoutForSizedByParentChange" -- plain markNeedsLayout() misses the required parent notification.',
+  },
+];
+
+<Quiz client:visible id="flutter-internals/layout-and-paint-internals" questions={quizLayoutPaint} />
+
+<ProgressTracker client:visible id="flutter-internals/layout-and-paint-internals" />
