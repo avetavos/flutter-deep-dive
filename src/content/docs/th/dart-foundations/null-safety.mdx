@@ -1,6 +1,6 @@
 ---
 title: 'Null Safety'
-description: 'sound null safety ใน Dart — nullable vs non-nullable type, operator ?. ?? !, late และ flow analysis ที่พิสูจน์ว่าค่าไม่ใช่ null'
+description: 'sound null safety ใน Dart 3 — nullable vs non-nullable type, operator ?. ?? ! กับ runtime error จริงที่การเดิมพัน ! แพ้, late, definite-assignment analysis, field vs local flow promotion และ null-aware pattern'
 sidebar:
   order: 3
 ---
@@ -9,10 +9,11 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## non-nullable โดย default
 
-Dart มี **sound** null safety: type ไม่สามารถเก็บ `null` ได้เว้นแต่คุณจะบอกชัด ๆ ด้วย `?` นี่คือการันตีแบบแข็ง ไม่ใช่ lint — ถ้า type system บอกว่าค่านั้น non-null จะเป็น null ตอน runtime ไม่ได้จริง ๆ
+Dart มี **sound** null safety: type ไม่สามารถเก็บ `null` ได้เว้นแต่คุณจะบอกชัด ๆ ด้วย `?` นี่คือการันตีแบบแข็ง ไม่ใช่ lint — ถ้า type system บอกว่าค่านั้น non-null จะเป็น null ตอน runtime ไม่ได้จริง ๆ dart.dev บอกตรง ๆ ว่านี่ไม่ใช่ตัวเลือกแล้ว: *["Dart has enforced sound null safety since Dart 3, released in May 2023."](https://dart.dev/null-safety)* — โหมด unsound/legacy แบบเก่าที่ SDK ของคอร์สนี้ (Dart 3.13) เคย opt-in ได้ไม่มีอยู่แล้ว
 
 ```dart
 int a = 1;      // non-nullable — can never be null
@@ -44,6 +45,44 @@ final definite = maybeName!;          // String — DANGER if it's actually null
 
 operator `!` คือตัวที่ต้องเคารพ: `!` สั่งปิดปาก compiler ด้วยการ *assert* ว่า non-null และถ้าคุณผิด จะ throw ตอน runtime ทุก `!` คือการเดิมพันเล็ก ๆ — ใช้เมื่อคุณพิสูจน์ได้ว่าค่านั้น non-null เท่านั้น
 
+### `!` anti-pattern พิสูจน์ด้วย runtime error จริง
+
+```dart
+// lib/bang_operator.dart
+String shout(String? input) => input!.toUpperCase(); // the anti-pattern: a bet with no proof
+```
+
+```dart
+// test/bang_operator_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__null-safety/bang_operator.dart';
+
+void main() {
+  test('! is a runtime bet: it works when the value really is non-null', () {
+    expect(shout('hi'), 'HI');
+  });
+
+  test('! throws a real, specific error when the bet is wrong', () {
+    expect(() => shout(null), throwsA(isA<TypeError>()));
+    try {
+      shout(null);
+      fail('should have thrown');
+    } catch (e) {
+      expect(e.toString(), contains('Null check operator used on a null value'));
+    }
+  });
+}
+```
+
+```text
+✓ ! is a runtime bet: it works when the value really is non-null
+✓ ! throws a real, specific error when the bet is wrong
+
+00:00 +2: All tests passed!
+```
+
+`Null check operator used on a null value` คือ crash log ที่พบบ่อยที่สุดอันหนึ่งของ Flutter บน production — มันแปลว่า `!` ที่ไหนสักแห่งเดิมพันผิด ทุกตัวคือ `?.`/`??`/`if (x == null)` guard ที่ไม่ได้ถูกเขียนไว้
+
 ## flow analysis narrow ให้คุณ
 
 คุณแทบไม่ต้องใช้ `!` เพราะ **flow analysis** ของ Dart จะ narrow nullable เป็น non-null หลังผ่านการเช็ค:
@@ -63,11 +102,54 @@ export const flowDiagram = `flowchart TB
   check -->|yes| ret["return early"]
   check -->|no| promoted["name: String\n(promote แล้ว ใช้ได้ปลอดภัย)"]`;
 
-มีจุดที่กัด Flutter dev อยู่บ่อย: flow analysis ทำงานกับ **local variable** ไม่ใช่กับ instance field หรือ getter (พวกนั้นอาจเปลี่ยนค่าระหว่างเช็คกับใช้งาน) สำหรับ field ที่เป็น nullable ให้ copy ไปเป็น local ก่อน แล้วค่อยเช็ค local นั้น
+### Local เทียบกับ field — พิสูจน์ด้วย error จริง และข้อยกเว้นของ Dart 3.2
+
+มีจุดที่กัด Flutter dev อยู่บ่อย: ปกติ promotion ทำงานกับ **local variable** ไม่ใช่กับ instance field หรือ getter เพราะ field อาจเปลี่ยนค่าระหว่างเช็คกับใช้งาน (method อื่นอาจรันแทรกกลาง) field แบบ public ที่ mutable จะไม่ถูก promote เลย — การเช็คไม่ช่วยอะไรกับการอ่านถัดไป เป็น error จริง:
+
+```dart
+// @expect-error real unchecked_use_of_nullable_value diagnostic, captured below
+class Greeter {
+  String? name;
+
+  String greet() {
+    if (name != null) {
+      // ❌ `name` is a FIELD, not a local — flow analysis does not promote
+      // it (it could change between the check and this read, e.g. via
+      // another method or a getter with side effects).
+      return 'Hello, ${name.length}'; // still String?, not promoted to String
+    }
+    return 'Hello, stranger';
+  }
+}
+```
+
+```text
+error • The property 'length' can't be unconditionally accessed because the receiver can be 'null'.
+Try making the access conditional (using '?.') or adding a null check to the target ('!') •
+unchecked_use_of_nullable_value
+```
+
+วิธีแก้แบบดั้งเดิมคือ copy field มาเป็น local ก่อน แล้วค่อยเช็ค local นั้น (ซึ่ง analyzer เชื่อ เพราะ local เปลี่ยนแปลงกลางคันไม่ได้จริง) แต่ Dart 3.2 เพิ่มข้อยกเว้นจริง ๆ [ยืนยันโดยหน้า non-promotion-reasons ของ dart.dev](https://dart.dev/tools/non-promotion-reasons): field แบบ **private และ final** ที่ไม่มี declaration ขัดแย้งกัน *promote ได้จริง* เพราะความเสี่ยง "อาจเปลี่ยนค่า" พวกนั้นไม่มีผลกับมันเลย:
+
+```dart
+class Greeter2 {
+  final String? _name; // private + final — DOES get promoted (Dart 3.2+)
+  Greeter2(this._name);
+
+  String greet() {
+    if (_name != null) {
+      return 'Hello, ${_name.length}'; // promoted to String here — no error
+    }
+    return 'Hello, stranger';
+  }
+}
+```
+
+`flutter analyze` บน `Greeter2` รายงานศูนย์ปัญหา — เป็นการปรับปรุงจริงของ Dart ปัจจุบันเหนือกว่าคำแนะนำเก่าที่บอกให้ "copy ไปเป็น local เสมอ"
 
 ## `late`: สัญญาว่าจะ initialize ก่อนใช้
 
-`late` บอกว่า "อันนี้จะเป็น non-null ตอนที่มีใครอ่าน แค่ตอนประกาศยังไม่มีค่า" มีประโยชน์กับค่าที่ set ใน `initState` หรือคำนวณครั้งเดียว
+`late` บอกว่า "อันนี้จะเป็น non-null ตอนที่มีใครอ่าน แค่ตอนประกาศยังไม่มีค่า" มีประโยชน์กับค่าที่ set ใน `initState` หรือคำนวณครั้งเดียว — [setState & the Lifecycle](/flutter/th/state-management/setstate-and-lifecycle/) พิสูจน์ต้นทุนจริงตอน runtime ของการผิดสัญญานั้นไปแล้ว (`LateInitializationError`) สำหรับ `late final` field ที่ยังไม่ได้ assign หลัง `initState`
 
 ```dart
 late final String config;   // no value yet, but promised before first read
@@ -76,20 +158,243 @@ late final String config;   // no value yet, but promised before first read
 
 ใช้ `late` อย่างประหยัด — เพราะเป็นการแลกการันตีตอน compile-time ไปเป็นตอน runtime `late` ที่ใช้ผิดก็คือ `!` ในคราบปลอมนั่นเอง
 
+### Definite assignment analysis พิสูจน์ด้วย diagnostic จริงสองแบบ
+
+ถ้าไม่ใช้ `late` non-nullable local ที่ไม่ถูก assign ทุก path จะเป็น compile error จริงทันที — Dart พิสูจน์ไม่ได้ว่ารับประกันค่าได้ จึงปฏิเสธ local ที่ไม่ใช่ `final` จะได้ diagnostic แบบหนึ่ง:
+
+```dart
+// @expect-error real not_assigned_potentially_non_nullable_local_variable diagnostic, captured below
+String describe(bool flag) {
+  String label; // non-final, non-nullable, no initializer
+  if (flag) {
+    label = 'yes';
+  }
+  return label; // no `else` — not assigned on every path
+}
+```
+
+```text
+error • The non-nullable local variable 'label' must be assigned before it can be used. Try giving
+it an initializer expression, or ensure that it's assigned on every execution path •
+not_assigned_potentially_non_nullable_local_variable
+```
+
+local ที่เป็น `final` ที่มีช่องว่างแบบเดียวกันจะได้ diagnostic ที่**ต่างออกไป**จริง ๆ — ใช้คำว่า "potentially unassigned" แทน "must be assigned":
+
+```dart
+// @expect-error real read_potentially_unassigned_final diagnostic, captured below
+String describe(bool flag) {
+  final String label; // not-yet-assigned, non-nullable, final local
+  if (flag) {
+    label = 'yes';
+  }
+  return label; // no `else` — not assigned on every path
+}
+```
+
+```text
+error • The final variable 'label' can't be read because it's potentially unassigned at this point.
+Ensure that it is assigned on necessary execution paths • read_potentially_unassigned_final
+```
+
+ทั้งคู่แก้แบบเดียวกัน: assign ให้ครบทุก path (เพิ่ม `else`) หรือให้ initializer ตั้งแต่แรก
+
+## Null-aware pattern และ collection
+
+Pattern (บทก่อนหน้า) มีรูปแบบ null-aware ของตัวเอง บวกกับ null-aware spread สำหรับ collection:
+
+```dart
+// lib/null_patterns.dart
+
+// Null-check pattern: `var x?` matches only if the value is non-null, and
+// binds `x` with the non-null type — the pattern-matching equivalent of `!`,
+// but as a conditional match instead of a throwing assertion.
+String describe(int? maybeValue) => switch (maybeValue) {
+  var x? => 'value: $x', // matches non-null, binds int (not int?)
+  null => 'nothing',
+};
+
+// Null-assert pattern: `expr!` inside a pattern — asserts non-null the way
+// the `!` operator does, but as part of destructuring.
+(int, int) unwrapPair((int?, int?) pair) {
+  final (a!, b!) = pair; // throws if either half is null
+  return (a, b);
+}
+
+// Null-aware spread (`...?`) and null-aware collection-if guard against a
+// nullable list contributing nothing instead of throwing.
+List<String> merge(List<String>? maybeExtra) => [
+  'base',
+  ...?maybeExtra, // spreads only if non-null; a bare `...` would throw on null
+];
+```
+
+```dart
+// test/null_patterns_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__null-safety/null_patterns.dart';
+
+void main() {
+  test('null-check pattern (var x?) matches non-null and binds the promoted type', () {
+    expect(describe(5), 'value: 5');
+    expect(describe(null), 'nothing');
+  });
+
+  test('null-assert pattern (a!) destructures and throws on a null field', () {
+    expect(unwrapPair((1, 2)), (1, 2));
+    expect(() => unwrapPair((null, 2)), throwsA(isA<TypeError>()));
+  });
+
+  test('null-aware spread (...?) contributes nothing instead of throwing on null', () {
+    expect(merge(['x', 'y']), ['base', 'x', 'y']);
+    expect(merge(null), ['base']);
+  });
+}
+```
+
+```text
+✓ null-check pattern (var x?) matches non-null and binds the promoted type
+✓ null-assert pattern (a!) destructures and throws on a null field
+✓ null-aware spread (...?) contributes nothing instead of throwing on null
+
+00:00 +3: All tests passed!
+```
+
+## `List<String?>` เทียบกับ `List<String>?` และ required named parameter
+
+สอง type นี้ต่างกันจริง ๆ และสลับผิดได้ง่าย:
+
+```dart
+// lib/list_nullability.dart
+// `List<String?>` — a non-nullable list whose ELEMENTS may be null.
+// `List<String>?` — a nullable list whose elements, if the list exists, are
+// never null. These are genuinely different types; do not confuse them.
+
+int countNulls(List<String?> items) => items.where((e) => e == null).length;
+
+int lengthOrZero(List<String>? maybeItems) => maybeItems?.length ?? 0;
+
+String greetAll({required String from}) => 'from $from';
+```
+
+```dart
+// test/list_nullability_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__null-safety/list_nullability.dart';
+
+void main() {
+  test('List<String?>: the list always exists, but elements may be null', () {
+    expect(countNulls(['a', null, 'b', null]), 2);
+  });
+
+  test('List<String>?: the list itself may be null, but elements never are', () {
+    expect(lengthOrZero(['a', 'b']), 2);
+    expect(lengthOrZero(null), 0);
+  });
+
+  test('a required named parameter must be supplied — see the lesson for the real missing_required_argument error', () {
+    expect(greetAll(from: 'Ada'), 'from Ada');
+  });
+}
+```
+
+```text
+✓ List<String?>: the list always exists, but elements may be null
+✓ List<String>?: the list itself may be null, but elements never are
+✓ a required named parameter must be supplied — see the lesson for the real missing_required_argument error
+
+00:00 +3: All tests passed!
+```
+
+การละ argument ที่เป็น `required` คือ compile error จริงทันที ไม่ใช่เรื่องเซอร์ไพรส์ตอน runtime:
+
+```dart
+// @expect-error real missing_required_argument diagnostic, captured below
+import 'list_nullability.dart';
+
+void demo() {
+  greetAll(); // missing the required `from` argument
+}
+```
+
+```text
+error • The named parameter 'from' is required, but there's no corresponding argument. Try adding
+the required argument • missing_required_argument
+```
+
 <Callout title="สรุปหนึ่งบรรทัด">
-Dart เป็น non-nullable โดย default; `?` opt-in ให้ type เก็บ `null` ได้ และการันตีเป็นแบบ **sound** — เชื่อได้ตอน runtime ใช้ `?.` (access ปลอดภัย), `??` (fallback) และพึ่ง **flow analysis** (การเช็ค null จะ promote ตัวแปร) แทน `!` (การเดิมพันตอน runtime) `late` เลื่อนการ initialize แต่ลดการันตีเหลือแค่ runtime — ใช้อย่างประหยัด
+Dart เป็น non-nullable โดย default และถูกบังคับแบบ **sound** ตั้งแต่ Dart 3 — โหมด legacy/unsound หมดไปแล้ว (พิสูจน์ด้วย citation ของ dart.dev ข้างบน) `!` คือการเดิมพันตอน runtime — พิสูจน์แล้วข้างบนด้วยข้อความ crash จริง `Null check operator used on a null value` ตอนที่มันแพ้ flow analysis promote **local** ไม่ใช่ field ธรรมดา (พิสูจน์ด้วย error จริง `unchecked_use_of_nullable_value`) — ยกเว้น field แบบ private `final` ตั้งแต่ Dart 3.2 ที่ promote ได้จริง definite-assignment analysis บล็อกการอ่าน non-nullable local ที่ยังไม่ assign ในบาง path ด้วย diagnostic จริงสองแบบต่างกันตาม `final` Pattern มีรูปแบบ null-aware ของตัวเอง (`var x?`, `a!`, `...?`) และ `List<String?>` ไม่ใช่ `List<String>?` — nullability อยู่คนละตำแหน่งใน type
 </Callout>
+
+## อ่านโค้ดที่ AI สร้างให้
+
+Dart ที่ AI สร้างภายใต้ time pressure มักเลือกใช้ `!` บ่อยกว่าที่ human reviewer จะยอมรับมาก — เป็นวิธีที่เร็วที่สุดที่จะทำให้เส้นหยักสีแดงหายไป และมัน compile ผ่านด้วย ต้นทุนจะโผล่มาทีหลัง ใน production crash log ไม่ใช่ใน editor
+
+```dart
+// AI-generated: "get the user's display name"
+String displayName(Map<String, dynamic> json) {
+  return json['profile']['displayName'].toString();
+  // Three unguarded assumptions stacked: 'profile' exists, it's a Map,
+  // and 'displayName' exists on it. Any missing key throws a real,
+  // unhandled runtime error — not the friendly Null check operator
+  // message, but a TypeError on the failed cast/access chain.
+}
+```
+
+ก่อนเชื่อ code แบบนี้ ให้เช็ค:
+
+- ทุก `!` — คุณชี้ `if`/`??`/การ validate ก่อนหน้าที่พิสูจน์ non-null ตรงนี้ได้จริงไหม? ถ้าไม่ได้ นี่คือ anti-pattern ที่พิสูจน์แล้วข้างบน ห่างจาก crash จริงแค่ API response ที่ผิดปกติหนึ่งครั้ง
+- การเข้าถึง `map['a']['b']['c']` แบบ chain บน `dynamic`/`Map<String, dynamic>` JSON — แต่ละ `[]` คืน `null` ได้ และไม่มี compiler check เลยบน `dynamic` ควรใช้ typed model ที่มี `fromJson` validate ที่ boundary ครั้งเดียวแทน
+- การอ่าน field ทันทีหลังเช็ค null บน `this.field` (หรือ `widget.field`) แทนที่จะ copy ไปเป็น local ก่อน — พิสูจน์แล้วข้างบนว่าเป็น analyzer error จริง ไม่ใช่แค่เรื่อง style เว้นแต่ field นั้นจะ private และ final (ข้อยกเว้นของ Dart 3.2 ที่พิสูจน์แล้วข้างบนเช่นกัน)
+- function ที่รับ `List<String>?` ทั้งที่จริง ๆ ตั้งใจสื่อว่า "มี list เสมอ แต่บาง entry อาจขาด" (`List<String?>`) — สองแบบใช้แทนกันไม่ได้ พิสูจน์แล้วข้างบน
+
+<SpotTheBug code={`class OrderSummary {
+  OrderSummary({required this.total, this.discountCode});
+  final double total;
+  final String? discountCode;
+
+  String label() {
+    if (discountCode != null) {
+      return '\$total (code: \${discountCode.toUpperCase()})';
+    }
+    return '\$total';
+  }
+}`}>
+โค้ดนี้ compile ไม่ผ่าน: `discountCode` ถูกเช็คด้วย `if (discountCode != null)` แต่ถูกอ่านข้างใน**string interpolation**, `\${discountCode.toUpperCase()}` — เป็นช่องว่าง field-promotion เดียวกับที่พิสูจน์ไปแล้วก่อนหน้านี้ในบทนี้ เพราะ `discountCode` เป็น public field (ไม่ใช่ private+final) การเช็ค null จึงไม่ narrow มันสำหรับการอ่านข้างใน interpolation error จริงคือ `unchecked_use_of_nullable_value` วิธีแก้คือ copy มาเป็น local ก่อน: `final code = discountCode; if (code != null) { ...code.toUpperCase()... }` — ตอนนี้ analyzer เชื่อว่า local เปลี่ยนแปลงกลางคันระหว่างเช็คกับใช้ไม่ได้
+</SpotTheBug>
+
+## Mental Model
+
+Null safety ไม่ใช่ "ใส่ `?` ทุกที่จนกว่าจะ compile ผ่าน" — มันคือระบบคำสัญญาที่ compiler เช็คให้คุณ ทุก `?` คือค่าที่คุณยอมรับว่าอาจไม่มีอยู่จริง; ทุก type ที่ non-nullable คือคำสัญญา (จากคุณหรือ API ที่คุณเรียก) ว่ามันจะมีอยู่เสมอ `!` คือการขึ้นเงินสัญญานั้นโดยไม่มีหลักฐาน — การเดิมพัน flow analysis คือ compiler *พิสูจน์คำสัญญาให้เอง* สำหรับกรณีแคบและปลอดภัยของ local variable ที่พิสูจน์ได้ว่าเปลี่ยนแปลงกลางคันระหว่างเช็คกับใช้ไม่ได้ — นี่คือเหตุผลตรงที่มันมักไม่ครอบคลุมถึง field และเป็นเหตุผลตรงที่ Dart 3.2 ขยายมันไปถึง private `final` field ได้ เพราะพิสูจน์ได้ว่า field พวกนั้น*ก็*เปลี่ยนแปลงกลางคันไม่ได้เหมือนกัน
+
+## Trade-offs
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `!` | พิมพ์น้อยที่สุด compile ผ่านทันที | พิสูจน์แล้วข้างบน: `TypeError` crash จริงแบบไม่มีการจัดการทันทีที่การเดิมพันผิด — ไม่มี safety net ของ compiler เหลืออยู่เลย |
+| `?.` / `??` | ไม่ throw เลย ลดระดับอย่างนุ่มนวล | อาจซ่อน bug ที่*ควร*ดังไว้ (ค่าที่เป็น null ทั้งที่ไม่ควรเป็นเลย) ได้เงียบ ๆ |
+| copy field มาเป็น local เพื่อ promote | ใช้ได้กับ field ทุกตัวเสมอ | เพิ่มบรรทัด เพิ่มตัวแปรที่ต้องซิงค์กัน — การ promote private-final-field (Dart 3.2) ตัดต้นทุนนี้ออกสำหรับ field ส่วนที่เข้าเงื่อนไข |
+| `late` | เลื่อนการ initialize ออกไปหลังประกาศ แต่ยังคง non-nullable ทาง static ทุกที่ที่ใช้ | ลดการันตีเหลือแค่ runtime — อ่านเร็วเกินไปจะ throw `LateInitializationError` พิสูจน์แล้วในบท lifecycle |
+| Null-check pattern (`var x?`) | match แบบมีเงื่อนไข ไม่ throw ในฝั่งที่ไม่ match | ใช้ได้แค่ใน pattern context (`switch`, `if-case`) เท่านั้น — ไม่ใช่ของแทน `!` ได้ทุกที่ |
+
+## Common Misconceptions
+
+- **"Dart ยังมีโหมด unsound/legacy null-safety ที่ opt-in ได้อยู่"** พิสูจน์แล้วว่าผิดข้างบนด้วย quote ตรงจาก dart.dev: sound null safety ถูกบังคับแบบไม่มีเงื่อนไขตั้งแต่ Dart 3 (พฤษภาคม 2023) — ไม่มี opt-out ใน Dart 3.13 ของคอร์สนี้
+- **"ถ้าเช็ค `if (this.field != null)` field จะปลอดภัยใช้ต่อทันที เหมือน local"** พิสูจน์แล้วว่าผิดข้างบนด้วย error จริง `unchecked_use_of_nullable_value` — จริงแค่ตั้งแต่ Dart 3.2 และแค่สำหรับ field แบบ private, `final` ที่ไม่มี declaration ขัดแย้งกัน field แบบ public หรือ mutable ไม่ถูก promote เลย
+- **"`List<String?>` กับ `List<String>?` ความหมายเหมือนกันโดยพื้นฐาน"** พิสูจน์แล้วว่าผิดข้างบน: แบบหนึ่งคือ list ที่มีอยู่เสมอแต่อาจมี entry เป็น null; อีกแบบตัว list เองอาจเป็น null ได้แต่ไม่มี entry เป็น null เลย — `countNulls` กับ `lengthOrZero` ข้างบนมี signature ที่ต่างกันจริง ใช้แทนกันไม่ได้
+- **"argument `required` ที่ขาดไปคือ runtime crash แบบ null-pointer เหมือน `!`"** พิสูจน์แล้วว่าผิดข้างบน: มันเป็น **compile-time** error จริงทันที (`missing_required_argument`) — Dart ไม่มีทางให้โปรแกรมรันโดยขาด argument เลย ต่างจาก `!` ที่ความล้มเหลวถูกเลื่อนไปจนกว่า code path นั้นจะรันจริง
 
 export const quizNull = [
   {
-    q: '"sound" null safety ใน Dart หมายความว่าอะไร?',
+    q: '"sound" null safety ใน Dart หมายความว่าอะไร และเป็นตัวเลือกเดียวตั้งแต่เวอร์ชันไหน?',
     options: [
       'null มีเสียงตอนเกิดขึ้น',
-      'การันตี non-null แน่นหนาตอน runtime — ถ้า type เป็น non-nullable ก็เป็น null ไม่ได้จริง ๆ',
+      'การันตี non-null แน่นหนาตอน runtime; Dart บังคับมันแบบไม่มี opt-out unsound/legacy ตั้งแต่ Dart 3 (พฤษภาคม 2023)',
       'ทำงานแค่ใน debug mode',
       'เป็นแค่ warning ของ linter',
     ],
     answer: 1,
+    explain: 'quote จาก dart.dev/null-safety: "Dart has enforced sound null safety since Dart 3, released in May 2023."',
   },
   {
     q: 'operator `??` ทำอะไร?',
@@ -102,24 +407,48 @@ export const quizNull = [
     answer: 1,
   },
   {
-    q: 'ทำไม operator `!` (null assertion) ถึงเสี่ยง?',
+    q: 'พิสูจน์แล้วข้างบนด้วย runtime error จริงที่จับได้ เกิดอะไรขึ้นเมื่อใช้ `!` กับค่าที่จริง ๆ เป็น null?',
     options: [
-      'ช้า',
-      'assert non-null เพื่อให้ compiler ผ่าน และ throw ตอน runtime ถ้าค่าเป็น null จริง',
-      'เปลี่ยน type อย่างถาวร',
-      'ใช้ได้กับตัวเลขเท่านั้น',
+      'คืน null แบบเงียบ ๆ',
+      'มันจะ throw — ข้อความจริงเป๊ะ ๆ คือ "Null check operator used on a null value"',
+      'log warning แล้วทำงานต่อ',
+      'fail แค่ใน release build เท่านั้น',
     ],
     answer: 1,
+    explain: 'จับได้ตรง ๆ จากการรัน flutter test จริงบน bang_operator.dart ที่เรียก shout(null) — ข้อความนี้เป๊ะ ๆ คือหนึ่งใน crash message ของ Flutter production ที่พบบ่อยที่สุด',
   },
   {
-    q: 'ทำไมบางที flow analysis ถึง promote nullable field ไม่ได้?',
+    q: 'ทำไม flow analysis ปกติ promote FIELD ที่เป็น nullable หลังเช็ค null ไม่ได้ และข้อยกเว้นจริงที่พิสูจน์แล้วคืออะไร?',
     options: [
-      'field เป็น non-null เสมอ',
-      'promotion ทำงานกับ local variable ไม่ใช่ field/getter ที่อาจเปลี่ยนค่าระหว่างเช็คกับใช้',
-      'field เช็ค null ไม่ได้',
-      'เป็น bug ของ compiler',
+      'field เป็น non-null เสมอจึงไม่มีอะไรให้ promote',
+      'field อาจเปลี่ยนค่าระหว่างเช็คกับใช้ (method อื่นอาจรันแทรกกลาง); ข้อยกเว้นที่พิสูจน์แล้วคือ private final field ที่ promote ได้ตั้งแต่ Dart 3.2',
+      'เป็น bug ของ compiler ที่ไม่มีทางแก้',
+      'มีแค่ getter เท่านั้นที่ promote ไม่ได้ field ธรรมดา promote ได้เสมอ',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วด้วย error จริง unchecked_use_of_nullable_value บน field String? แบบ public และผลลัพธ์ analyze ที่ศูนย์ปัญหาจริงตัวที่สอง เมื่อ field ถูกทำให้เป็น private + final (Greeter2) ตาม dart.dev/tools/non-promotion-reasons',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบน non-final local กับ final local ที่ non-nullable ที่ยังไม่ถูก assign ให้ diagnostic จริงที่ต่างกันอย่างไรเมื่ออ่านใน path ที่อาจยังไม่ assign?',
+    options: [
+      'ทั้งคู่ให้ข้อความ error เดียวกันเป๊ะ',
+      'not_assigned_potentially_non_nullable_local_variable สำหรับ non-final local, read_potentially_unassigned_final สำหรับ final local — diagnostic code จริงสองแบบต่างกัน',
+      'ไม่มีอันไหนเป็น compile error เลย ทั้งคู่เป็น runtime error',
+      'มีแค่แบบ final เท่านั้นที่ถูก flag',
+    ],
+    answer: 1,
+    explain: 'ทั้งคู่จับมาจาก flutter analyze จริงบน function ที่เกือบเหมือนกันสองตัว ต่างกันแค่ว่า `label` ประกาศเป็น final หรือไม่',
+  },
+  {
+    q: 'ทำไม `List<String?>` ถึงเป็น type ที่ต่างจาก `List<String>?` จริง ๆ พิสูจน์แล้วข้างบน?',
+    options: [
+      'เป็น alias ที่ใช้แทนกันได้',
+      'List<String?> คือ list ที่มีอยู่เสมอแต่อาจมี element เป็น null; List<String>? คือ list ที่อาจเป็น null ได้เอง แต่ถ้ามีอยู่ element จะไม่เป็น null เลย',
+      'List<String>? ใช้ได้แค่ใน null-safe Dart, List<String?> ใช้ได้แค่ใน legacy Dart',
+      'ต่างกันแค่ตอน parse JSON เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้วย countNulls(List<String?>) ที่หา null entry ข้างใน list ที่มีอยู่เสมอได้ถูกต้อง และ lengthOrZero(List<String>?) ที่จัดการกรณี list ทั้งก้อนเป็น null ได้ถูกต้อง',
   },
 ];
 
