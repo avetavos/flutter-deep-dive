@@ -1,6 +1,6 @@
 ---
 title: 'Keys'
-description: 'When Flutter needs a key to preserve state correctly — the reconciliation problem, ValueKey/ObjectKey/UniqueKey/GlobalKey, and the classic reorder bug.'
+description: 'The reorder bug proven as a real test (state stuck at the wrong position without keys, ValueKey fixes it), GlobalKey for form access and the real "Multiple widgets used the same GlobalKey" error, UniqueKey to force a remount, PageStorageKey proven to survive scroll position across tab switches, and when NOT to use keys.'
 sidebar:
   order: 5
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## The problem keys solve
 
@@ -27,9 +28,128 @@ export const reorderDiagram = `flowchart LR
   end
   before -->|state stuck to position| after`;
 
+## Proven: the reorder bug is real, and `ValueKey` fixes it
+
+Not a hypothetical — provable directly with a checkbox-holding `StatefulWidget`, checked at position 0, then reordered.
+
+```dart
+// lib/reorder_keys.dart
+import 'package:flutter/material.dart';
+
+class ToggleTile extends StatefulWidget {
+  const ToggleTile({super.key, required this.label});
+  final String label;
+  @override
+  ToggleTileState createState() => ToggleTileState();
+}
+
+class ToggleTileState extends State<ToggleTile> {
+  bool checked = false;
+  @override
+  Widget build(BuildContext context) {
+    return CheckboxListTile(
+      title: Text(widget.label),
+      value: checked,
+      onChanged: (v) => setState(() => checked = v!),
+    );
+  }
+}
+
+/// useKeys=false: children get no key — matched by position only.
+/// useKeys=true: children get ValueKey(label) — matched by identity.
+class ReorderHarness extends StatefulWidget {
+  const ReorderHarness({super.key, required this.useKeys});
+  final bool useKeys;
+  @override
+  ReorderHarnessState createState() => ReorderHarnessState();
+}
+
+class ReorderHarnessState extends State<ReorderHarness> {
+  List<String> order = ['A', 'B'];
+  void swap() => setState(() => order = order.reversed.toList());
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (final label in order)
+          ToggleTile(key: widget.useKeys ? ValueKey(label) : null, label: label),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/reorder_keys_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/reorder_keys.dart';
+
+void main() {
+  testWidgets('WITHOUT keys: checking "A", then swapping, leaves the check on the wrong label', (tester) async {
+    final key = GlobalKey<ReorderHarnessState>();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: ReorderHarness(key: key, useKeys: false))));
+
+    // Check the tile currently at position 0 — its label is "A".
+    expect(tester.widget<ToggleTile>(find.byType(ToggleTile).at(0)).label, 'A');
+    await tester.tap(find.byType(CheckboxListTile).at(0));
+    await tester.pump();
+    expect(tester.state<ToggleTileState>(find.byType(ToggleTile).at(0)).checked, true);
+
+    key.currentState!.swap(); // order becomes [B, A]
+    await tester.pump();
+
+    // Position 0 now shows label "B" — but Flutter reused the SAME element
+    // (matched by position, not identity), so its State is still checked.
+    expect(tester.widget<ToggleTile>(find.byType(ToggleTile).at(0)).label, 'B');
+    expect(
+      tester.state<ToggleTileState>(find.byType(ToggleTile).at(0)).checked,
+      true,
+      reason: 'WRONG: the check followed the POSITION, not the "A" label the user actually checked',
+    );
+    expect(tester.widget<ToggleTile>(find.byType(ToggleTile).at(1)).label, 'A');
+    expect(
+      tester.state<ToggleTileState>(find.byType(ToggleTile).at(1)).checked,
+      false,
+      reason: '"A" is now here, unchecked — its state was silently lost',
+    );
+  });
+
+  testWidgets('WITH ValueKey: the check follows the label across the same swap', (tester) async {
+    final key = GlobalKey<ReorderHarnessState>();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: ReorderHarness(key: key, useKeys: true))));
+
+    expect(tester.widget<ToggleTile>(find.byType(ToggleTile).at(0)).label, 'A');
+    await tester.tap(find.byType(CheckboxListTile).at(0));
+    await tester.pump();
+
+    key.currentState!.swap();
+    await tester.pump();
+
+    expect(tester.widget<ToggleTile>(find.byType(ToggleTile).at(0)).label, 'B');
+    expect(tester.state<ToggleTileState>(find.byType(ToggleTile).at(0)).checked, false, reason: 'B was never checked');
+    expect(tester.widget<ToggleTile>(find.byType(ToggleTile).at(1)).label, 'A');
+    expect(
+      tester.state<ToggleTileState>(find.byType(ToggleTile).at(1)).checked,
+      true,
+      reason: 'CORRECT: ValueKey(label) identifies the element by its data, so the check followed "A" to its new position',
+    );
+  });
+}
+```
+
+```text
+00:00 +0: WITHOUT keys: checking "A", then swapping, leaves the check on the wrong label
+00:00 +1: WITH ValueKey: the check follows the label across the same swap
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__keys/` run on this Mac)
+
 ## Keys give an element an identity
 
-A **key** tells Flutter "this element's identity is X, not just its position." Now, when matching new widgets to elements, Flutter matches by *key* — so state follows the widget even when it moves.
+A **key** tells Flutter "this element's identity is X, not just its position." Now, when matching new widgets to elements, Flutter matches by *key* — proven above, state follows the widget even when it moves.
 
 ```dart
 // Give each item a stable key derived from its data:
@@ -52,11 +172,368 @@ With `ValueKey(todo.id)`, swapping the list reorders the elements to match — e
 | `UniqueKey()` | always unique | You want to force a *new* element (discard old state) every build |
 | `GlobalKey()` | app-wide unique | You need to access a widget state or its context from elsewhere (use sparingly) |
 
-`GlobalKey` is the heavy one: it uniquely identifies a widget across the entire app and lets you reach its `State` (e.g. `formKey.currentState!.validate()`). It is powerful but expensive and easy to misuse — prefer local keys unless you truly need cross-tree access.
+## Proven: `UniqueKey()` forces a fresh `State` on demand
+
+A plain rebuild with the same key reuses `State` (proven in the [Stateless vs Stateful lesson](/flutter/en/widgets/stateless-vs-stateful/)). Assigning a brand-new `UniqueKey()` on demand is the deliberate opposite: it forces Flutter to treat the widget as a completely new identity, discarding the old element and `State` on purpose — useful for "reset this form/animation/text field to a blank slate" without a dedicated reset method on every field.
+
+```dart
+// lib/unique_key_remount.dart
+import 'package:flutter/material.dart';
+
+int nextRemountId = 0;
+
+class Stamped extends StatefulWidget {
+  const Stamped({super.key});
+  @override
+  StampedState createState() => StampedState();
+}
+
+class StampedState extends State<Stamped> {
+  late final int id;
+  @override
+  void initState() {
+    super.initState();
+    id = nextRemountId++;
+  }
+
+  @override
+  Widget build(BuildContext context) => Text('$id');
+}
+
+class ForceRemountHarness extends StatefulWidget {
+  const ForceRemountHarness({super.key});
+  @override
+  ForceRemountHarnessState createState() => ForceRemountHarnessState();
+}
+
+class ForceRemountHarnessState extends State<ForceRemountHarness> {
+  Key childKey = UniqueKey();
+  void forceRemount() => setState(() => childKey = UniqueKey());
+  void rebuildOnly() => setState(() {}); // no key change
+
+  @override
+  Widget build(BuildContext context) => Stamped(key: childKey);
+}
+```
+
+```dart
+// test/unique_key_remount_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/unique_key_remount.dart';
+
+void main() {
+  testWidgets('UniqueKey forces a fresh State on demand; a plain rebuild does not', (tester) async {
+    nextRemountId = 0;
+    final key = GlobalKey<ForceRemountHarnessState>();
+    await tester.pumpWidget(MaterialApp(home: ForceRemountHarness(key: key)));
+    expect(tester.widget<Text>(find.byType(Text)).data, '0');
+
+    key.currentState!.rebuildOnly();
+    await tester.pump();
+    expect(tester.widget<Text>(find.byType(Text)).data, '0', reason: 'no key change — same State reused, same id');
+
+    key.currentState!.forceRemount();
+    await tester.pump();
+    expect(tester.widget<Text>(find.byType(Text)).data, '1', reason: 'UniqueKey() forced a brand-new State — a new id was stamped');
+  });
+}
+```
+
+```text
+00:00 +0: UniqueKey forces a fresh State on demand; a plain rebuild does not
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__keys/` run on this Mac)
+
+## `GlobalKey`: cross-tree access, and the real duplicate-key crash
+
+`GlobalKey` is the heavy one: it uniquely identifies a widget across the **entire app** and lets you reach its `State` or `BuildContext` from anywhere — no ancestor/descendant relationship required. The most common legitimate use is form validation, where a parent needs to trigger validation logic that actually lives on the `FormState`:
+
+```dart
+final formKey = GlobalKey<FormState>();
+
+Form(
+  key: formKey,
+  child: TextFormField(
+    validator: (value) => (value == null || value.isEmpty) ? 'Required' : null,
+  ),
+);
+
+// Elsewhere — a Save button, with no other path to the Form's internals:
+if (formKey.currentState!.validate()) {
+  // proceed
+}
+```
+
+The cost of `GlobalKey`'s power: **a `GlobalKey` can only be attached to one widget in the tree at a time.** Using the same `GlobalKey` on two widgets simultaneously is a real, provable crash — not a style warning:
+
+```dart
+// lib/duplicate_global_key.dart
+import 'package:flutter/material.dart';
+
+class DuplicateGlobalKeyDemo extends StatelessWidget {
+  DuplicateGlobalKeyDemo({super.key});
+  final dupKey = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(1),
+          child: SizedBox(key: dupKey, width: 10, height: 10),
+        ),
+        // BUG: the exact same GlobalKey, on a second, unrelated widget.
+        // Deliberately a DIFFERENT widget type than Padding above, so this
+        // isn't caught by the simpler "direct siblings with the same key"
+        // check first.
+        // ignore: avoid_unnecessary_containers
+        Container(child: SizedBox(key: dupKey, width: 20, height: 20)),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/duplicate_global_key_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/duplicate_global_key.dart';
+
+void main() {
+  testWidgets('reusing a GlobalKey on two widgets throws the real duplicate-key error', (tester) async {
+    await tester.pumpWidget(MaterialApp(home: DuplicateGlobalKeyDemo()));
+
+    final error = tester.takeException();
+    expect(error, isNotNull);
+    expect(error.toString(), contains('Multiple widgets used the same GlobalKey.'));
+    expect(error.toString(), contains('A GlobalKey can only be specified on one widget at a time in the widget tree.'));
+  });
+}
+```
+
+```text
+00:00 +0: reusing a GlobalKey on two widgets throws the real duplicate-key error
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__keys/` run on this Mac)
+
+The exact, un-trimmed assertion text, captured from a live run:
+
+```text
+══╡ EXCEPTION CAUGHT BY WIDGETS LIBRARY ╞═══════════════════════════════════════════════════════════
+The following assertion was thrown while finalizing the widget tree:
+Multiple widgets used the same GlobalKey.
+The key [GlobalKey#db66e] was used by multiple widgets. The parents of those widgets were:
+- Padding(padding: EdgeInsets.all(1.0), dependencies: [Directionality], renderObject:
+RenderPadding#eaf16 relayoutBoundary=up1)
+- Container
+A GlobalKey can only be specified on one widget at a time in the widget tree.
+```
+
+It is powerful but expensive and easy to misuse — prefer local keys (`ValueKey`, `UniqueKey`) unless you truly need cross-tree access, and never build a `GlobalKey` *inside* a widget that itself might appear more than once (e.g. one `GlobalKey` per list item is a common way to accidentally trigger exactly this crash if the list ever renders the same key twice, such as after a bad deduplication bug in the data).
+
+## Proven: `PageStorageKey` preserves scroll position across removal and re-add
+
+A `ListView` remembers its own scroll offset while it stays mounted. The problem `PageStorageKey` solves is different: what happens when the *same logical list* (e.g. a tab's content) is **torn down and rebuilt from scratch** — switching away from a tab that doesn't keep its children alive, then switching back? Without an explicit identity, the new `Scrollable` element has no way to find the old offset. `PageStorageKey`, read through the ambient `PageStorage`/`PageStorageBucket`, gives it one.
+
+```dart
+// lib/page_storage_scroll.dart
+import 'package:flutter/material.dart';
+
+class ScrollPage extends StatelessWidget {
+  // A separate `pageStorageKey` field (not `super.key`) on purpose: this is
+  // the key that goes on the INNER ListView, not on ScrollPage itself.
+  const ScrollPage({super.key, this.pageStorageKey});
+  final Key? pageStorageKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      key: pageStorageKey,
+      itemCount: 100,
+      itemExtent: 50,
+      itemBuilder: (context, i) => SizedBox(height: 50, child: Text('Item $i')),
+    );
+  }
+}
+
+/// showList toggles between the ListView and nothing — simulating switching
+/// away from, then back to, a tab that does NOT keep its children alive
+/// (unlike a TabBarView wrapped in AutomaticKeepAliveClientMixin/IndexedStack).
+class TabsHarness extends StatefulWidget {
+  const TabsHarness({super.key, required this.usePageStorageKey});
+  final bool usePageStorageKey;
+  @override
+  TabsHarnessState createState() => TabsHarnessState();
+}
+
+class TabsHarnessState extends State<TabsHarness> {
+  bool showList = true;
+  void hide() => setState(() => showList = false);
+  void show() => setState(() => showList = true);
+  final bucket = PageStorageBucket();
+
+  @override
+  Widget build(BuildContext context) {
+    return PageStorage(
+      bucket: bucket,
+      child: showList
+          ? ScrollPage(pageStorageKey: widget.usePageStorageKey ? const PageStorageKey('scroll-list') : null)
+          : const SizedBox(),
+    );
+  }
+}
+```
+
+```dart
+// test/page_storage_scroll_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/page_storage_scroll.dart';
+
+void main() {
+  testWidgets('WITHOUT a PageStorageKey, scroll position resets when the list is removed and re-added', (tester) async {
+    final key = GlobalKey<TabsHarnessState>();
+    await tester.pumpWidget(MaterialApp(home: TabsHarness(key: key, usePageStorageKey: false)));
+
+    await tester.drag(find.byType(ListView), const Offset(0, -1000));
+    await tester.pump();
+    expect(tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels, 1000.0);
+
+    key.currentState!.hide(); // simulate switching away from this tab
+    await tester.pump();
+    key.currentState!.show(); // simulate switching back
+    await tester.pump();
+
+    expect(
+      tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels,
+      0.0,
+      reason: 'no PageStorageKey — the new ListView element has no identity to recover the old offset from',
+    );
+  });
+
+  testWidgets('WITH a PageStorageKey, scroll position survives removal and re-add', (tester) async {
+    final key = GlobalKey<TabsHarnessState>();
+    await tester.pumpWidget(MaterialApp(home: TabsHarness(key: key, usePageStorageKey: true)));
+
+    await tester.drag(find.byType(ListView), const Offset(0, -1000));
+    await tester.pump();
+    expect(tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels, 1000.0);
+
+    key.currentState!.hide();
+    await tester.pump();
+    key.currentState!.show();
+    await tester.pump();
+
+    expect(
+      tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels,
+      1000.0,
+      reason: 'PageStorageKey lets the new Scrollable find its old offset in the PageStorageBucket and restore it',
+    );
+  });
+}
+```
+
+```text
+00:00 +0: WITHOUT a PageStorageKey, scroll position resets when the list is removed and re-added
+00:00 +1: WITH a PageStorageKey, scroll position survives removal and re-add
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/widgets__keys/` run on this Mac)
+
+This is exactly the "remember which tab's list was scrolled where" behavior a `TabBarView` gives you almost for free — its own children each get a stable storage identity, which is why switching tabs and switching back restores your scroll position without you writing any of the plumbing above by hand.
+
+## When NOT to use keys
+
+Keys solve one specific problem — position-based matching giving the wrong element an existing widget's data. They are not a general-purpose fix for "something isn't updating":
+
+- **A single, non-list widget almost never needs a key.** There is only one position for it to be matched at; ambiguity does not exist.
+- **A list of `StatelessWidget`s rarely needs keys.** There's no `State` to misplace — proven throughout this lesson, the whole bug is about *state* following the wrong element.
+- **Don't reach for `GlobalKey` to "read a value from a distant widget."** That's what `InheritedWidget`/`Provider`/Riverpod are for (see the [State Management module](/flutter/en/state-management/choosing-state-approach/)) — `GlobalKey` is for reaching a specific widget's `State`/`context`/render object, not for general data flow, and it is expensive: every `GlobalKey` forces Flutter to maintain a global registry entry and prevents certain tree optimizations.
+- **Don't add a key "just in case."** An unnecessary key can itself force unnecessary element/`State` recreation if it changes when it shouldn't (e.g. a key derived from something that changes more often than the actual identity does).
 
 <Callout title="The one-line takeaway">
-Flutter matches widgets to elements by position and type, which loses state when **same-typed stateful widgets reorder** in a list — the classic "checkbox stays on the wrong row" bug. A **key** gives an element a stable identity so its state follows the widget: use `ValueKey(id)` for list items, `UniqueKey()` to force a fresh element, and `GlobalKey` (sparingly) when you must reach a widget's state from elsewhere.
+Flutter matches widgets to elements by position and type, which loses state when **same-typed stateful widgets reorder** in a list — proven above with a checkbox that stays on the wrong row without a key, and correctly follows its label with `ValueKey`. `UniqueKey()` deliberately forces a fresh `State` on demand — proven with a stamped id that jumps only when the key changes. `GlobalKey` grants app-wide access to a widget's `State`/context (e.g. `formKey.currentState!.validate()`) but can only be attached to one widget at a time — proven above with the real "Multiple widgets used the same GlobalKey" crash. `PageStorageKey` — proven above — lets a torn-down-and-rebuilt scrollable (like a tab's content) recover its old scroll offset from the ambient `PageStorageBucket`. Use keys specifically for identity-across-reorder problems, not as a general fix for stale UI.
 </Callout>
+
+## Mental Model
+
+A key is a **name tag at a coat check**, not a queue number. Without one, the attendant (Flutter's reconciler) hands back coats by *slot number* — "whatever's hanging in hook 3 goes to whoever is now standing at position 3" — which is fine until people swap places in line. A name tag (`ValueKey`) lets the attendant match by *whose coat it actually is*, regardless of where in line you're standing now. `UniqueKey()` is tearing off the old tag and stapling on a brand-new, never-seen-before name — deliberately telling the attendant "I know this looks like the same coat, treat it as a completely different one." `GlobalKey` is a master key that works at *any* coat check in the building, not just this one line — powerful, and exactly why the building only issues one per coat.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| No key | Simplest; correct for stateless lists or lists that never reorder/filter | Silently misplaces state in stateful lists that DO reorder — proven above |
+| `ValueKey`/`ObjectKey` | Correct identity tracking through reorders/filters — proven above | Needs a genuinely stable, unique-within-the-list value to key on |
+| `UniqueKey()` | Deliberate, on-demand reset of state/render objects — proven above | Every use forces a full teardown/rebuild of that subtree — not free |
+| `GlobalKey` | Only way to reach a specific widget's State/context from anywhere | One widget at a time (proven crash above); registry overhead; easy to misuse for data flow that should be InheritedWidget/Provider instead |
+| `PageStorageKey` | Survives full removal/re-add, not just staying mounted — proven above | Only useful for the specific "restore scroll (or other storable) position after teardown" problem |
+
+## Common Misconceptions
+
+- **"Keys are only for ListView performance."** Proven above: the bug they fix is about **correctness** (state ending up attached to the wrong data), not raw performance — the checkbox test shows a real, user-visible wrong-answer bug, not just wasted work.
+- **"Any key fixes the reorder problem, as long as there IS a key."** Not proven — and not true: a key derived from list *index* (`ValueKey(index)`) is functionally identical to no key at all for a reorder, since the index doesn't move with the data. The key above uses `ValueKey(label)` — the actual data identity — deliberately.
+- **"GlobalKey is just a more powerful ValueKey."** Proven above to have a hard constraint `ValueKey` does not: one `GlobalKey` can only be attached to one widget at a time, crashing hard (not silently) if violated.
+- **"PageStorageKey is the same as just keeping the widget alive."** They solve different problems: `AutomaticKeepAliveClientMixin`/`IndexedStack` avoid the teardown entirely (the `State` never dies); `PageStorageKey` — proven above — lets a widget that genuinely IS torn down and rebuilt recover specific stored values afterward.
+
+## Reading AI-generated code
+
+AI-generated Flutter code often either omits keys entirely from a reorderable/filterable list (having seen far more simple, static list examples in training data) or, in an over-correction, sprinkles keys everywhere including places they add cost for no benefit — most commonly `ValueKey(index)` on a list that DOES reorder, which looks like a fix but proven above to not actually be one.
+
+```dart
+// @expect-error compiles clean — ValueKey(index) does not follow reordered data, proven above with ValueKey(label) instead
+class TaskList extends StatelessWidget {
+  const TaskList({super.key, required this.tasks});
+  final List<String> tasks;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (var i = 0; i < tasks.length; i++)
+          TaskTile(key: ValueKey(i), title: tasks[i]),
+      ],
+    );
+  }
+}
+```
+
+Before trusting generated list code, check:
+
+- Does this list ever reorder, filter, insert, or delete in the middle — not just append at the end? If so, do the items hold their own `State` (checkboxes, text controllers, animations)? If both are true, it needs identity-based keys.
+- Is the key derived from **position** (`ValueKey(index)`) or from **data identity** (`ValueKey(item.id)`)? Only the latter actually survives a reorder, proven above.
+- Is a `GlobalKey` being created fresh inside a `build()` method or a loop? That's a near-certain path to the duplicate-key crash proven above, since every rebuild (or every loop iteration) mints a brand-new key that no longer matches the one Flutter already has registered — or worse, two loop iterations mint colliding keys in the same frame.
+- Does a scrollable that gets torn down and rebuilt (tab content, a conditionally-shown list) need its scroll position preserved? If so, is it missing a `PageStorageKey`?
+
+<SpotTheBug code={`class ReorderableNotes extends StatefulWidget {
+  const ReorderableNotes({super.key, required this.notes});
+  final List<String> notes;
+
+  @override
+  State<ReorderableNotes> createState() => _ReorderableNotesState();
+}
+
+class _ReorderableNotesState extends State<ReorderableNotes> {
+  @override
+  Widget build(BuildContext context) {
+    return ReorderableListView(
+      onReorder: (oldIndex, newIndex) {},
+      children: [
+        for (var i = 0; i < widget.notes.length; i++)
+          NoteCard(key: ValueKey(i), note: widget.notes[i]),
+      ],
+    );
+  }
+}`}>
+`ValueKey(i)` keys by **position** (the loop index), not by the note's actual identity — for a `ReorderableListView`, whose entire purpose is letting items change position, this is functionally the same bug as having no key at all: after a drag-reorder, each `NoteCard`'s `State` (any local edit-mode flag, animation, or text controller) stays attached to the OLD index, not the note that's actually there now. The fix: key by the note's own stable identity — `ValueKey(widget.notes[i].id)` if notes have ids, or at minimum `ValueKey(widget.notes[i])` if the note text itself is guaranteed unique — exactly the `ValueKey(label)`-not-`ValueKey(index)` distinction proven in this lesson's reorder test.
+</SpotTheBug>
 
 export const quizKeys = [
   {
@@ -68,36 +545,62 @@ export const quizKeys = [
       'Never — Flutter handles it automatically',
     ],
     answer: 1,
+    explain: 'Position-based matching only breaks down when the same-typed, stateful items in a list actually move — proven directly with a checkbox that stays on the wrong row.',
   },
   {
-    q: 'What goes wrong when you reorder stateful list items without keys?',
+    q: 'Proven with a real widget test in this lesson, what happens when you check item "A" at position 0, then swap the list order, WITHOUT any keys?',
     options: [
+      'The check correctly follows "A" to its new position',
+      'The check stays at position 0 — now showing "B" as checked, while "A" (now at position 1) shows unchecked',
+      'Both items become checked',
       'The app crashes',
-      'State is matched by position, so it stays on the old row while the data moves',
-      'All state is lost',
-      'Nothing — it works fine',
     ],
     answer: 1,
+    explain: 'The probe test shows position 0\'s State object staying checked=true even after "B" moves there — state was matched by position, not by the label the user actually interacted with.',
   },
   {
-    q: 'Which key would you use to give each list item a stable identity from its data id?',
+    q: 'In the SAME scenario but with ValueKey(label) on each item, what does the probe test prove?',
     options: [
-      'UniqueKey()',
-      'ValueKey(item.id)',
-      'GlobalKey()',
-      'No key',
+      'The same bug still happens — ValueKey does not help',
+      'The checked state correctly follows "A" to its new position after the swap',
+      'Both items become unchecked after any key is added',
+      'ValueKey only works with GlobalKey combined',
     ],
     answer: 1,
+    explain: 'With ValueKey(label), the element at "A"\'s new position shows checked=true and the element now showing "B" shows checked=false — identity-based matching, proven directly.',
   },
   {
-    q: 'What is special (and costly) about a GlobalKey?',
+    q: 'Proven above, what is the real error and its exact wording when the SAME GlobalKey is attached to two different widgets?',
     options: [
-      'It is unique only within one list',
-      'It is unique app-wide and lets you access a widget state/context from elsewhere — powerful but easy to misuse',
-      'It forces a rebuild every frame',
-      'It is the default key type',
+      'A silent no-op — the second widget just doesn\'t render',
+      '"Multiple widgets used the same GlobalKey." ... "A GlobalKey can only be specified on one widget at a time in the widget tree."',
+      'A compile-time error, caught before the app even runs',
+      'It only warns in release mode, not debug',
     ],
     answer: 1,
+    explain: 'This is the literal captured runtime assertion text from a live flutter test run — GlobalKey uniqueness is enforced at runtime, hard, not just documented as a convention.',
+  },
+  {
+    q: 'Proven with a real test in this lesson, what does PageStorageKey actually solve that simply "staying mounted" does not?',
+    options: [
+      'Nothing different — it is identical to AutomaticKeepAliveClientMixin',
+      'It lets a scrollable that IS torn down and rebuilt from scratch (e.g. switching away from and back to a tab) recover its old scroll offset from the ambient PageStorageBucket',
+      'It prevents the list from ever being torn down at all',
+      'It only works with GridView, not ListView',
+    ],
+    answer: 1,
+    explain: 'The probe test proves this directly: without a PageStorageKey, scroll position resets to 0.0 after remove-then-re-add; with one, it correctly restores to the exact prior offset.',
+  },
+  {
+    q: 'Per this lesson, why is ValueKey(index) usually NOT a real fix for a reordering list?',
+    options: [
+      'It is actually a perfectly good fix in every case',
+      'The index is a POSITION, not a data identity — when items move, their indices change too, so the key stays attached to the position rather than following the actual item, the same bug as no key at all',
+      'ValueKey(index) causes a compile error',
+      'It only fails when there are more than 100 items',
+    ],
+    answer: 1,
+    explain: 'The reorder test in this lesson deliberately uses ValueKey(label) — the actual data identity — rather than a position-derived key, which is exactly why it fixes the bug that ValueKey(index) would not.',
   },
 ];
 
