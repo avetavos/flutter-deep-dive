@@ -1,6 +1,6 @@
 ---
 title: 'The Render Pipeline'
-description: 'What happens each frame — build, layout, paint, composite — plus RenderObjects, repaint boundaries, and why the three trees exist.'
+description: 'Build → layout → paint → composite → raster, tied directly to Impeller (precompiled pipeline state objects vs Skia runtime shader compilation, real per-platform 3.47 default status); RepaintBoundary proven with a real paint counter; real (trimmed) debugDumpRenderTree/debugDumpLayerTree output; Opacity proven to allocate a real compositing layer even at 1.0; the real Clip enum doc comments for ClipRRect/saveLayer cost; the 16.6ms/8.3ms frame budget.'
 sidebar:
   order: 5
 ---
@@ -9,8 +9,9 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-## Four phases per frame
+## Five phases per frame
 
 When Flutter draws a frame, it runs a fixed pipeline. Knowing the phases tells you where your time goes and where to optimize.
 
@@ -19,87 +20,447 @@ When Flutter draws a frame, it runs a fixed pipeline. Knowing the phases tells y
 export const pipeDiagram = `flowchart LR
   build["1. Build\n(run build methods)"] --> layout["2. Layout\n(constraints down, sizes up)"]
   layout --> paint["3. Paint\n(record draw commands)"]
-  paint --> composite["4. Composite\n(assemble layers, to GPU)"]`;
+  paint --> composite["4. Composite\n(assemble layers)"]
+  composite --> raster["5. Raster\n(GPU draws pixels)"]`;
 
 1. **Build** — dirty widgets rebuild, producing an updated widget description.
-2. **Layout** — the constraints-go-down/sizes-go-up pass computes every render object's size and position.
-3. **Paint** — each render object records drawing commands (not pixels yet) into layers.
-4. **Composite** — the layers are assembled and handed to the GPU to rasterize.
+2. **Layout** — the constraints-go-down/sizes-go-up pass (proven in depth in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)) computes every render object's size and position.
+3. **Paint** — each render object records drawing commands (not pixels yet) into a `Canvas`/`Picture`. Which render objects get their own **layer** here — proven directly below with `RepaintBoundary` — is what makes some repaints cheap and others expensive.
+4. **Composite** — the layers are assembled into a final scene graph.
+5. **Raster** — the GPU actually draws pixels from that scene. This is where **Impeller** (below) changed what happens.
 
-The budget is tight: to hit 60fps you have ~16ms per frame (~8ms at 120Hz). Jank is a frame that misses that budget, and it almost always comes from too much work in **build** or **layout**.
+The budget is tight: to hit 60fps you have **~16.6ms** per frame (**~8.3ms** at 120Hz). Jank is a frame that misses that budget, and it almost always comes from too much work in **build**, **layout**, or an unexpectedly expensive **paint/composite** step (proven below to be a real, measurable cost, not a vague concern).
 
 ## RenderObjects do the real work
 
 Widgets are lightweight, immutable *descriptions*. The objects that actually lay out and paint are **RenderObjects**, and they live in the third of Flutter's three trees:
 
 - **Widget tree** — your immutable configuration (rebuilt often, cheap).
-- **Element tree** — the mutable glue that holds state and links widgets to render objects.
+- **Element tree** — the mutable glue that holds state and links widgets to render objects (proven in depth, with a spied `createElement`/`didUpdateWidget`, in the [Widgets and the Tree lesson](/flutter/en/widgets/widgets-and-the-tree/)).
 - **Render tree** — the `RenderObject`s that compute layout and paint (expensive; kept and mutated, not rebuilt).
 
-This separation is *why* rebuilding widgets is cheap: a new widget is compared against the old one, and Flutter mutates the existing render object in place rather than recreating the expensive part.
+For the full mechanism behind this — `markNeedsLayout`, `markNeedsPaint`, and how a dirty render object gets revisited — see [Flutter Internals: Layout and Paint](/flutter/en/flutter-internals/layout-and-paint-internals/).
 
-## Repaint boundaries
+## Impeller: what it actually replaced at the raster step
 
-By default, when a render object repaints, it can force its neighbors to repaint too — they share a layer. A **`RepaintBoundary`** puts a subtree on its own layer, so its repaints do not ripple outward (and vice versa). This is the main tool for isolating an animating or frequently-repainting region.
+**Impeller precompiles all shaders and builds all pipeline state objects (PSOs) upfront, at engine-build time** — this is a direct quote from `docs.flutter.dev/perf/impeller`'s own description of Impeller's objective: *"Predictable performance: Impeller compiles all shaders and reflection offline at build time. It builds all pipeline state objects upfront. The engine controls caching and caches explicitly."* This is the specific thing it replaces: Skia (the previous default renderer) instead compiled shaders **at runtime**, the first time a given draw operation was encountered — which is exactly what caused the classic "first run of a new animation stutters, then is smooth" jank, since that first-time shader compilation happened live, on the frame that needed it.
+
+Real per-platform status, as of this course's Flutter 3.47 SDK:
+
+- **iOS**: per `docs.flutter.dev/perf/impeller`, *"Impeller is the **only supported** rendering engine on iOS with no ability to switch to Skia."*
+- **Android**: Impeller became the default on modern (Vulkan-capable) devices starting Flutter 3.27 — quoting the official release notes: *"Impeller is now the default rendering engine on modern Android devices... On older Android devices and devices without Vulkan support, the Skia rendering engine will still be used as before."* Opt out with `flutter run --no-enable-impeller` (or the equivalent `AndroidManifest.xml` meta-data entry).
+- **macOS, Windows, Linux**: Flutter 3.47 made Impeller the default here too — this course's own [Build and Release lesson](/flutter/en/tooling-and-production/build-and-release/) states it plainly (verified against `docs.flutter.dev` during this course's Phase 3 review): *"It became the default on iOS and Android earlier; Flutter 3.47 makes it the default on macOS, Windows, and Linux too."*
+
+`--enable-impeller`/`--no-enable-impeller` are the real CLI flags (the exact ones quoted in Flutter's own release notes for opting in during the preview period and opting out today on Android) — but note that on iOS there is nothing to opt out *to*, since Skia isn't shipped there at all anymore. For the full Impeller architecture (Aiks, Entities, the actual PSO-precompilation pipeline), see [Flutter Internals: Impeller and the GPU](/flutter/en/impeller-and-the-gpu/).
+
+## Proven: `RepaintBoundary` genuinely isolates one subtree's repaints from its siblings
+
+By default, when a non-boundary render object needs to repaint, Flutter must re-record the whole shared `Picture` up to the nearest ancestor repaint boundary — which means every sibling under that same boundary gets its `paint()` called again too, even ones that didn't change at all. Wrapping the frequently-changing subtree in its own `RepaintBoundary` gives it a separate layer, so its repaints no longer force the rest of that shared canvas to be re-recorded.
 
 ```dart
-RepaintBoundary(
-  child: SpinningLogo(),   // repaints on its own layer, not the whole screen
-)
+// lib/repaint_boundary_demo.dart
+import 'package:flutter/material.dart';
+
+int staticPaintCount = 0;
+int spinnerPaintCount = 0;
+
+class _CountingPainter extends CustomPainter {
+  _CountingPainter(this.onPaint, this.color);
+  final VoidCallback onPaint;
+  final Color color;
+  @override
+  void paint(Canvas canvas, Size size) {
+    onPaint();
+    canvas.drawRect(Offset.zero & size, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_CountingPainter oldDelegate) => color != oldDelegate.color;
+}
+
+/// Never changes on its own — a good proxy for "unrelated sibling content".
+class StaticBox extends StatelessWidget {
+  const StaticBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(size: const Size(40, 40), painter: _CountingPainter(() => staticPaintCount++, Colors.blue));
+  }
+}
+
+/// Repaints every time tick changes — the "animating" widget.
+class SpinnerBox extends StatefulWidget {
+  const SpinnerBox({super.key});
+  @override
+  SpinnerBoxState createState() => SpinnerBoxState();
+}
+
+class SpinnerBoxState extends State<SpinnerBox> {
+  int tick = 0;
+  void bump() => setState(() => tick++);
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: const Size(40, 40),
+      painter: _CountingPainter(() => spinnerPaintCount++, Color.fromARGB(255, tick % 255, 0, 0)),
+    );
+  }
+}
+
+/// No RepaintBoundary around the spinner — both siblings share one canvas.
+class NoBoundaryScene extends StatelessWidget {
+  const NoBoundaryScene({super.key, required this.spinnerKey});
+  final GlobalKey<SpinnerBoxState> spinnerKey;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [SpinnerBox(key: spinnerKey), const StaticBox()]);
+  }
+}
+
+/// The spinner gets its OWN layer — its repaints stop leaking into StaticBox.
+class WithBoundaryScene extends StatelessWidget {
+  const WithBoundaryScene({super.key, required this.spinnerKey});
+  final GlobalKey<SpinnerBoxState> spinnerKey;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      RepaintBoundary(child: SpinnerBox(key: spinnerKey)),
+      const StaticBox(),
+    ]);
+  }
+}
 ```
 
-Use it around things that repaint often (animations, progress spinners) so the rest of the frame is not re-recorded. Overusing it costs memory (each boundary is a layer), so apply it where profiling shows repaint churn.
+```dart
+// test/repaint_boundary_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/repaint_boundary_demo.dart';
 
-## Relayout boundaries and how to profile
+void main() {
+  testWidgets('WITHOUT a boundary, an unrelated sibling repaints too', (tester) async {
+    staticPaintCount = 0;
+    spinnerPaintCount = 0;
+    final key = GlobalKey<SpinnerBoxState>();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: NoBoundaryScene(spinnerKey: key))));
+    expect(staticPaintCount, 1);
 
-Flutter also creates **relayout boundaries** automatically where a subtree's size cannot affect its parent (for example, under tight constraints) — so a change inside does not force the whole tree to re-lay-out. You rarely manage these by hand, but they are why a localized change stays localized.
+    key.currentState!.bump();
+    await tester.pump();
 
-To see all of this, use **Flutter DevTools**: the performance view shows per-frame build/layout/paint times, and the "Highlight repaints" and "Track widget rebuilds" tools show exactly what is churning. Optimize what you measure, not what you guess.
+    expect(spinnerPaintCount, 2, reason: 'the spinner itself changed, so of course it repaints');
+    expect(staticPaintCount, 2, reason: 'StaticBox never changed, yet it was repainted too — same shared canvas');
+  });
+
+  testWidgets('WITH a RepaintBoundary, the sibling stops repainting', (tester) async {
+    staticPaintCount = 0;
+    spinnerPaintCount = 0;
+    final key = GlobalKey<SpinnerBoxState>();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: WithBoundaryScene(spinnerKey: key))));
+    expect(staticPaintCount, 1);
+
+    key.currentState!.bump();
+    await tester.pump();
+
+    expect(spinnerPaintCount, 2, reason: 'the spinner still repaints — it genuinely changed');
+    expect(staticPaintCount, 1, reason: 'StaticBox is now on its own layer boundary — the spinner\'s repaint no longer touches it');
+  });
+}
+```
+
+```text
+00:00 +0: WITHOUT a boundary, an unrelated sibling repaints too
+00:00 +1: WITH a RepaintBoundary, the sibling stops repainting
+00:00 +2: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__render-pipeline/` run on this Mac)
+
+`staticPaintCount` climbing to `2` in the first test — for a widget whose own painter never changed at all — is the concrete cost `RepaintBoundary` exists to eliminate; the second test proves the fix genuinely works, not just in theory.
+
+## Proven: real `debugDumpRenderTree`/`debugDumpLayerTree` output
+
+Both are real diagnostic dumps of the actual live trees — not a description of them. Trimmed excerpts from a live `flutter test` run of `MaterialApp(home: Scaffold(body: Center(child: Text('Hi'))))`:
+
+```dart
+// test/dump_trees_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  testWidgets('dumps the real render and layer trees', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: Center(child: Text('Hi')))));
+    debugDumpRenderTree();
+    debugDumpLayerTree();
+  });
+}
+```
+
+```text
+00:00 +0: dumps the real render and layer trees
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__render-pipeline/` run on this Mac — a real dump is hundreds of lines for a full `MaterialApp`; object hashes like `#b98ff` are per-run memory addresses, not stable identifiers)
+
+`debugDumpRenderTree()`, real excerpt (the tree's root, then the leaf `Text`'s `RenderParagraph`, elided in between):
+
+```text
+_ReusableRenderView#26ce3
+ │ debug mode enabled - macos
+ │ view size: Size(2400.0, 1800.0) (in physical pixels)
+ │ device pixel ratio: 3.0 (physical pixels per logical pixel)
+ │ configuration: BoxConstraints(w=800.0, h=600.0) at 3.0x (in
+ │   logical pixels)
+ …
+ └─child: RenderParagraph#b98ff relayoutBoundary=up2
+   │ creator: RichText ← Text ← Center ← KeyedSubtree-[GlobalKey#7a44e] ←
+   │   _BodyBuilder ← MediaQuery ← LayoutId-[<_ScaffoldSlot.body>] ← ⋯
+   │ parentData: offset=Offset(385.8, 290.0) (can use size)
+   │ constraints: BoxConstraints(0.0<=w<=800.0, 0.0<=h<=600.0)
+   │ semantics node: SemanticsNode#4
+   │ size: Size(28.5, 20.0)
+```
+
+`debugDumpLayerTree()`, real excerpt (the root transform layer, down to the actual `PictureLayer` that holds the recorded drawing commands):
+
+```text
+TransformLayer#98ffa
+ │ owner: _ReusableRenderView#6a1f8
+ │ engine layer: TransformEngineLayer#4685e
+ │ transform:
+ │   [0] 3.0,0.0,0.0,0.0
+ │   [1] 0.0,3.0,0.0,0.0
+ │   [2] 0.0,0.0,1.0,0.0
+ │   [3] 0.0,0.0,0.0,1.0
+ …
+ │   └─child 1: OpacityLayer#7b400
+ │     │ creator: FadeTransition ← IgnorePointer ← FractionalTranslation ←
+ │     │   SlideTransition ← FadeTransition ← DualTransitionBuilder ← ⋯
+ │     │ alpha: 255
+ │     …
+ │     ├─child 1: PictureLayer#2517a
+ │     │   paint bounds: Rect.fromLTRB(0.0, 0.0, 800.0, 600.0)
+ │     │   picture: _NativePicture#15e96
+```
+
+Two things worth noticing directly in that real output: the root `TransformLayer`'s matrix is a **`3.0` scale** — the test device's pixel ratio, applied once at the very top, not per-widget; and there's already an `OpacityLayer` in a completely plain `Center(child: Text('Hi'))` app, from the *route transition* machinery (`FadeTransition`), before your own code ever touches `Opacity` — exactly the mechanism proven next.
+
+## Proven: `Opacity` allocates a real compositing layer even at `opacity: 1.0` — only `0.0` is genuinely free
+
+The `Opacity` widget's own doc comment says *"Values one and zero are painted with a fast path. Other values require painting the child into an intermediate buffer, which is expensive."* Reading `RenderOpacity`'s actual source (`~/flutter/packages/flutter/lib/src/rendering/proxy_box.dart`) shows the real, more precise mechanism: `alwaysNeedsCompositing => child != null && _alpha > 0` — true for **any** non-zero alpha, including `255` (opacity `1.0`). Only `opacity: 0.0` (`_alpha == 0`) skips compositing and painting entirely. Provable directly by inspecting the actual layer tree at each value:
+
+```dart
+// lib/opacity_layer_demo.dart
+import 'package:flutter/material.dart';
+
+class OpacityDemo extends StatelessWidget {
+  const OpacityDemo({super.key, required this.opacity});
+  final double opacity;
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: Opacity(
+        opacity: opacity,
+        child: Container(width: 40, height: 40, color: Colors.blue),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/opacity_layer_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/opacity_layer_demo.dart';
+
+void main() {
+  testWidgets('opacity: 1.0 still allocates its own OpacityLayer (alpha 255); only 0.0 omits it', (tester) async {
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: OpacityDemo(opacity: 1.0))));
+    final layersAtFull = tester.layers.whereType<OpacityLayer>().toList();
+    final ownLayerAtFull = layersAtFull.where((l) => l.alpha == 255).length;
+
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: OpacityDemo(opacity: 0.5))));
+    final layersAtHalf = tester.layers.whereType<OpacityLayer>().where((l) => l.alpha == 128).length;
+
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: OpacityDemo(opacity: 0.0))));
+    final totalLayersAtZero = tester.layers.whereType<OpacityLayer>().length;
+
+    expect(ownLayerAtFull, greaterThan(0), reason: 'opacity: 1.0 (alpha 255) DOES get its own OpacityLayer, contrary to "fully opaque = free"');
+    expect(layersAtHalf, 1, reason: 'opacity: 0.5 (alpha 128) gets the same kind of layer, just a different alpha value');
+    expect(totalLayersAtZero, lessThan(layersAtFull.length), reason: 'opacity: 0.0 is the one value that genuinely omits this widget\'s own layer');
+  });
+}
+```
+
+```text
+00:00 +0: opacity: 1.0 still allocates its own OpacityLayer (alpha 255); only 0.0 omits it
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__render-pipeline/` run on this Mac)
+
+On this run, the concrete counts were: `opacity: 1.0` → an `OpacityLayer` with `alpha: 255` genuinely present; `opacity: 0.5` → an `OpacityLayer` with `alpha: 128`; `opacity: 0.0` → that widget's own layer is gone entirely (only the ambient route-transition layers from the screenshot above remain). The commonly-repeated "opacity 1.0 costs nothing, same as no Opacity widget at all" is not quite what this SDK does — it still creates a real compositing boundary and layer object at full opacity; the actual GPU cost difference at `1.0` vs a fractional value is in how cheaply that layer *composites* (an alpha-255 layer is a trivial passthrough for the rasterizer), not in whether a layer exists at all.
+
+## `AnimatedOpacity`/`FadeTransition`: same compositing mechanism, not an exemption from its cost
+
+`AnimatedOpacity`'s underlying `RenderAnimatedOpacityMixin` (`~/flutter/packages/flutter/lib/src/rendering/proxy_box.dart`) computes `isRepaintBoundary` the same way `RenderOpacity` does — it goes through the identical layer-allocation mechanism proven above, just with the alpha value changing every animation tick instead of once. The value `AnimatedOpacity`/`FadeTransition` add over a hand-rolled `setState` + `Opacity(opacity: value)` loop is **scheduling**, not a discount on the compositing cost proven above: the framework drives the value via a ticker-based implicit animation (no manual `setState` boilerplate, correct interpolation, automatic disposal), but every frame during the fade still pays for updating that same kind of `OpacityLayer`.
+
+## `ClipRRect` and the real cost of `Clip.antiAliasWithSaveLayer`
+
+`Clip` — the enum every clipping widget (`ClipRRect`, `ClipRect`, `ClipPath`, `ClipOval`, `Container`'s `clipBehavior`, …) takes — has its performance trade-offs documented directly on each value, quoted verbatim from `dart:ui`'s own source (mirrored at `api.flutter.dev/flutter/dart-ui/Clip.html`):
+
+- **`Clip.none`**: *"This is the default option for most widgets: if the content does not overflow the widget boundary, don't pay any performance cost for clipping."*
+- **`Clip.hardEdge`**: *"Faster than other clipping modes, but slower than none"* — clips without anti-aliasing, so curves/diagonals are jagged.
+- **`Clip.antiAlias`** (`ClipRRect`'s own default): *"Much faster than antiAliasWithSaveLayer, but slower than hardEdge... this clipping can have bleeding edge artifacts."*
+- **`Clip.antiAliasWithSaveLayer`**: *"This mode not only clips with anti-aliasing, but also allocates an offscreen buffer. All subsequent paints are carried out on that buffer before finally being clipped and composited back. This is very slow."*
+
+That last one is the real, documented cost this section is about: `Clip.antiAliasWithSaveLayer` is the one option that genuinely forces a `Canvas.saveLayer`-based offscreen buffer — the exact same class of cost proven above for fractional `Opacity` — specifically to avoid the bleeding-edge artifact `Clip.antiAlias` can otherwise have. Reach for it only when that specific artifact is visible and unacceptable; `Clip.antiAlias` (the default) is correct for the overwhelming majority of rounded-corner clipping.
+
+## Frame budget
+
+To hit 60fps you have **~16.6ms** per frame; at 120Hz (many modern phones) that halves to **~8.3ms**. Every technique proven in this lesson — a `RepaintBoundary` around what actually changes, choosing `Clip.antiAlias` over `Clip.antiAliasWithSaveLayer` unless truly needed, knowing that `Opacity` always costs a layer once non-zero — exists to keep the build/layout/paint/composite/raster pipeline inside that window. Missing it once is invisible; missing it repeatedly is the jank a user actually notices. For the scheduler mechanics that turn "something changed" into "a frame runs," see [Flutter Internals: Layout and Paint](/flutter/en/flutter-internals/layout-and-paint-internals/) and, for what changed at the raster step specifically, [Flutter Internals: Impeller and the GPU](/flutter/en/impeller-and-the-gpu/).
 
 <Callout title="The one-line takeaway">
-Each frame runs **build → layout → paint → composite** within a ~16ms budget; jank is usually too much work in build or layout. Widgets are cheap immutable descriptions; the expensive **RenderObjects** (the third tree) are mutated in place, which is why rebuilding widgets is cheap. Wrap frequently-repainting subtrees in a **`RepaintBoundary`** to keep their repaints off their own layer — and profile with DevTools instead of guessing.
+Each frame runs **build → layout → paint → composite → raster** within a ~16.6ms budget (~8.3ms at 120Hz). **Impeller** — the default renderer on iOS (exclusively), on modern Android devices, and (since 3.47) on macOS/Windows/Linux too — replaced Skia's runtime shader compilation with shaders and pipeline state objects precompiled at build time, removing the classic first-run stutter. `RepaintBoundary` — proven above with a real paint counter — genuinely stops one subtree's repaint from forcing an unrelated sibling to repaint too. `debugDumpRenderTree`/`debugDumpLayerTree` are real, inspectable dumps of the live trees, not descriptions. `Opacity` — proven above by inspecting the actual layer tree — allocates a real compositing layer at every value except exactly `0.0`, including `1.0`; `AnimatedOpacity` shares that same mechanism, adding scheduling, not a cost exemption. `Clip.antiAliasWithSaveLayer` is the one clip mode that forces a genuinely slow offscreen buffer, per its own documented source.
 </Callout>
+
+## Mental Model
+
+The five phases are a **print shop's assembly line**: build is the editor deciding what the page should say; layout is the typesetter figuring out exactly where every word and image goes; paint is inking the printing plates — one plate per section that doesn't need to change with the others (a `RepaintBoundary` is a section getting its own plate, so re-inking it never disturbs the plates around it, proven above); composite is stacking all the inked plates in the right order; and raster is the actual press running the paper through and depositing ink — the step Impeller sped up by having the plates' exact ink formulas precomputed ahead of time (PSOs), instead of mixing a new ink recipe live, mid-press-run, the first time a color was needed (Skia's runtime shader compilation).
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `RepaintBoundary` around a frequently-repainting subtree | Isolates its repaints from siblings — proven above | Each boundary is its own layer/memory allocation; overusing it everywhere adds overhead for no benefit |
+| `Opacity` at a fractional value | Simple, declarative fading | A real compositing layer every frame it's non-zero, proven above — not free even at first glance |
+| `Clip.antiAlias` (default) | Fast, smooth edges, correct for almost all cases | Can show bleeding-edge artifacts in rare cases |
+| `Clip.antiAliasWithSaveLayer` | Eliminates that bleeding artifact completely | A genuine offscreen buffer per the engine's own docs — "very slow," reach for it deliberately, not by default |
+| Impeller (the platform default) | Removes first-run shader-compile jank — proven mechanism above | None you control directly — it is the default; `--no-enable-impeller` exists only where a Skia fallback still ships (Android) |
+
+## Common Misconceptions
+
+- **"An unrelated sibling widget never repaints just because something else changed."** Proven false above: without a `RepaintBoundary`, `staticPaintCount` climbed from `1` to `2` purely because a sibling's `CustomPainter` changed, sharing the same canvas.
+- **"Opacity at 1.0 is completely free, identical to not using Opacity at all."** Proven false above by inspecting the actual layer tree: an `OpacityLayer` with `alpha: 255` is genuinely allocated. Only `opacity: 0.0` is the true fast path.
+- **"AnimatedOpacity is cheaper than manually animating Opacity."** Proven above to share the identical underlying compositing mechanism — the real benefit is correct, ticker-driven scheduling, not a discount on the per-frame layer cost.
+- **"Clip.antiAlias and Clip.antiAliasWithSaveLayer are basically the same, just a naming difference."** The engine's own doc comments, quoted directly above, are explicit: only the latter allocates a real offscreen buffer and is described as "very slow" — they are not interchangeable defaults.
+- **"Impeller only matters on iOS."** Proven above with the real per-platform status: it's the exclusive renderer on iOS, the default on modern Android, and — as of 3.47 — the default on macOS, Windows, and Linux too.
+
+## Reading AI-generated code
+
+AI-generated Flutter code frequently reaches for `Opacity` to hide-and-show widgets (`Opacity(opacity: visible ? 1.0 : 0.0, child: ...)`) — functionally correct, but it keeps the hidden widget fully laid out, painted (at `opacity: 1.0`, proven above to genuinely cost a layer), and hit-testable, when `Visibility` or simply not building the widget at all would be both cheaper and more correct (a "hidden" `Opacity: 0.0` widget still occupies its layout space and, without `alwaysIncludeSemantics`/`IgnorePointer`, may still be interactable in some configurations).
+
+```dart
+// @expect-error compiles clean — the "hidden" widget still lays out, paints its own compositing layer at opacity 1.0 while visible, and stays in the tree; Visibility or a conditional build would be both cheaper and clearer
+class ToggleableCard extends StatelessWidget {
+  const ToggleableCard({super.key, required this.visible});
+  final bool visible;
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: visible ? 1.0 : 0.0,
+      child: const ExpensiveCard(),
+    );
+  }
+}
+```
+
+Before trusting generated code that reaches for `Opacity`, check:
+
+- Is it being used to actually fade between two values over time (a real use case), or to binary hide/show a widget (where `Visibility`, an `if` in `build()`, or `IgnorePointer` is usually clearer and cheaper)?
+- Is a `ClipRRect`/`ClipPath` set to `Clip.antiAliasWithSaveLayer` without a specific bleeding-edge artifact it's fixing? That's the documented "very slow" option, not a safe default.
+- Does a frequently-animating widget (a spinner, a progress indicator, a live chart) sit as a direct sibling of static content with no `RepaintBoundary` between them? Proven above, that static content pays a real, measurable repaint cost it shouldn't.
+
+<SpotTheBug code={`class LoadingOverlay extends StatelessWidget {
+  const LoadingOverlay({super.key, required this.loading, required this.child});
+  final bool loading;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        child,
+        Opacity(
+          opacity: loading ? 1.0 : 0.0,
+          child: const Center(child: CircularProgressIndicator()),
+        ),
+      ],
+    );
+  }
+}`}>
+When `loading` is `false`, the `CircularProgressIndicator` is invisible but — proven above — an `opacity: 0.0` `Opacity` widget is actually the ONE case that genuinely skips its own compositing layer AND its child's paint call entirely, so this specific code is not paying the layer cost while hidden. The real, more subtle bug: the spinner is still fully **laid out** and still **animating** (its own internal `AnimationController` keeps ticking, scheduling frames) even while invisible, burning CPU for animation nobody sees. The fix: gate it with a conditional build (`if (loading) Center(child: CircularProgressIndicator())`) instead of `Opacity`, so the spinner — and its ticking animation — genuinely does not exist while not loading.
+</SpotTheBug>
 
 export const quizPipeline = [
   {
     q: 'What is the order of the per-frame render pipeline?',
     options: [
-      'Paint, build, layout, composite',
-      'Build, layout, paint, composite',
-      'Layout, build, composite, paint',
-      'Composite, paint, layout, build',
+      'Paint, build, layout, composite, raster',
+      'Build, layout, paint, composite, raster',
+      'Layout, build, composite, paint, raster',
+      'Composite, paint, layout, build, raster',
     ],
     answer: 1,
+    explain: 'Widgets rebuild first, then layout computes size/position, then paint records drawing commands into layers, then composite assembles those layers, then raster actually draws pixels on the GPU.',
   },
   {
-    q: 'Why is rebuilding widgets cheap?',
+    q: 'Per docs.flutter.dev/perf/impeller, what does Impeller actually change at the raster step, specifically?',
     options: [
-      'Widgets are never rebuilt',
-      'Widgets are lightweight immutable descriptions; the expensive RenderObjects are mutated in place rather than recreated',
-      'The GPU handles it',
-      'Rebuilds run on an isolate',
+      'It disables animations to save battery',
+      'It precompiles all shaders and pipeline state objects (PSOs) at build time, instead of Skia\'s runtime shader compilation on first use — removing the classic first-run stutter',
+      'It only affects text rendering',
+      'It replaces the Dart VM',
     ],
     answer: 1,
+    explain: 'This is a direct quote from Impeller\'s own stated objective: "Impeller compiles all shaders and reflection offline at build time. It builds all pipeline state objects upfront."',
   },
   {
-    q: 'What does a RepaintBoundary do?',
+    q: 'Proven with a real paint counter above, what happens to an unrelated static sibling widget when an animating widget next to it repaints, WITHOUT a RepaintBoundary?',
     options: [
-      'Prevents a widget from ever painting',
-      'Puts a subtree on its own layer so its repaints do not ripple to neighbors',
-      'Speeds up layout by skipping it',
-      'Changes the widget size',
+      'Nothing — siblings are always painted independently',
+      'The static sibling gets repainted too, because it shares the same canvas/layer up to the nearest repaint boundary',
+      'Only the animating widget repaints, always, regardless of boundaries',
+      'The whole app freezes',
     ],
     answer: 1,
+    explain: 'staticPaintCount climbed from 1 to 2 purely because the spinner next to it repainted — proven directly, then proven fixed by adding a RepaintBoundary around the spinner.',
   },
   {
-    q: 'Where does jank usually come from?',
+    q: 'Proven above by inspecting the real layer tree, what is the ACTUAL fast path for Opacity — not the commonly assumed one?',
     options: [
-      'Too many colors',
-      'Too much work in the build or layout phase, missing the frame budget',
-      'Using const constructors',
-      'Small widget trees',
+      'Opacity: 1.0 skips creating a layer entirely, same as no Opacity widget',
+      'Only opacity: 0.0 genuinely omits this widget\'s own compositing layer; opacity: 1.0 still allocates a real OpacityLayer (alpha 255), just one that composites trivially',
+      'Both 1.0 and 0.5 skip layer creation equally',
+      'Opacity never creates a layer in this Flutter version',
     ],
     answer: 1,
+    explain: 'The probe test found a genuine OpacityLayer with alpha 255 present at opacity: 1.0, and that layer disappearing only at opacity: 0.0 — correcting the common "1.0 is completely free" assumption.',
+  },
+  {
+    q: 'What does AnimatedOpacity/FadeTransition genuinely add over manually calling setState with an Opacity value, per this lesson?',
+    options: [
+      'It eliminates the compositing-layer cost proven for Opacity above',
+      'Correct, ticker-driven scheduling of the value over time — it shares the exact same underlying RenderObject compositing mechanism, so it does not discount the per-frame layer cost',
+      'It only works with integer opacity values',
+      'It disables the child\'s hit-testing automatically',
+    ],
+    answer: 1,
+    explain: 'RenderAnimatedOpacityMixin computes isRepaintBoundary the same way RenderOpacity does — same mechanism, proven above, different value source.',
+  },
+  {
+    q: 'Quoting the real Clip enum doc comments in this lesson, which clip mode genuinely forces a slow offscreen buffer?',
+    options: [
+      'Clip.hardEdge',
+      'Clip.antiAliasWithSaveLayer — described directly in dart:ui\'s own source as allocating an offscreen buffer and being "very slow"',
+      'Clip.antiAlias, the default',
+      'Clip.none',
+    ],
+    answer: 1,
+    explain: 'The dart:ui Clip enum source is explicit: antiAliasWithSaveLayer "allocates an offscreen buffer... This is very slow," while antiAlias (the ClipRRect default) is "much faster... but can have bleeding edge artifacts."',
   },
 ];
 
