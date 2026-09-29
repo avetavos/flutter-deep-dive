@@ -1,0 +1,739 @@
+---
+title: 'Worked review 3: a cross-platform app, dart:io/web, and release config'
+description: 'แอป cross-platform ที่ AI เขียนให้ -- การเรียก MethodChannel แบตเตอรี่, guard kIsWeb รอบ import แบบ dart:io, runZonedGuarded เป็น error handler ตัวเดียว, key ของ --dart-define ที่ไม่ตรงกัน และช่องโหว่ด้าน lint/test/accessibility -- รีวิวทีละ bug เทียบกับความล้มเหลวจริงของ MissingPluginException, flutter build web, pumpAndSettle timeout และ meetsGuideline ใน probe ของคอร์สนี้'
+sidebar:
+  order: 6
+---
+
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import Mermaid from '../../../../components/Mermaid.astro';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## โจทย์
+
+prompt ที่ให้ไปคือ: *"หน้าจอ settings ที่แสดงระดับแบตเตอรี่ผ่าน platform channel ทำงานได้ทั้งบน web และ native (native อ่านไฟล์ได้ web ทำไม่ได้) มีปุ่ม sync, API URL ที่ตั้งค่าผ่าน environment ได้ และพร้อม release แล้ว -- มี error reporting, กฎ lint, ปุ่มที่เข้าถึงได้, test ที่ไม่ค้าง CI"* นี่คือ PR แบบที่แตะทุกรอยต่อระหว่าง "รันบนมือถือผมในโหมด debug ได้" กับ "ship จริง": platform channel, การแยก `dart:io`/web, error reporting, build config, lint และ accessibility ทุกรอยต่อเหล่านี้มีความผิดพลาดแบบ AI เป็นของตัวเองในดราฟต์นี้ ให้อ่านตามที่ **[review checklist](/flutter/th/reading-flutter/review-checklist/)** แนะนำ: ทำงานได้จริงบนทุกแพลตฟอร์มที่อ้างไหมก่อน แล้วค่อย error handling แล้วค่อย release/lint config แล้วค่อย test มี **bug จริง 9 ตัว** ทุก claim ด้านล่างรันจริงใน probe ของคอร์สนี้ (Flutter 3.47.5) -- `flutter analyze` จริง, `flutter test` จริง, `flutter build web` จริง และอ่าน source ของ SDK ที่ติดตั้งจริงตรง ๆ
+
+## โค้ดที่ AI สร้างให้
+
+```dart
+// lib/cross_app/battery_widget.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+const batteryChannel = MethodChannel('com.example.crossapp/battery');
+
+class BatteryDisplay extends StatefulWidget {
+  const BatteryDisplay({super.key});
+  @override
+  State<BatteryDisplay> createState() => _BatteryDisplayState();
+}
+
+class _BatteryDisplayState extends State<BatteryDisplay> {
+  int? _level;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+    setState(() => _level = level);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(_level == null ? 'loading...' : 'Battery: $_level%');
+  }
+}
+```
+
+```dart
+// lib/cross_app/platform_broken.dart
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+export 'platform_io_impl.dart' if (kIsWeb) 'platform_web_impl.dart';
+```
+
+```dart
+// lib/cross_app/platform_io_impl.dart
+String platformLabel() => 'io';
+```
+
+```dart
+// lib/cross_app/platform_web_impl.dart
+String platformLabel() => 'web';
+```
+
+```dart
+// lib/cross_app/zoned_error_demo.dart
+import 'package:flutter/material.dart';
+
+class BrokenBuild extends StatelessWidget {
+  const BrokenBuild({super.key});
+  @override
+  Widget build(BuildContext context) {
+    throw StateError('boom from build()');
+  }
+}
+```
+
+`main.dart` ของ AI เอง ตามที่อธิบายไว้ใน PR (ไม่ใช่ fence จริงที่เก็บได้ -- พฤติกรรมจริงของ `runZonedGuarded` พิสูจน์ไว้ด้านล่างกับ `zoned_error_demo.dart` แทน): *"ห่อ `runApp()` ด้วย `runZonedGuarded` เพื่อให้ทุก error ถูกรายงาน -- แล้วก็เพิ่ม `print()` ไม่กี่จุดไว้ debug ยังไงมันก็ถูกตัดออกตอน release อยู่แล้ว"*
+
+```dart
+// lib/cross_app/env_config.dart
+// the app is built/run with --dart-define=API_URL=...
+const apiUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'https://api.example.com',
+);
+```
+
+```dart
+// lib/cross_app/pop_mix.dart
+import 'package:flutter/material.dart';
+
+class OldStyleGuard extends StatelessWidget {
+  const OldStyleGuard({super.key, required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: () async => false,
+      child: child,
+    );
+  }
+}
+```
+
+```dart
+// lib/cross_app/infinite_spinner.dart
+import 'package:flutter/material.dart';
+
+class InfiniteSpinner extends StatefulWidget {
+  const InfiniteSpinner({super.key});
+  @override
+  State<InfiniteSpinner> createState() => _InfiniteSpinnerState();
+}
+
+class _InfiniteSpinnerState extends State<InfiniteSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  )..repeat(); // never settles on its own
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(turns: _controller, child: const Icon(Icons.refresh));
+  }
+}
+```
+
+```dart
+// lib/cross_app/sync_button.dart
+import 'package:flutter/material.dart';
+
+class UnlabeledSyncButton extends StatelessWidget {
+  const UnlabeledSyncButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IconButton(icon: const Icon(Icons.sync), onPressed: () {}),
+    );
+  }
+}
+```
+
+`analysis_options.yaml` ของ PR นี้ พร้อมคอมเมนต์ที่ระบุข้อสมมติที่ AI ไม่เคยเช็กจริง:
+
+```yaml
+# analysis_options.yaml
+include: package:flutter_lints/flutter.yaml
+
+# prefer_const_constructors ships with flutter_lints, so every widget in
+# this app is already covered.
+```
+
+## เดินรีวิวทีละบั๊ก
+
+### 1. เรียก `MethodChannel` โดยไม่มี `PlatformException`/`MissingPluginException` handling
+
+`_load()` await `batteryChannel.invokeMethod` โดยไม่มี `try`/`catch` เลย กลไกเป๊ะ ๆ (และรูปแบบ channel/method เดียวกันนี้) พิสูจน์ไว้ครบในบท **[Platform channels](/flutter/th/navigation/platform-channels/)**; ทำซ้ำที่นี่สำหรับชื่อ channel ของแอปนี้เอง:
+
+```dart
+// test/cross_app/battery_widget_test.dart
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/battery_widget.dart';
+
+void main() {
+  test('with no platform handler registered, invokeMethod throws the real MissingPluginException text', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    await expectLater(
+      batteryChannel.invokeMethod<int>('getBatteryLevel'),
+      throwsA(isA<MissingPluginException>().having(
+        (e) => e.toString(),
+        'message',
+        'MissingPluginException(No implementation found for method getBatteryLevel on channel com.example.crossapp/battery)',
+      )),
+    );
+  });
+}
+```
+
+```text
+✓ with no platform handler registered, invokeMethod throws the real MissingPluginException text
+
+00:00 +1: All tests passed!
+```
+
+<SpotTheBug code={`Future<void> _load() async {
+  final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+  setState(() => _level = level);
+}`}>
+มีสาเหตุจริงและพบบ่อย 2 อย่างที่ทำให้ throw ตรงนี้: `PlatformException` จากฝั่ง native ที่รายงานความล้มเหลวจริง (ไม่มีสิทธิ์, hardware ใช้ไม่ได้) และ `MissingPluginException` -- พิสูจน์แล้วด้านบน -- เมื่อไม่มีอะไรฟังอยู่บน channel นั้นเลย (plugin ยังไม่ได้ลงทะเบียน, แพลตฟอร์มไม่มี implementation หรืออยู่ใน test) เรียกจาก `initState` โดยไม่มี `await` ทั้งสองแบบกลายเป็น `Future` ที่ reject แบบไม่มีใครจัดการ ไม่มี error state ให้ผู้ใช้เห็นเลย ทางแก้คือห่อการเรียกด้วย `try { ... } on MissingPluginException { ... } on PlatformException catch (e) { ... }` แล้วแสดงอะไรบางอย่างแทนที่จะค้างที่ "loading..." เงียบ ๆ
+</SpotTheBug>
+
+### 2. `kIsWeb` เป็นเงื่อนไข conditional-import -- syntax ผ่าน แต่ไม่เคยสลับ branch จริง
+
+`platform_broken.dart` export implementation ที่ปลอดภัยสำหรับ web แบบมีเงื่อนไขโดยใช้ `if (kIsWeb)` อันนี้ analyze ผ่าน **ไม่มี error เลย** -- syntax ของ conditional import ใน Dart ก็แค่ `import/export '<default>' if (<dotted.identifier>) '<alt>';` และ dotted identifier ตัวไหนก็ parse ผ่านหมด ตัวเงื่อนไขเองถูกเช็กกับ **compile-time environment declaration** (กลไกเดียวกับ `-D` define และการเช็ก `dart.library.*` ที่มีในตัว) ซึ่งไม่เกี่ยวอะไรกับ `kIsWeb` ที่เป็นค่าคงที่ runtime จาก `package:flutter/foundation.dart` เลย พิสูจน์ด้วยการ build จริงสำหรับ web แล้วตรวจดูว่า branch ไหนถูก compile เข้าไป:
+
+```text
+$ flutter build web
+...
+✓ Built build/web
+
+$ grep -o "SENTINEL_IO_IMPL_USED\|SENTINEL_WEB_IMPL_USED" build/web/main.dart.js | sort | uniq -c
+   1 SENTINEL_IO_IMPL_USED
+```
+
+Build ให้ **web** แล้ว แต่ output ที่ compile ออกมามีแค่ sentinel จาก implementation ฝั่ง `io` เท่านั้น -- `if (kIsWeb)` ไม่เคยเลือก `platform_web_impl.dart` ตัวสำรองเลยสักครั้ง ไม่ว่า target ไหน เพราะ `kIsWeb` ไม่ใช่ environment key ที่ถูกประกาศไว้ (เวอร์ชันที่ใช้ `if (dart.library.html)` ต่างหาก -- เงื่อนไขจริงที่ compiler รู้จัก -- เลือก branch ถูกต้องบน build เดียวกันเป๊ะ ดูโค้ดที่แก้แล้ว)
+
+<Callout title="ร่องรอยเล็ก ๆ อีกอย่างหนึ่ง">
+`flutter analyze` ยังตี `import 'package:flutter/foundation.dart' show kIsWeb;` ของ `platform_broken.dart` เองว่าเป็น `unused_import` ด้วย -- analyzer ไม่นับการปรากฏของ `kIsWeb` ข้างในเงื่อนไข conditional-export ว่าเป็นการใช้ symbol ที่ import มาจริง เป็นสัญญาณเล็ก ๆ อีกอย่างว่าเงื่อนไขนี้ไม่ได้เชื่อมกับอะไรที่ analyzer มองว่าเกี่ยวข้องกับ import นั้นเลย
+</Callout>
+
+### 3. `runZonedGuarded` เป็น error handler ตัวเดียว -- พลาด error ของ framework ไปทั้งหมด
+
+`main.dart` ของ AI ห่อ `runApp()` ด้วย `runZonedGuarded` แล้วถือว่าจบเรื่อง error reporting พิสูจน์ตรง ๆ กับ widget ที่ throw จาก `build()`:
+
+```dart
+// test/cross_app/zoned_error_demo_test.dart
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/zoned_error_demo.dart';
+
+void main() {
+  testWidgets('runZonedGuarded around runApp does not see a build()-phase error', (tester) async {
+    Object? caughtByZone;
+    FlutterErrorDetails? caughtByFlutterError;
+
+    final originalOnError = FlutterError.onError;
+    FlutterError.onError = (details) => caughtByFlutterError = details;
+    addTearDown(() => FlutterError.onError = originalOnError);
+
+    await runZonedGuarded(() async {
+      await tester.pumpWidget(const MaterialApp(home: BrokenBuild()));
+    }, (error, stack) {
+      caughtByZone = error;
+    });
+
+    expect(caughtByFlutterError, isNotNull,
+        reason: 'FlutterError.onError genuinely saw the build() error');
+    expect(caughtByZone, isNull,
+        reason: 'the framework catches build()/layout()/paint() errors '
+            'internally and routes them to FlutterError.onError BEFORE '
+            'they could ever reach an ambient Zone -- runZonedGuarded '
+            'never saw this error at all, even though it wraps runApp()');
+  });
+}
+```
+
+```text
+✓ runZonedGuarded around runApp does not see a build()-phase error
+
+00:00 +1: All tests passed!
+```
+
+ตาม **[Production concerns](/flutter/th/tooling-and-production/production-concerns/)** เรื่องนี้ล้าสมัยซ้อนกันสองชั้น: **release notes 3.3** ของ Flutter เองบอกตรง ๆ ว่า `PlatformDispatcher.onError` แทนที่ความจำเป็นต้องมี custom `Zone` ไปเลย (*"custom `Zone`s were detrimental to a number of optimizations in Dart's core libraries, which slowed down application start-up time"*) และ error ของ build/layout/paint ใน framework ไม่เคยเป็นหน้าที่ของ `Zone` ที่จะจับตั้งแต่แรกอยู่แล้ว -- `FlutterError.onError` เป็น hook เดียวที่เห็นมัน พิสูจน์แล้วด้านบนและในบทนั้น
+
+### 4. เรียก `print()` โดยสมมติว่า "ถูกตัดออกตอน release"
+
+แก้ไขความเข้าใจผิดนี้ไปแล้วใน **[Production concerns](/flutter/th/tooling-and-production/production-concerns/)** โดยอ่าน source ของ SDK ที่ติดตั้งจริงตรง ๆ (`~/flutter/packages/flutter/lib/src/foundation/print.dart`): ทั้ง `print` และ `debugPrint` ไม่ถูกลบออกใน release build เลย doc comment ของ `debugPrint` เองบอกตรง ๆ ว่า: *"The `debugPrint` function logs to console even in release mode."* ทุกการเรียก `print()` ที่เหลือไว้ "เพื่อ debug" ใน PR นี้จะ ship ไปที่ log ของอุปกรณ์ผู้ใช้จริงใน release build ตามที่เขียนไว้เป๊ะ ๆ -- เหตุผลจริงที่ควรใช้ `debugPrint` แทน `print` เปล่า ๆ คือเรื่อง throttling (หลีกเลี่ยงข้อมูล log หายบน Android ตอนมี output เยอะ) ไม่ใช่เรื่องถูกตัดออกตอน release
+
+### 5. `--dart-define=API_URL=...` อ่านด้วย key ผิด
+
+แอปมีเอกสารบอกว่าอ่าน API URL จาก `--dart-define=API_URL=...` แต่ `env_config.dart` อ่าน `String.fromEnvironment('API_BASE_URL', ...)` -- คนละ key กันเลย:
+
+```dart
+// test/cross_app/env_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/env_config.dart';
+
+void main() {
+  test('apiUrl falls back to defaultValue -- the key it reads does not match --dart-define=API_URL', () {
+    expect(apiUrl, 'https://api.example.com');
+  });
+}
+```
+
+```text
+✓ apiUrl falls back to defaultValue -- the key it reads does not match --dart-define=API_URL
+
+00:00 +1: All tests passed!
+```
+
+รันด้วยมือ (harness ของคอร์สนี้ไม่มีกลไกส่ง `--dart-define` แบบกำหนดเองต่อบทได้ ข้อจำกัดเดียวกับ proof `--dart-define` จริงในบท **[Build & release](/flutter/th/tooling-and-production/build-and-release/)**) ด้วยค่าที่เอกสารของแอปเองบอกให้ส่ง:
+
+```text
+$ flutter test --dart-define=API_URL=https://real.example.com test/env_config_test.dart
+```
+
+ยังคงได้ค่า default `https://api.example.com` เหมือนเดิม -- `String.fromEnvironment` เป็นค่าคงที่ระดับ compile-time ที่อ่านด้วย key string ที่ตรงเป๊ะ; `--dart-define` สำหรับ key ที่ไม่มีอะไรอ่านไม่มีผลอะไรเลย และการอ่าน key ที่ไม่มีอะไรกำหนดก็ fallback ไปเงียบ ๆ ไม่มี error ทั้งสองแบบ
+
+### 6. `analysis_options.yaml` สมมติว่า `prefer_const_constructors` มากับ `flutter_lints`
+
+ไม่จริง แก้ไขความเข้าใจผิดนี้ไปแล้วในบท **[Rebuilds & performance](/flutter/th/async-and-performance/rebuilds-and-performance/)** ยืนยันโดยอ่าน `lib/flutter.yaml` ของ `flutter_lints` 6.0.0 เองตรง ๆ: มันเพิ่มแค่ `prefer_const_constructors_in_immutables` ที่แคบกว่า (ซึ่งจะทำงานก็ต่อเมื่อ class มี annotation `@immutable` ชัดเจนเท่านั้น ไม่ใช่กรณีทั่วไปของ `StatelessWidget`/`StatefulWidget` ที่แอปนี้ใช้จริง) `package:lints/recommended.yaml` ซึ่งเป็นฐานของ `flutter_lints` เองก็ไม่มีกฎทั่วไปนี้เหมือนกัน ยืนยันด้วยวิธีเดียวกัน `very_good_analysis` มีกฎทั่วไปนี้มาให้ ตามบทที่อ้างถึง; `flutter_lints` เพียงอย่างเดียวไม่มี และคอมเมนต์ใน `analysis_options.yaml` ของ PR นี้บอกตรงข้ามกับสิ่งที่เปิดใช้งานจริง
+
+### 7. `pumpAndSettle` บน animation ที่ไม่มีวันจบ
+
+`AnimationController` ของ `InfiniteSpinner` เรียก `..repeat()` -- มันไม่เคยหยุด schedule เฟรมด้วยตัวเองเลย test ที่เรียก `pumpAndSettle()` (ที่รอ "ไม่มีเฟรมเหลือให้ schedule แล้ว") บนหน้าจอที่มีมันอยู่:
+
+```dart
+// test/cross_app/infinite_spinner_pumpandsettle_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/infinite_spinner.dart';
+
+void main() {
+  testWidgets('pumpAndSettle on a repeating animation throws the real timeout error', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: InfiniteSpinner()));
+    try {
+      await tester.pumpAndSettle();
+      fail('expected pumpAndSettle to time out');
+    } catch (e) {
+      print(e); // FlutterError: pumpAndSettle timed out
+    }
+  });
+}
+```
+
+```text
+FlutterError: pumpAndSettle timed out
+
+00:01 +1: All tests passed!
+```
+
+`FlutterError: pumpAndSettle timed out` ตัวจริง ประมาณ 1 วินาที (timeout เริ่มต้น) -- ทุก test ใน PR นี้ที่แตะหน้าจอที่มี spinner อยู่แล้วเรียก `pumpAndSettle` ที่ไหนก็ตามจะค้างเต็ม timeout นั้นแล้วก็ fail ด้วยเหตุผลที่ไม่เกี่ยวอะไรกับสิ่งที่ test นั้นกำลังเช็กอยู่เลย
+
+### 8. `PopScope`/`WillPopScope` ปนกันในแอปเดียว
+
+`pop_mix.dart` ใช้ `WillPopScope` ในขณะที่อีกหน้าจอหนึ่งใน PR เดียวกัน (ไม่ได้แสดงที่นี่ -- พิสูจน์และอ้างอิงไว้ครบด้านล่างแล้ว) ใช้ `PopScope` เช็กกับ SDK นี้:
+
+```text
+info • 'WillPopScope' is deprecated and shouldn't be used. Use PopScope instead. The Android predictive back feature will not work with WillPopScope. This feature was deprecated after v3.12.0-1.0.pre. Try replacing the use of the deprecated member with the replacement • deprecated_member_use
+```
+
+annotation deprecation จริงของ `WillPopScope`, member จริงทั้งสองตัวของ `PopScope` (`canPop`, `onPopInvokedWithResult`) และ widget test เต็มรูปแบบที่พิสูจน์ว่า `PopScope` บล็อกการ pop และยังเรียก callback ของมันอยู่ พิสูจน์ไว้ในบท **[Navigator & routes](/flutter/th/navigation/navigator-and-routes/)** ช่องว่างเรื่อง predictive-back ที่ระบุตรง ๆ ในข้อความ deprecation ไม่ใช่แค่เรื่องความสวยงาม: ตามเอกสารเดียวกันที่อ้างไว้ที่นั่น *"The Android predictive back feature will not work with WillPopScope."* แอปที่ migrate ไปครึ่งเดียวจะมีบางหน้าจอที่รองรับได้และบางหน้าจอที่รองรับไม่ได้เลยในเชิงโครงสร้าง
+
+### 9. ลืม `Semantics` บนปุ่มไอคอนล้วน ๆ
+
+`UnlabeledSyncButton` เป็น `IconButton` ที่ไม่มี `tooltip` และไม่มี `Semantics` ห่ออยู่:
+
+```dart
+// test/cross_app/sync_button_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app/sync_button.dart';
+
+void main() {
+  testWidgets('the unlabeled sync IconButton fails the labeled-tap-target guideline', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const MaterialApp(home: UnlabeledSyncButton()));
+    await expectLater(tester, doesNotMeetGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+  });
+}
+```
+
+```text
+✓ the unlabeled sync IconButton fails the labeled-tap-target guideline
+
+00:00 +1: All tests passed!
+```
+
+ข้อความ failure จริงเป๊ะสำหรับปุ่มรูปแบบนี้ (`SemanticsNode` ที่ระบุ bounding rect และ flag ของตัวเอง จบด้วย *"expected tappable node to have semantic label, but none was found"*) มีบันทึกไว้ครบในบท **[Production concerns](/flutter/th/tooling-and-production/production-concerns/)** ซึ่งครอบคลุม `tester.ensureSemantics()` ด้วย (ต้องเรียกก่อน check `meetsGuideline`/`doesNotMeetGuideline` ใด ๆ) และ `AccessibilityGuideline` ในตัวอื่น ๆ
+
+## โค้ดที่แก้แล้ว
+
+```dart
+// lib/cross_app_fixed/battery_widget.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+const batteryChannel = MethodChannel('com.example.crossapp/battery');
+
+class BatteryDisplay extends StatefulWidget {
+  const BatteryDisplay({super.key});
+  @override
+  State<BatteryDisplay> createState() => _BatteryDisplayState();
+}
+
+class _BatteryDisplayState extends State<BatteryDisplay> {
+  int? _level;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final level = await batteryChannel.invokeMethod<int>('getBatteryLevel');
+      if (!mounted) return;
+      setState(() => _level = level);
+    } on MissingPluginException {
+      if (!mounted) return;
+      setState(() => _error = 'Battery info is not available on this platform');
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Battery info unavailable: ${e.message}');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) return Text(_error!);
+    return Text(_level == null ? 'loading...' : 'Battery: $_level%');
+  }
+}
+```
+
+```dart
+// lib/cross_app_fixed/platform_io.dart
+export 'platform_io_impl.dart' if (dart.library.html) 'platform_web_impl.dart';
+```
+
+```dart
+// lib/cross_app_fixed/platform_io_impl.dart
+String platformLabel() => 'io';
+```
+
+```dart
+// lib/cross_app_fixed/platform_web_impl.dart
+String platformLabel() => 'web';
+```
+
+```text
+$ flutter build web
+✓ Built build/web
+
+$ grep -o "SENTINEL_IO_IMPL_USED\|SENTINEL_WEB_IMPL_USED" build/web/main.dart.js | sort | uniq -c
+   1 SENTINEL_WEB_IMPL_USED
+```
+
+build เดียวกันเป๊ะ แค่เปลี่ยนเงื่อนไขเป็น `dart.library.html` แทน `kIsWeb`: output สำหรับ web target ตอนนี้มี sentinel ของ branch web จริง ๆ แล้ว
+
+```dart
+// lib/cross_app_fixed/error_reporting.dart
+import 'package:flutter/foundation.dart';
+
+void installErrorReporting(void Function(Object error, StackTrace? stack) report) {
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    report(details.exception, details.stack);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    report(error, stack);
+    return true;
+  };
+}
+```
+
+```dart
+// lib/cross_app_fixed/env_config.dart
+const apiUrl = String.fromEnvironment(
+  'API_URL',
+  defaultValue: 'https://api.example.com',
+);
+```
+
+```dart
+// lib/cross_app_fixed/infinite_spinner.dart
+import 'package:flutter/material.dart';
+
+class InfiniteSpinner extends StatefulWidget {
+  const InfiniteSpinner({super.key});
+  @override
+  State<InfiniteSpinner> createState() => _InfiniteSpinnerState();
+}
+
+class _InfiniteSpinnerState extends State<InfiniteSpinner> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(turns: _controller, child: const Icon(Icons.refresh));
+  }
+}
+```
+
+```dart
+// lib/cross_app_fixed/sync_button.dart
+import 'package:flutter/material.dart';
+
+class LabeledSyncButton extends StatelessWidget {
+  const LabeledSyncButton({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Semantics(
+        label: 'Sync now',
+        child: IconButton(
+          icon: const Icon(Icons.sync),
+          onPressed: () {},
+          tooltip: 'Sync now',
+        ),
+      ),
+    );
+  }
+}
+```
+
+```yaml
+# analysis_options.yaml
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    prefer_const_constructors: true
+```
+
+พิสูจน์ 4 อย่างที่โจทย์ขอมา -- conditional import (พิสูจน์แล้วด้านบนผ่าน `flutter build web` จริง), การผ่าน `meetsGuideline`, คู่ `FlutterError.onError`/`PlatformDispatcher.instance.onError` ที่แยกกันจริง (พิสูจน์ไว้ครบในบท [Production concerns](/flutter/th/tooling-and-production/production-concerns/) เอามาใช้ซ้ำตรงนี้แทนที่จะรันซ้ำแบบไม่จำเป็น) และ `pumpAndSettle` ที่เปลี่ยนเป็น pump แบบมีขอบเขต:
+
+```dart
+// test/cross_app_fixed/sync_button_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/sync_button.dart';
+
+void main() {
+  testWidgets('the labeled sync IconButton meets the labeled-tap-target guideline', (tester) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const MaterialApp(home: LabeledSyncButton()));
+    await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    handle.dispose();
+  });
+}
+```
+
+```dart
+// test/cross_app_fixed/infinite_spinner_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/infinite_spinner.dart';
+
+void main() {
+  testWidgets('a fixed number of tester.pump(duration) calls checks a repeating animation without pumpAndSettle', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: InfiniteSpinner()));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+    expect(tester.takeException(), isNull);
+    expect(find.byIcon(Icons.refresh), findsOneWidget);
+  });
+}
+```
+
+```dart
+// test/cross_app_fixed/battery_widget_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/battery_widget.dart';
+
+void main() {
+  testWidgets('BatteryDisplay with no handler shows an error state instead of crashing', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: BatteryDisplay()));
+    // A MissingPluginException from a channel with no handler needs a real
+    // async gap (not just fake-clock frame pumps) to actually resolve.
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Battery info is not available on this platform'), findsOneWidget);
+  });
+}
+```
+
+```dart
+// test/cross_app_fixed/env_config_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cross_app_fixed/env_config.dart';
+
+void main() {
+  test('apiUrl falls back to defaultValue when no --dart-define is passed', () {
+    expect(apiUrl, 'https://api.example.com');
+  });
+}
+```
+
+```text
+✓ the labeled sync IconButton meets the labeled-tap-target guideline
+✓ a fixed number of tester.pump(duration) calls checks a repeating animation without pumpAndSettle
+✓ BatteryDisplay with no handler shows an error state instead of crashing
+✓ apiUrl falls back to defaultValue when no --dart-define is passed
+
+00:02 +4: All tests passed!
+```
+
+## สิ่งที่เปลี่ยนและเหตุผล
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | เรียก `MethodChannel` โดยไม่มี exception handling | `on MissingPluginException`/`on PlatformException` -- พิสูจน์แล้ว: ไม่งั้นได้ข้อความ `MissingPluginException` จริง |
+| 2 | `kIsWeb` เป็นเงื่อนไข conditional-import | `dart.library.html` -- พิสูจน์แล้ว: output ของ `flutter build web` สลับ branch จริง |
+| 3 | `runZonedGuarded` เป็น error handler ตัวเดียว | `FlutterError.onError` + `PlatformDispatcher.instance.onError` ไม่มี `Zone` -- พิสูจน์แล้ว: build error ข้าม zone ไปเลย |
+| 4 | `print()` "ถูกตัดออกตอน release" | ลบทิ้ง/guard ด้วย `kDebugMode` หรือใช้ `debugPrint`/`log()` จาก `dart:developer` -- ตาม source ของ SDK ไม่มีอะไรถูกตัดตอน release |
+| 5 | `--dart-define=API_URL` อ่านเป็น `API_BASE_URL` | key ให้ตรงกัน -- พิสูจน์แล้ว: ใช้ default เสมอถ้า key ผิด |
+| 6 | `analysis_options.yaml` สมมติว่า `prefer_const_constructors` มาให้เอง | เพิ่มกฎนี้เข้าไปตรง ๆ -- ตาม source ของ `flutter_lints` มันไม่ได้มาให้เองโดยค่าเริ่มต้น |
+| 7 | `pumpAndSettle` บน animation แบบ `..repeat()` | เรียก `tester.pump(duration)` แบบมีขอบเขต -- พิสูจน์แล้ว: ไม่งั้นได้ `pumpAndSettle timed out` จริง |
+| 8 | `WillPopScope`/`PopScope` ปนกัน | ใช้ `PopScope` ทุกที่ -- พิสูจน์แล้วว่า deprecated และ predictive back ใช้กับ widget เก่าไม่ได้เลยในเชิงโครงสร้าง |
+| 9 | ปุ่มไอคอนล้วน ๆ ไม่มี `Semantics`/tooltip | `Semantics(label: ...)` + `tooltip` -- พิสูจน์แล้ว: ผ่าน `meetsGuideline` จริง |
+
+## สิ่งที่ reviewer เขียนใน PR
+
+> เรื่องนี้แตะรอยต่อจริงเยอะมาก และเกือบทุกอันต้องแก้ -- มี 9 เรื่อง:
+>
+> 1. **ไม่มี error handling บนการเรียก battery channel** `MissingPluginException`/`PlatformException` throw ไม่มีใครจัดการจาก `initState` ทั้งคู่ ห่อมันซะ
+> 2. **`if (kIsWeb)` ใน conditional import ไม่ทำอะไรเลย** ยืนยันด้วย web build จริง -- sentinel ของ branch io ยังโผล่แม้ใน web bundle conditional import เช็กแค่ `dart.library.*`/environment declaration ไม่ใช่ runtime constant
+> 3. **`runZonedGuarded` เดี่ยว ๆ พลาด error ของ build/layout/paint ไปทั้งหมด** และยังเป็นคำแนะนำที่ล้าสมัยตั้งแต่ Flutter 3.3 ด้วย ใช้ `FlutterError.onError` + `PlatformDispatcher.instance.onError` ไม่ต้องมี `Zone` เอง
+> 4. **`print()` ไม่ถูกตัดออกตอน release** -- ยืนยันจาก source ของ SDK อะไรก็ตามที่ sensitive ใน call พวกนั้นจะ ship ไปที่ log ของผู้ใช้จริง
+> 5. **`--dart-define=API_URL` กับ `String.fromEnvironment('API_BASE_URL')` ไม่ตรงกัน** ค่าที่ override ไม่เคยมีผลเลยแบบเงียบ ๆ
+> 6. **คอมเมนต์ใน `analysis_options.yaml` ผิด** `flutter_lints` ไม่มี `prefer_const_constructors` มาให้ (มีแค่ `_in_immutables` ที่แคบกว่า) -- เพิ่มเข้าไปตรง ๆ ถ้าต้องการ
+> 7. **test ที่ใช้ `pumpAndSettle` บนหน้า spinner จะค้างเต็มหนึ่งวินาทีแล้วก็ fail** ด้วยเหตุผลที่ไม่เกี่ยวกับสิ่งที่มันกำลังทดสอบเลย ใช้ `pump(duration)` แบบมีขอบเขตกับอะไรก็ตามที่มี animation แบบวนซ้ำ
+> 8. **`WillPopScope` ที่นี่ `PopScope` ที่อื่น** `WillPopScope` deprecated แล้วและรองรับ predictive back ไม่ได้เลยในเชิงโครงสร้าง migrate ตัวนี้ด้วย
+> 9. **ปุ่ม sync ไม่มี label ที่เข้าถึงได้** `meetsGuideline(labeledTapTargetGuideline)` fail อยู่ตอนนี้เลย -- เพิ่ม `Semantics`/`tooltip`
+>
+> ทุกอย่างเป็นการแก้เล็ก ๆ เชิงกลไกทั้งนั้น -- ยินดี pair กันแก้ข้อไหนก็ได้
+
+## Mental Model
+
+มี 2 เรื่องที่วนซ้ำตลอดรีวิวนี้ อย่างแรก: **API ที่ดูสมเหตุสมผลแต่ไม่ได้ทำในสิ่งที่ดูเหมือนจะทำ** -- `if (kIsWeb)` ข้างใน conditional import parse และ analyze ผ่านสะอาด `runZonedGuarded` จับ error *บางส่วน* ได้จริง `--dart-define` เป็นกลไกจริงจริง ๆ -- แต่ละตัวคือ Dart/Flutter surface จริง แค่ไม่ได้ต่อเข้ากับงานเฉพาะที่ AI เอาไปใช้ อย่างที่สอง: **claim ที่เช็กได้ง่ายแต่ไม่มีใครเช็ก** -- "print ถูกตัดออกตอน release", "`flutter_lints` มี `prefer_const_constructors` มาให้" ทั้งคู่แค่ grep ครั้งเดียวเข้าไปใน source ที่ติดตั้งจริงก็หักล้างได้แล้ว และทั้งคู่เป็น claim ที่แก้ไขความเข้าใจผิดไปแล้วที่อื่นในคอร์สนี้ด้วยเหตุผลเดียวกันเป๊ะ ตลอดทั้ง 9 bug ไม่มีตัวไหนแก้ยากเลยเมื่อเจอแล้ว -- รีวิวทั้งหมดนี้อยู่ที่การ *เจอ* มัน ไม่ใช่การแก้
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+|---|---|---|
+| conditional import (`if (dart.library.X)`) แทน branch แบบ runtime `kIsWeb` ในไฟล์เดียว | สลับ implementation ตาม compile target ได้จริง -- พิสูจน์แล้วด้านบน | คำศัพท์ของเงื่อนไขแคบ (`dart.library.*`, environment declaration) -- ใช้ logic runtime แบบอิสระไม่ได้ |
+| `FlutterError.onError` + `PlatformDispatcher.instance.onError` ไม่มี `Zone` | ตรงกับคำแนะนำปัจจุบันของ Flutter เอง; หลีกเลี่ยงต้นทุน startup ของ custom `Zone` | ต้องต่อ callback 2 ตัวแทนที่จะห่อตัวเดียว -- เผลอเพิ่มแค่ตัวเดียวแล้วคิดว่าครอบคลุมแล้วได้ง่าย |
+| `--dart-define` สำหรับ config ตาม environment | ค่าคงที่ระดับ compile-time ไม่ต้อง parse ตอน runtime ไม่มี secret commit ลง source | ไม่ทำอะไรเลยแบบเงียบ ๆ ถ้า key ไม่ตรงกันทั้งสองฝั่ง -- ไม่มี error มีแค่ default |
+| `Semantics`/`meetsGuideline` ใน test | จับช่องโหว่ด้าน accessibility จริงและเจาะจงได้แบบกลไก ใน CI ไม่ต้องใช้อุปกรณ์จริง | ครอบคลุมแค่สิ่งที่ built-in guideline เช็ก ไม่ใช่ตัวแทนการทดสอบ screen reader จริง |
+
+## Common Misconceptions
+
+- **"`kIsWeb` ใช้เป็นเงื่อนไข conditional-import ได้เพราะมันเป็น `true`/`false` ตอน compile time"** พิสูจน์แล้วว่าผิดด้านบนด้วย `flutter build web` จริงบวกการตรวจ output ที่ compile: conditional import เข้าใจแค่การเช็ก `dart.library.*` และ environment key ที่ประกาศไว้ ไม่ใช่ค่าคงที่ Dart แบบอิสระ ไม่ว่าจะดู compile-time แค่ไหนก็ตาม
+- **"`print()`/`debugPrint()` ถูกลบออกอัตโนมัติใน release build"** พิสูจน์แล้วว่าผิดตรงจาก source ของ SDK ที่ติดตั้งจริง อ้างไว้ด้านบนจาก Production concerns: ทั้งคู่ไม่ถูกตัดออกเลย doc comment ของ `debugPrint` เองบอกว่ามัน log "even in release mode"
+- **"`runZonedGuarded` รอบ `runApp()` จับ error ได้ทุกตัว เลยไม่จำเป็นต้องมี `FlutterError.onError`"** พิสูจน์แล้วว่าผิดด้านบนด้วย test จริง: error ระยะ `build()` ไม่มีทางไปถึง handler ของ zone เลย เพราะ framework ดักและส่งไปที่ `FlutterError.onError` ก่อนเสมอ
+- **"`flutter_lints` เป็น preset ที่เข้มงวดและมีกฎ performance ที่ชัดเจนอย่าง `prefer_const_constructors` มาให้แล้ว"** พิสูจน์แล้วว่าผิดโดยอ่าน `lib/flutter.yaml` ของมันเอง: มันเพิ่ม list สั้น ๆ ที่แคบโดยตั้งใจทับ `package:lints/recommended.yaml` และ `prefer_const_constructors` (กฎทั่วไป ไม่ใช่ตัวแปร `_in_immutables`) ไม่ได้อยู่ในนั้น
+
+<Mermaid title="แต่ละ bug อยู่ตรงไหนในแอป cross-platform เดียว" code={wr3Diagram} />
+
+export const wr3Diagram = `flowchart TD
+  A["BatteryDisplay.initState -> _load()"] -->|"1: no try/catch"| A
+  B["export ... if (kIsWeb) ..."] -->|"2: never switches branch"| B
+  C["runApp() wrapped in runZonedGuarded"] -->|"3: misses build/layout/paint errors"| C
+  D["print(...) for debugging"] -->|"4: ships to release logs"| D
+  E["String.fromEnvironment('API_BASE_URL')"] -->|"5: --dart-define=API_URL never applies"| E
+  F["analysis_options.yaml"] -->|"6: prefer_const_constructors not actually on"| F
+  G["test: pumpAndSettle on InfiniteSpinner"] -->|"7: real timeout"| G
+  H["WillPopScope here, PopScope elsewhere"] -->|"8: predictive back broken here"| H
+  I["IconButton(icon: sync), no label"] -->|"9: fails meetsGuideline"| I
+`;
+
+<Callout title="สรุปในบรรทัดเดียว">
+ทุก bug ในรีวิวนี้คือชิ้นส่วนจริงของ Flutter/Dart ที่ไม่ได้ถูกดัดแปลง ใช้ในแบบที่ดูสมเหตุสมผล แล้วก็ไม่ทำอะไรเลย (`kIsWeb` ใน conditional import, `runZonedGuarded` สำหรับ build error, key ของ `--dart-define` ที่ไม่ตรงกัน) หรือไม่ก็แอบซ่อนช่องโหว่ไว้ (คอมเมนต์ lint ที่อ้างว่าครอบคลุมทั้งที่ไม่ได้ครอบคลุม, สมมติว่า `print` หายไปตอน release) ไม่มีตัวไหนในเก้าตัวนี้ crash ตอนรันแบบสบาย ๆ ใน simulator เลย -- แต่ละตัวต้องการ build artifact จริง, การอ่าน source ของ SDK จริง หรือ test ที่ออกแบบมาเจาะจงเงื่อนไขนั้นถึงจะโผล่ออกมาให้เห็น
+</Callout>
+
+export const quizWorkedReview3 = [
+  {
+    q: '`export \'io_impl.dart\' if (kIsWeb) \'web_impl.dart\';` analyze ผ่านไม่มี error เลย มีการรัน `flutter build web` จริงแล้ว grep `main.dart.js` ที่ compile ออกมาหา sentinel string ที่เฉพาะเจาะจงแต่ละ branch เจอแค่ sentinel ของ branch io เท่านั้น สิ่งนี้พิสูจน์อะไรเกี่ยวกับ `kIsWeb` ในฐานะเงื่อนไข conditional-import?',
+    options: [
+      'พิสูจน์ว่า flutter build web มี bug เฉพาะกับไฟล์นี้',
+      'พิสูจน์ว่าเงื่อนไข if (...) ของ conditional import ใน Dart เข้าใจแค่ compile-time environment declaration (อย่าง dart.library.html) เท่านั้น -- kIsWeb เป็นค่าคงที่ runtime จาก package:flutter/foundation.dart ที่ไม่เกี่ยวกับกลไกนั้นเลย เงื่อนไขเลยเป็น false เสมอ และ branch เริ่มต้น (ตัวแรก) ถูกใช้เสมอทุกแพลตฟอร์ม',
+      'พิสูจน์ว่า kIsWeb เลิกใช้แล้วและใช้ไม่ได้ที่ไหนอีกเลย',
+      'พิสูจน์ว่า conditional import ใช้ได้แค่ใน test code ไม่ใช่ build จริง',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบนด้วยการรัน flutter build web จริง: sentinel ของ branch io ถูก ship แม้ใน web build ทางแก้ที่ใช้ได้จริง (dart.library.html) พิสูจน์ทันทีหลังจากนั้นว่าเลือก branch ถูกต้องบน build เดียวกันเป๊ะ',
+  },
+  {
+    q: 'widget ที่ throw จาก `build()` ถูก pump ข้างใน `runZonedGuarded(() { ... }, (error, stack) { caughtByZone = error; })` `caughtByZone` ยังเป็น `null` อยู่ ในขณะที่ `FlutterError.onError` (ตั้งแยกไว้) จับ error ได้จริง สิ่งนี้พิสูจน์อะไรเกี่ยวกับความครอบคลุมของ `runZonedGuarded`?',
+    options: [
+      'runZonedGuarded ใช้ได้แค่กับโค้ดระดับบนสุดแบบ synchronous ไม่ใช่ widget',
+      'framework จับ error ของ build()/layout()/paint() ไว้ข้างในแล้วส่งตรงไปที่ FlutterError.onError -- มันไม่เคยแพร่กระจายเป็น uncaught Zone error เลย ดังนั้น runZonedGuarded (หรือ Zone ไหนก็ตาม) จึงไม่เห็นมันเลย ไม่ว่าจะห่อ runApp() ด้วยอะไรก็ตาม',
+      'เรื่องนี้เกิดแค่ใน test เท่านั้น -- ในแอปจริง runZonedGuarded จะจับได้',
+      'FlutterError.onError กับ runZonedGuarded จับ error ตัวเดียวกันซ้ำสองครั้ง',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์ตรง ๆ ด้านบน: caughtByFlutterError ถูกตั้งค่า ในขณะที่ caughtByZone ยัง null อยู่ จาก error ตัวเดียวกันเป๊ะ release notes 3.3 ของ Flutter เอง (อ้างไว้ใน Production concerns) ยืนยันว่า PlatformDispatcher.instance.onError ไม่ใช่ custom Zone คือคู่ที่แนะนำในปัจจุบันกับ FlutterError.onError',
+  },
+  {
+    q: 'แอปตั้งใจให้อ่าน API URL ผ่าน `--dart-define=API_URL=...` แต่โค้ดมี `String.fromEnvironment(\'API_BASE_URL\', defaultValue: \'https://api.example.com\')` รันด้วย `flutter test --dart-define=API_URL=https://real.example.com` แล้ว `apiUrl` ยังเท่ากับ default อยู่ ทำไม?',
+    options: [
+      'String.fromEnvironment ใช้ไม่ได้ข้างใน flutter test ใช้ได้แค่ flutter run',
+      'String.fromEnvironment อ่านด้วย key string ที่ตรงเป๊ะตอน compile time -- \'API_URL\' ถูกกำหนดไว้แต่ไม่มีอะไรอ่านมัน และ \'API_BASE_URL\' ถูกอ่านแต่ไม่มีอะไรกำหนดมัน การอ่านจึง fallback ไปที่ defaultValue เงียบ ๆ ไม่มี error ทั้งสองฝั่ง',
+      'defaultValue ชนะเสมอแม้จะส่ง --dart-define ที่ key ตรงกันมาก็ตาม',
+      'ค่าของ --dart-define หมดอายุหลังจากอ่านครั้งแรก',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบน: การส่ง --dart-define=API_URL=... (key ที่เอกสารของแอปเองบอกไว้) ไม่มีผลอะไรเลยกับการอ่าน \'API_BASE_URL\' -- การแก้โค้ดให้อ่าน \'API_URL\' (โค้ดที่แก้แล้ว) เป็นการเปลี่ยนแปลงเดียวที่ต้องทำ พิสูจน์แล้วใน test ที่แก้แล้วซึ่งยืนยันว่า default ยังใช้ได้เมื่อไม่มี --dart-define เลย',
+  },
+  {
+    q: 'การอ่าน `lib/flutter.yaml` ของ `flutter_lints` 6.0.0 เองตรง ๆ แสดงว่ามันเพิ่ม `prefer_const_constructors_in_immutables` เข้าไปในชุดกฎ แต่ไม่มี `prefer_const_constructors` แบบทั่วไป ความแตกต่างนี้สำคัญยังไงกับแอป Flutter ทั่วไป?',
+    options: [
+      'ไม่สำคัญเลย -- กฎทั้งสองจับกรณีเดียวกัน',
+      'prefer_const_constructors_in_immutables ทำงานก็ต่อเมื่อ class มี annotation @immutable ชัดเจนเท่านั้น -- มันไม่ครอบคลุมกรณีทั่วไปของ StatelessWidget/StatefulWidget ที่โค้ด UI ของ Flutter ส่วนใหญ่ใช้จริง ดังนั้นคอมเมนต์ใน analysis_options.yaml ที่อ้างว่าครอบคลุมเต็มที่จาก flutter_lints เพียงอย่างเดียวจึงผิดสำหรับโค้ด widget จริงส่วนใหญ่',
+      'prefer_const_constructors_in_immutables เข้มงวดกว่าและจับกรณีได้มากกว่า prefer_const_constructors',
+      'ไม่มีกฎไหนจริงเลย ทั้งคู่เป็นชื่อ lint สมมติ',
+    ],
+    answer: 1,
+    explain: 'ยืนยันตรงจาก source ของ flutter_lints เอง (อ้างจากการแก้ไขความเข้าใจผิดใน Rebuilds & performance): กฎที่แคบกว่านี้ใช้ได้แค่กับ class ที่มี annotation @immutable และ widget class ทั่วไปไม่มี annotation แบบนั้น -- ต้องเพิ่มกฎทั่วไปเข้าไปตรง ๆ หรือใช้ preset อย่าง very_good_analysis แทน',
+  },
+  {
+    q: 'test เรียก `tester.pumpAndSettle()` บนหน้าจอที่มี widget ซึ่ง `AnimationController` ของมันเริ่มด้วย `..repeat()` เกิดอะไรขึ้นจริง สังเกตได้ และทำไม?',
+    options: [
+      'test ผ่านทันทีเพราะ pumpAndSettle มองข้าม animation แบบ repeat()',
+      'มัน throw FlutterError จริง (\'pumpAndSettle timed out\') หลังจาก timeout เริ่มต้น เพราะ pumpAndSettle รอเฟรมที่ไม่มีอะไรเหลือให้ schedule แล้ว และ animation ที่วนซ้ำจะ schedule เฟรมใหม่ตลอดไป',
+      'pumpAndSettle ตรวจจับ animation ที่ไม่มีวันจบได้อัตโนมัติแล้วเรียก dispose() บน controller ให้',
+      'test ค้างตลอดไปไม่มี error จนกว่า process จะถูกฆ่า',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้านบนด้วย error จริงที่จับได้: FlutterError: pumpAndSettle timed out หลังจากรอประมาณ 1 วินาที (ค่าเริ่มต้น) ทางแก้ -- พิสูจน์แล้วในโค้ดที่แก้ -- คือเรียก tester.pump(duration) จำนวนคงที่แทน ซึ่งไม่เคยรอ "ไม่มีอะไรเหลือให้ schedule" เลย',
+  },
+];
+
+<Quiz client:visible id="reading-flutter/worked-review-3" questions={quizWorkedReview3} />
+
+<ProgressTracker client:visible id="reading-flutter/worked-review-3" />
