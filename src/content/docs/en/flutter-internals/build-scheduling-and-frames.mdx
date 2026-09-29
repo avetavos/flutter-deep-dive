@@ -1,0 +1,386 @@
+---
+title: 'Build Scheduling and Frames'
+description: 'SchedulerBinding phases (quoted from the real SchedulerPhase enum), WidgetsBinding.drawFrame real 10-step order, and the setState -> markNeedsBuild -> scheduleBuildFor -> scheduleFrame chain -- proven with a real frame-coalescing test (two setState calls, one build), addPostFrameCallback proven to run after layout, and a real hasScheduledFrame probe.'
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
+
+## What this lesson adds
+
+[The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) already named the five phases of a frame (build, layout, paint, composite, raster) and the ~16.6ms budget. [Async in Dart](/flutter/en/dart-foundations/async-in-dart/) already proved, with a real ordering test, that Dart's event loop has a microtask queue that fully drains before the next event-queue task. This lesson does not repeat either proof. It answers the question both leave open: **what actually turns "a widget called `setState`" into "a frame runs," and in what exact order does that one frame do its work?** -- straight from the installed Flutter 3.47.5 source (revision `6a19cca564`), then proven with a real, passing test that two `setState` calls in the same synchronous turn produce exactly **one** build.
+
+## `SchedulerPhase`: the five phases, quoted verbatim
+
+[`SchedulerPhase`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/scheduler/binding.dart#L160) is a real `enum` in the installed source -- not a description of Flutter's scheduling model, the literal type `SchedulerBinding.schedulerPhase` returns:
+
+```dart
+// scheduler/binding.dart:160 -- quoted verbatim from the installed 3.47.5 source
+enum SchedulerPhase {
+  /// No frame is being processed. Tasks (scheduled by
+  /// [SchedulerBinding.scheduleTask]), microtasks (scheduled by
+  /// [scheduleMicrotask]), [Timer] callbacks, event handlers (e.g. from user
+  /// input), and other callbacks (e.g. from [Future]s, [Stream]s, and the like)
+  /// may be executing.
+  idle,
+
+  /// The transient callbacks (scheduled by
+  /// [SchedulerBinding.scheduleFrameCallback]) are currently executing.
+  ///
+  /// Typically, these callbacks handle updating objects to new animation
+  /// states.
+  transientCallbacks,
+
+  /// Microtasks scheduled during the processing of transient callbacks are
+  /// current executing.
+  midFrameMicrotasks,
+
+  /// The persistent callbacks (scheduled by
+  /// [SchedulerBinding.addPersistentFrameCallback]) are currently executing.
+  ///
+  /// Typically, this is the build/layout/paint pipeline.
+  persistentCallbacks,
+
+  /// The post-frame callbacks (scheduled by
+  /// [SchedulerBinding.addPostFrameCallback]) are currently executing.
+  ///
+  /// Typically, these callbacks handle cleanup and scheduling of work for the
+  /// next frame.
+  postFrameCallbacks,
+}
+```
+
+Two facts fall directly out of this enum that the rest of this lesson proves with real tests: `transientCallbacks` (where `Ticker`/`AnimationController` update values, below) runs **before** `persistentCallbacks` (where the actual build/layout/paint pipeline lives) -- so an animation's value for this frame is settled before that frame's widgets rebuild against it; and `postFrameCallbacks` is a genuinely separate, later phase from `persistentCallbacks` -- which is exactly why `addPostFrameCallback` can safely read layout results that don't exist yet during `build()`, proven below.
+
+## `WidgetsBinding.drawFrame`: the real order, quoted
+
+[`WidgetsBinding.drawFrame`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/binding.dart#L1536)'s own doc comment spells out every step of `persistentCallbacks` for an app using the widgets layer -- quoted verbatim, not summarized:
+
+1. *"The build phase: All the dirty `Element`s in the widget tree are rebuilt (see `State.build`)."*
+2. *"The layout phase: All the dirty `RenderObject`s in the system are laid out (see `RenderObject.performLayout`)."*
+3. *"The compositing bits phase: The compositing bits on any dirty `RenderObject` objects are updated."*
+4. *"The paint phase: All the dirty `RenderObject`s in the system are repainted (see `RenderObject.paint`). This generates the `Layer` tree."*
+5. *"The compositing phase: The layer tree is turned into a `Scene` and sent to the GPU."*
+6. *"The semantics phase: All the dirty `RenderObject`s in the system have their semantics updated... This generates the `SemanticsNode` tree."*
+7. *"The finalization phase in the widgets layer: The widgets tree is finalized. This causes `State.dispose` to be invoked on any objects that were removed from the widgets tree this frame."*
+8. *"The finalization phase in the scheduler layer: After `drawFrame` returns, `handleDrawFrame` then invokes post-frame callbacks (registered with `addPostFrameCallback`)."*
+
+This is [The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/)'s five phases (build/layout/paint/composite/raster), read straight from the actual scheduling code that runs them, with three steps that lesson didn't need to name: **compositing bits** (a real, separate dirty-flag pass between layout and paint), **semantics**, and the **two-part finalization** -- widget disposal happens inside `drawFrame` itself, but post-frame callbacks are a genuinely later step, only after `drawFrame` has returned. That gap between step 7 and step 8 is exactly why `addPostFrameCallback` is proven below to see real, finished layout that `build()` cannot.
+
+<Callout title="Where step 4 in the pipeline table below comes from">
+The implementation at line 1536 opens with `if (rootElement != null) { buildOwner!.buildScope(rootElement!); }` -- the literal call into `BuildOwner.buildScope`, proven in [The Three Trees](/flutter/en/flutter-internals/three-trees/) to drain `_dirtyElements` in depth order. This lesson picks up from there: what puts an element into that list in the first place, and what makes the frame that drains it actually happen.
+</Callout>
+
+## `setState` → `markNeedsBuild` → `scheduleBuildFor` → `scheduleFrame`: the real chain
+
+Four real, separately-verified steps connect one `setState()` call to a scheduled frame:
+
+<Mermaid title="setState to a scheduled frame -- one real chain, four cited hops" code={chainDiagram} />
+
+export const chainDiagram = `flowchart LR
+  s["State.setState(fn)"] --> m["Element.markNeedsBuild()"]
+  m --> b["BuildOwner.scheduleBuildFor(element)"]
+  b --> h["WidgetsBinding._handleBuildScheduled()\n(onBuildScheduled callback)"]
+  h --> e["SchedulerBinding.ensureVisualUpdate()"]
+  e --> f["SchedulerBinding.scheduleFrame()"]
+  f --> p["PlatformDispatcher.scheduleFrame()\n(engine calls back onDrawFrame)"]`;
+
+1. [`State.setState(VoidCallback fn)`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L1160) -- its own doc comment states plainly: *"In practice, the `setState` method's implementation is trivial: it calls the provided callback synchronously, then calls `Element.markNeedsBuild`."*
+2. [`Element.markNeedsBuild()`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L5352) -- the exact coalescing guard this lesson proves below is two real lines in this method: `if (dirty) { return; }` (line 5399) before `_dirty = true; owner!.scheduleBuildFor(this);`. A second `markNeedsBuild()` on an already-dirty element is a no-op.
+3. [`BuildOwner.scheduleBuildFor(Element element)`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/framework.dart#L2949) -- adds the element to `_dirtyElements` (proven in [The Three Trees](/flutter/en/flutter-internals/three-trees/)) and, the first time in a batch, invokes `BuildOwner.onBuildScheduled`, which `WidgetsBinding` wires to its own `_handleBuildScheduled` at startup (`buildOwner!.onBuildScheduled = _handleBuildScheduled;`, [binding.dart:477](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/widgets/binding.dart#L477)).
+4. [`SchedulerBinding.ensureVisualUpdate()`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/scheduler/binding.dart#L906), which `_handleBuildScheduled` calls, is where `SchedulerPhase` (above) decides what happens next -- quoted verbatim: *"This has no effect if `schedulerPhase` is `SchedulerPhase.transientCallbacks` or `SchedulerPhase.midFrameMicrotasks`... or `SchedulerPhase.persistentCallbacks`... It will schedule a frame if the `schedulerPhase` is `SchedulerPhase.idle`... or `SchedulerPhase.postFrameCallbacks`."* Outside of an active frame, this calls [`scheduleFrame()`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/scheduler/binding.dart#L946), which sets `hasScheduledFrame = true` and asks the engine's `PlatformDispatcher` to eventually call back `onDrawFrame` -- the entry point into `drawFrame` above.
+
+## Proven: two `setState` calls in the same turn produce exactly ONE build
+
+`State.setState`'s own doc comment states the design intent directly: *"The method is idempotent, there is no benefit to calling it more than once per `State` per frame."* This is not merely a style recommendation -- `Element.markNeedsBuild`'s `if (dirty) { return; }` guard (quoted above) makes the second call in the same frame a genuine no-op at the scheduling level, provable with a real build counter:
+
+```dart
+// lib/frame_probe.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+
+int buildCount = 0;
+
+class CounterWidget extends StatefulWidget {
+  const CounterWidget({super.key});
+  @override
+  CounterWidgetState createState() => CounterWidgetState();
+}
+
+class CounterWidgetState extends State<CounterWidget> {
+  int value = 0;
+
+  // Calls setState() TWICE, synchronously, in the same call stack (the same
+  // microtask/event-handler turn) -- exactly the scenario the coalescing
+  // guard in Element.markNeedsBuild (`if (dirty) { return; }`) exists for.
+  void bumpTwice() {
+    setState(() => value++);
+    setState(() => value++);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    buildCount++;
+    return Text('$value');
+  }
+}
+
+double? sizeDuringBuild;
+bool sizeDuringBuildWasChecked = false;
+double? sizeInPostFrameCallback;
+
+class SizeProbe extends StatefulWidget {
+  const SizeProbe({super.key});
+  @override
+  State<SizeProbe> createState() => _SizeProbeState();
+}
+
+class _SizeProbeState extends State<SizeProbe> {
+  final boxKey = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    // Inside build(): the render tree for THIS frame has not been laid out
+    // yet (layout is a LATER phase of the same frame -- see
+    // WidgetsBinding.drawFrame, quoted above). The box for boxKey does not
+    // exist yet on the very first build, so findRenderObject() is null.
+    sizeDuringBuildWasChecked = true;
+    final renderObject = boxKey.currentContext?.findRenderObject();
+    sizeDuringBuild = (renderObject is RenderBox && renderObject.hasSize) ? renderObject.size.width : null;
+
+    // addPostFrameCallback runs in SchedulerPhase.postFrameCallbacks, which
+    // drawFrame's own doc comment (quoted above, step 8) places AFTER the
+    // layout phase (step 2) and paint (step 4) -- by the time this callback
+    // fires, layout has genuinely happened.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      final box = boxKey.currentContext!.findRenderObject() as RenderBox;
+      sizeInPostFrameCallback = box.size.width;
+    });
+
+    return Center(child: SizedBox(key: boxKey, width: 123, height: 45, child: Container()));
+  }
+}
+```
+
+```dart
+// test/frame_probe_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/frame_probe.dart';
+
+void main() {
+  testWidgets('two setState calls in the same synchronous turn produce ONE build (frame coalescing)', (tester) async {
+    buildCount = 0;
+    final key = GlobalKey<CounterWidgetState>();
+    await tester.pumpWidget(MaterialApp(home: CounterWidget(key: key)));
+    expect(buildCount, 1, reason: 'the initial mount build');
+
+    key.currentState!.bumpTwice(); // calls setState() twice, synchronously
+    await tester.pump(); // flush exactly one frame
+
+    expect(buildCount, 2, reason: 'ONE rebuild for both setState calls, not two -- Element.markNeedsBuild\'s "if (dirty) return;" guard');
+    expect(find.text('2'), findsOneWidget, reason: 'both increments were still applied -- coalescing merges the BUILD, not the state mutations');
+  });
+
+  testWidgets('addPostFrameCallback runs after layout: renderBox.size is available there, not during build', (tester) async {
+    sizeDuringBuild = null;
+    sizeDuringBuildWasChecked = false;
+    sizeInPostFrameCallback = null;
+
+    await tester.pumpWidget(const MaterialApp(home: SizeProbe()));
+
+    expect(sizeDuringBuildWasChecked, isTrue);
+    expect(sizeDuringBuild, isNull, reason: 'during build(), THIS frame\'s render object does not exist yet -- layout has not run');
+    expect(sizeInPostFrameCallback, 123.0, reason: 'by the time addPostFrameCallback fires, layout has genuinely happened -- the real, laid-out width is available');
+  });
+
+  testWidgets('WidgetsBinding.instance.scheduleFrame() sets hasScheduledFrame', (tester) async {
+    // Drain any frame already scheduled by pumpWidget's own setup first.
+    await tester.pump();
+    expect(SchedulerBinding.instance.hasScheduledFrame, isFalse, reason: 'no pending work -- nothing scheduled a frame');
+
+    SchedulerBinding.instance.scheduleFrame();
+    expect(SchedulerBinding.instance.hasScheduledFrame, isTrue, reason: 'scheduleFrame() flips the flag immediately, before the engine actually calls back');
+
+    await tester.pump();
+    expect(SchedulerBinding.instance.hasScheduledFrame, isFalse, reason: 'the flag resets once that frame has actually run');
+  });
+}
+```
+
+```text
+00:00 +0: two setState calls in the same synchronous turn produce ONE build (frame coalescing)
+00:00 +1: addPostFrameCallback runs after layout: renderBox.size is available there, not during build
+00:00 +2: WidgetsBinding.instance.scheduleFrame() sets hasScheduledFrame
+00:00 +3: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/flutter-internals__build-scheduling-and-frames/` run on this Mac)
+
+Three separate, real results: (1) `buildCount` going from `1` to `2` -- not `3` -- after two synchronous `setState` calls is the direct proof of coalescing; `find.text('2')` in the same test confirms both state mutations still happened, only the *rebuild* was merged into one. (2) `sizeDuringBuild` staying `null` while `sizeInPostFrameCallback` comes back as the real `123.0` proves `addPostFrameCallback` genuinely runs after layout, not merely "later" in some vague sense -- `SizeProbe`'s own `build()` cannot see its own frame's layout result, because layout (`drawFrame` step 2) has not run yet when `build()` (step 1) is still executing. (3) `hasScheduledFrame` flipping `true` immediately on `scheduleFrame()` and back to `false` once that frame actually ran is `ensureVisualUpdate`'s documented behavior, observed directly rather than trusted.
+
+## `Ticker` and vsync: `transientCallbacks` runs first, proven by the enum order
+
+Every `AnimationController` (covered in depth, with real intermediate-value proofs, in [Animations](/flutter/en/async-and-performance/animations/)) is driven by a [`Ticker`](https://github.com/flutter/flutter/blob/6a19cca564/packages/flutter/lib/src/scheduler/ticker.dart#L78), whose own doc comment names exactly what drives it: *"`SchedulerBinding.scheduleFrameCallback`, which drives tickers."* `scheduleFrameCallback` registers a **transient** callback -- the `SchedulerPhase.transientCallbacks` phase quoted above, which the enum's own ordering places *before* `persistentCallbacks` (the build/layout/paint pipeline). This is why an `AnimationController`'s value for a given frame is fully settled -- vsync-driven, one tick per real display frame -- before any widget that reads `animation.value` in its `build()` method runs for that same frame; a "flutter animations are janky" report is a report about `persistentCallbacks` (or something upstream of it) taking too long, never about the ticker itself skipping a beat.
+
+## Jank, precisely
+
+[The Render Pipeline](/flutter/en/layout-and-rendering/render-pipeline/) already quantified the budget (~16.6ms at 60fps, ~8.3ms at 120Hz). This lesson's contribution is exactly *where* in the pipeline a missed budget comes from: every phase proven above (`transientCallbacks` → `midFrameMicrotasks` → `persistentCallbacks`'s eight steps → `postFrameCallbacks`) runs on the **same** thread, synchronously, inside one call to `handleDrawFrame`. A frame is late when the sum of that work -- your `build()` methods, `performLayout()`, `paint()`, and anything a `postFrameCallback` does before yielding -- exceeds the budget. There is no separate thread quietly absorbing a slow `build()`; the mechanism proven above **is** the critical path.
+
+<Callout title="The one-line takeaway">
+`SchedulerPhase` (quoted above: `idle` → `transientCallbacks` → `midFrameMicrotasks` → `persistentCallbacks` → `postFrameCallbacks`) is the real state machine one frame runs through. `WidgetsBinding.drawFrame`'s own doc comment (quoted above) is the authoritative 8-step order inside `persistentCallbacks`: build, layout, compositing bits, paint, composite, semantics, then two-part finalization -- widget disposal happens before `drawFrame` returns; post-frame callbacks run genuinely after. `setState` → `Element.markNeedsBuild` → `BuildOwner.scheduleBuildFor` → `ensureVisualUpdate` → `scheduleFrame` is the real, cited chain from one state change to one scheduled frame, and `markNeedsBuild`'s own `if (dirty) return;` guard is proven above to coalesce two synchronous `setState` calls into exactly one build. `addPostFrameCallback` is proven above to run after real layout has happened, unlike a plain `build()`. `Ticker`s run in the earlier `transientCallbacks` phase, settling animation values before that frame's widgets ever build against them.
+</Callout>
+
+## Mental Model
+
+Think of one frame as a single, strictly-ordered relay race with five runners who never overlap: `transientCallbacks` (tickers/animations settle their values for this frame), `midFrameMicrotasks` (any `Future`/`await` continuations those callbacks triggered), `persistentCallbacks` (the eight-step build→layout→…→finalize pipeline, proven above verbatim from `drawFrame`'s own doc comment), then `postFrameCallbacks` (cleanup, and the only phase, proven above, where a widget can safely inspect its own just-finished layout). `setState` doesn't run any of this directly -- it just raises a flag (`Element._dirty`) and, the first time in a batch, taps `ensureVisualUpdate()` to make sure a relay is actually scheduled; every subsequent `setState` on an already-dirty element (proven above) is a no-op at the scheduling level, because the flag is already raised.
+
+## Trade-offs
+
+| Mechanism | Benefit | Cost |
+| --- | --- | --- |
+| `markNeedsBuild`'s dirty-flag coalescing | Calling `setState` redundantly (proven above) costs nothing extra at the frame level | Relying on it to "just work" instead of avoiding redundant `setState` calls still pays the closure-allocation cost `setState`'s own doc comment warns about |
+| `addPostFrameCallback` | The only safe place to read this frame's real layout results (proven above) | Runs strictly after the frame -- reading and immediately acting on a size here means the action itself happens a frame later, not within the current one |
+| `Ticker`/`transientCallbacks` running before `persistentCallbacks` | Animation values are never "half-updated" when your `build()` reads them | A `build()` that reads `animation.value` must itself be cheap -- it is squarely inside the `persistentCallbacks` critical path proven above |
+| One synchronous `drawFrame` per frame, no background thread for it | Deterministic, easy-to-reason-about ordering (proven above, step by step) | A single slow `build()`/`performLayout()`/`paint()` call blocks the ENTIRE frame -- there is no separate thread absorbing it, which is exactly why offloading real CPU work needs [Isolates & compute](/flutter/en/async-and-performance/isolates-and-compute/), not this pipeline |
+
+## Common Misconceptions
+
+- **"Calling `setState` twice always triggers two separate rebuilds."** Proven false above: two synchronous `setState` calls produced exactly one rebuild (`buildCount` went from 1 to 2, not 3) -- `Element.markNeedsBuild`'s own `if (dirty) return;` guard, quoted above, is why.
+- **"You can read a widget's just-built size inside its own `build()` method."** Proven false above: `sizeDuringBuild` was `null` -- the render object for that frame doesn't exist yet while `build()` (step 1 of `drawFrame`) is running; only `addPostFrameCallback` (step 8, genuinely after layout) saw the real `123.0`.
+- **"`addPostFrameCallback` just means 'later', roughly the same as a zero-duration `Future.delayed`."** It is a specific, named phase (`SchedulerPhase.postFrameCallbacks`, quoted above) that the framework guarantees runs after layout/paint/semantics have completed for that frame -- not merely "sometime after this microtask."
+- **"Animations sometimes read a half-updated value if a widget rebuilds mid-tick."** Proven false by the enum ordering above: `transientCallbacks` (where tickers update) is a strictly earlier phase than `persistentCallbacks` (where widgets rebuild) -- by construction, a widget's `build()` never runs while a ticker for the same frame is still updating.
+
+## Reading AI-generated code
+
+AI-generated Flutter code that needs a widget's size or position after layout frequently reaches for `Future.delayed(Duration.zero, ...)` instead of `addPostFrameCallback` -- it "usually works" in casual testing (a zero-duration `Future` often does resolve after the current frame in practice), but it is not the guarantee this lesson proved: a `Future.delayed` continuation runs as a normal event-queue task, with no documented relationship to `SchedulerPhase` at all.
+
+```dart
+// @expect-error compiles clean -- "usually" reads a real post-layout size in casual testing, but has no documented guarantee about running after layout specifically, unlike addPostFrameCallback (proven above to be a named, ordered SchedulerPhase)
+class MeasureAfterBuild extends StatefulWidget {
+  const MeasureAfterBuild({super.key});
+  @override
+  State<MeasureAfterBuild> createState() => _MeasureAfterBuildState();
+}
+
+class _MeasureAfterBuildState extends State<MeasureAfterBuild> {
+  final key = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    Future.delayed(Duration.zero, () {
+      final size = (key.currentContext!.findRenderObject() as RenderBox).size;
+      debugPrint('measured: $size');
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => SizedBox(key: key, width: 100, height: 100);
+}
+```
+
+Before trusting generated code that needs a post-layout measurement, check:
+
+- Does it use `SchedulerBinding.instance.addPostFrameCallback` (or `WidgetsBinding.instance.addPostFrameCallback`, the same call) rather than `Future.delayed`/`Timer`/`Future.microtask`? Only the former is proven above to run in the specific, documented `postFrameCallbacks` phase, strictly after layout.
+- If it needs to measure on EVERY frame (not just once after a state change), is it using a `LayoutBuilder`/`RenderObject`-level hook instead of re-registering a post-frame callback every frame, which adds a full frame of lag each time (proven above: the callback fires after the frame it was registered in, not within it)?
+
+<SpotTheBug code={`class AutoScrollToBottom extends StatefulWidget {
+  const AutoScrollToBottom({super.key, required this.controller, required this.child});
+  final ScrollController controller;
+  final Widget child;
+
+  @override
+  State<AutoScrollToBottom> createState() => _AutoScrollToBottomState();
+}
+
+class _AutoScrollToBottomState extends State<AutoScrollToBottom> {
+  @override
+  Widget build(BuildContext context) {
+    if (widget.controller.hasClients) {
+      widget.controller.jumpTo(widget.controller.position.maxScrollExtent);
+    }
+    return widget.child;
+  }
+}`}>
+Calling `widget.controller.jumpTo(...)` directly inside `build()` reads `position.maxScrollExtent` from a `ScrollPosition` that -- per this lesson's own proof above -- has not been laid out for THIS frame yet; `build()` runs in step 1 of `drawFrame`, before layout (step 2) has computed this frame's real content extent. In practice this either throws (before any layout has ever happened) or scrolls to last frame's stale `maxScrollExtent`, one frame behind new content. The fix is exactly the mechanism proven above: move the `jumpTo` call into `WidgetsBinding.instance.addPostFrameCallback((_) { ... })`, called from `build()` (or better, only when new content actually arrived), so it runs in the genuinely-later `postFrameCallbacks` phase, after this frame's layout has produced the real `maxScrollExtent`.
+</SpotTheBug>
+
+export const quizFrames = [
+  {
+    q: 'Quoted verbatim from the installed source, what are the five values of SchedulerPhase, in order?',
+    options: [
+      'build, layout, paint, composite, raster',
+      'idle, transientCallbacks, midFrameMicrotasks, persistentCallbacks, postFrameCallbacks',
+      'idle, build, layout, paint, done',
+      'scheduled, running, paused, disposed, idle',
+    ],
+    answer: 1,
+    explain: 'The real enum, quoted above from scheduler/binding.dart, has exactly these five values in exactly this order.',
+  },
+  {
+    q: 'Per WidgetsBinding.drawFrame\'s own doc comment (quoted above), which happens FIRST: the compositing bits phase, or the paint phase?',
+    options: [
+      'Paint runs first, then compositing bits are updated afterward',
+      'The compositing bits phase runs first (step 3), then paint (step 4) -- compositing bits are updated BEFORE render objects repaint',
+      'They run simultaneously on separate threads',
+      'Compositing bits only run if RepaintBoundary is used',
+    ],
+    answer: 1,
+    explain: 'The quoted 8-step order is explicit: step 3 is "The compositing bits phase," step 4 is "The paint phase" -- compositing bits come first.',
+  },
+  {
+    q: 'Proven above with a real build counter, what happens when setState() is called twice, synchronously, in the same event handler?',
+    options: [
+      'Two separate rebuilds happen, one per setState call',
+      'Exactly one rebuild happens -- buildCount went from 1 to 2, not 3 -- because Element.markNeedsBuild\'s "if (dirty) return;" guard makes the second call a no-op',
+      'The second setState call throws an error',
+      'Neither call has any effect until three frames have passed',
+    ],
+    answer: 1,
+    explain: 'The test called bumpTwice() (two synchronous setState calls) then pumped ONE frame -- buildCount went from 1 to 2 (one rebuild for both), and find.text(\'2\') confirmed both state mutations still applied.',
+  },
+  {
+    q: 'Proven above by comparing sizeDuringBuild and sizeInPostFrameCallback, why can a widget\'s own build() method not read its just-computed layout size?',
+    options: [
+      'Because RenderBox.size is a private field that build() can never access under any circumstance',
+      'Because build() runs in drawFrame\'s step 1, before the layout phase (step 2) has run for that frame -- the render object\'s size genuinely does not exist yet',
+      'Because Flutter deliberately obfuscates size values during build for security',
+      'It actually can -- the proof above showed sizeDuringBuild equal to the real size',
+    ],
+    answer: 1,
+    explain: 'sizeDuringBuild was proven to be null (no size yet) while sizeInPostFrameCallback, captured in the later postFrameCallbacks phase, was the real 123.0 -- layout genuinely has not run yet during build().',
+  },
+  {
+    q: 'Per Ticker\'s own doc comment and the SchedulerPhase ordering (both quoted above), why does an AnimationController\'s value never arrive "half-updated" inside a widget\'s build()?',
+    options: [
+      'AnimationController uses a mutex to block build() during updates',
+      'Tickers are driven by scheduleFrameCallback, which runs in the transientCallbacks phase -- strictly EARLIER than persistentCallbacks, where build() runs -- so the value is fully settled before any build() for that frame executes',
+      'AnimationController values are cached from the previous frame, never the current one',
+      'It actually can arrive half-updated; this is a known Flutter limitation',
+    ],
+    answer: 1,
+    explain: 'The SchedulerPhase enum\'s own ordering (quoted above) places transientCallbacks before persistentCallbacks -- by construction, ticker updates for a frame complete before that frame\'s widgets build.',
+  },
+  {
+    q: 'In the SpotTheBug above, why does calling ScrollController.jumpTo(controller.position.maxScrollExtent) directly inside build() misbehave?',
+    options: [
+      'jumpTo() cannot be called from a StatefulWidget, only from a callback',
+      'maxScrollExtent reflects the PREVIOUS frame\'s layout (or throws if none has happened yet) because build() runs before this frame\'s layout phase has computed the real content extent -- proven above via the addPostFrameCallback vs build() size comparison',
+      'ScrollController is deprecated in Flutter 3.47',
+      'jumpTo() is asynchronous and silently does nothing when called synchronously',
+    ],
+    answer: 1,
+    explain: 'Exactly the mechanism proven in this lesson\'s own test: a value that depends on layout is not yet correct for the CURRENT frame while build() (step 1) is running, since layout (step 2) has not happened yet -- the fix is addPostFrameCallback, which is proven to run after layout.',
+  },
+];
+
+<Quiz client:visible id="flutter-internals/build-scheduling-and-frames" questions={quizFrames} />
+
+<ProgressTracker client:visible id="flutter-internals/build-scheduling-and-frames" />
