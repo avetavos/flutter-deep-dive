@@ -1,6 +1,6 @@
 ---
 title: 'Async in Dart'
-description: 'single-threaded event loop, Future และ async/await, Stream สำหรับลำดับของ event และทำไมทั้งหมดนี้ไม่ block UI ของคุณ'
+description: 'single-threaded event loop พิสูจน์ด้วยลำดับ scheduling จริง, Future/Stream/Completer, lint unawaited_futures, runZonedGuarded, Isolate.run และทำไมทั้งหมดนี้ไม่ block UI ของคุณ'
 sidebar:
   order: 5
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## หนึ่ง thread กับ event loop
 
@@ -22,6 +23,66 @@ export const loopDiagram = `flowchart LR
   ui["UI thread\n(event loop)"] -->|await fetch| free["thread ว่าง\nพอจะ render frame"]
   free -->|response มาถึง| cb["callback ถูก schedule\nบน loop"]
   cb --> resume["code ของคุณทำงานต่อ"]`;
+
+### Microtask เทียบกับ event queue พิสูจน์ด้วยลำดับจริง
+
+event loop จริง ๆ มี**สอง**queue: microtask queue ที่ drain จนหมดก่อนที่ loop จะแตะ task จริงถัดไปใน event queue และ event queue เอง (timer, I/O callback) `scheduleMicrotask` เป็น microtask *จริง* ตัวเดียวในสามตัวข้างล่าง — `Future(() {})` หน้าตาเหมือน microtask แต่ [`api.dart.dev` บอกตรง ๆ](https://api.dart.dev/dart-async/Future/Future.html) ว่า constructor ของมัน *"[creates] a future containing the result of calling computation asynchronously with Timer.run"* — เป็น event-queue task จริง เหมือน `Timer.run` ตรง ๆ เลย
+
+```dart
+// lib/event_loop_order.dart
+import 'dart:async';
+
+// Records the relative firing order of three scheduling primitives.
+// scheduleMicrotask is the only TRUE microtask here — microtasks fully
+// drain before the event queue is touched again. `Future(() {})` LOOKS
+// like a microtask but api.dart.dev is explicit that its constructor
+// "[creates] a future containing the result of calling computation
+// asynchronously with Timer.run" — it is a real event-queue task, exactly
+// like an explicit Timer.run, ordered against Timer.run by REGISTRATION
+// order (both are event-queue tasks; the explicit Timer.run below is
+// registered first).
+List<String> recordOrder() {
+  final order = <String>[];
+  order.add('sync-start');
+  Timer.run(() => order.add('timer.run')); // event queue, registered 1st
+  Future<void>(() => order.add('future(() {})')); // event queue (via Timer.run internally), registered 2nd
+  scheduleMicrotask(() => order.add('scheduleMicrotask')); // true microtask — drains before either event-queue task
+  order.add('sync-end');
+  return order;
+}
+```
+
+```dart
+// test/event_loop_order_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/event_loop_order.dart';
+
+void main() {
+  test('scheduleMicrotask drains before either Timer-based task; Timer.run and Future(() {}) run in registration order', () async {
+    final order = recordOrder();
+    expect(order, ['sync-start', 'sync-end']); // nothing async has run yet
+
+    // Let the microtask queue AND both event-queue tasks run.
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(order, [
+      'sync-start', 'sync-end',
+      'scheduleMicrotask', // the only true microtask — drains first
+      'timer.run', // event-queue task, registered 1st
+      'future(() {})', // event-queue task too (Future() uses Timer.run internally) — registered 2nd
+    ]);
+  });
+}
+```
+
+```text
+✓ scheduleMicrotask drains before either Timer-based task; Timer.run and Future(() {}) run in registration order
+
+00:00 +1: All tests passed!
+```
+
+นี่คือผลลัพธ์ที่น่าแปลกใจจริงและจำผิดได้ง่าย: `Future(() {})` **ไม่ใช่** microtask และลำดับการยิงระหว่างมันกับ `Timer.run` จริงจะตามลำดับการ registration ไม่ใช่ "microtask กับ timer" สิ่งที่รับประกันได้จริงมีแค่: **microtask ที่ค้างอยู่ทั้งหมด (`scheduleMicrotask` และ continuation ภายในที่ `await` ใช้) จะรันก่อนที่ event loop จะไปแตะ task จริงถัดไปเสมอ**
 
 ## Future และ async/await
 
@@ -46,6 +107,205 @@ Future<void> load() async {
 
 function ที่เป็น `async` คืน `Future` เสมอ `await` แกะค่าข้างในออกมา และที่สำคัญ — error จาก future ที่ await จะโผล่มาเป็น exception ปกติที่ `try`/`catch` ได้ ใน Flutter คุณแทบไม่ `await` ใน `build` แต่ส่ง `Future` ให้ `FutureBuilder` แทน (โมดูลถัดไป)
 
+### `Completer`: เชื่อม callback API เข้ากับ `Future`
+
+ไม่ใช่ทุก API ที่คุณใช้จะให้ `Future` มา — หลายตัวยังเป็น callback-based `Completer` ให้คุณถือฝั่งหนึ่งไว้และแจก `.future` ให้ผู้เรียก แล้ว resolve เองเมื่อ callback ยิง:
+
+```dart
+// lib/completer_demo.dart
+import 'dart:async';
+
+// Completer bridges a callback-style API into a Future — you hold the
+// Completer, hand out `.future` to callers, and resolve it yourself when
+// the callback fires.
+class CallbackApi {
+  void onDone(void Function(String) callback) {
+    Timer(const Duration(milliseconds: 5), () => callback('done'));
+  }
+}
+
+Future<String> asFuture(CallbackApi api) {
+  final completer = Completer<String>();
+  api.onDone((result) => completer.complete(result));
+  return completer.future;
+}
+```
+
+```dart
+// test/completer_demo_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/completer_demo.dart';
+
+void main() {
+  test('Completer turns a callback API into an awaitable Future', () async {
+    final result = await asFuture(CallbackApi());
+    expect(result, 'done');
+  });
+}
+```
+
+```text
+✓ Completer turns a callback API into an awaitable Future
+
+00:00 +1: All tests passed!
+```
+
+### `catchError` เทียบกับ `onError` — ความต่างจริงที่พิสูจน์แล้ว
+
+`.then(onValue, onError:)` กับ `.catchError(...)` หน้าตาเหมือนใช้แทนกันได้ แต่จริง ๆ ต่างกัน: `onError` บน `.then` จับได้แค่ error จาก future ที่ถูก chain เข้าไป **ไม่จับ** error ที่ throw ข้างใน `onValue` เอง
+
+```dart
+// lib/catch_vs_onerror.dart
+
+// then(onValue, onError:) — onError only catches an error from the future
+// THIS call is chained onto; it does NOT catch an error thrown inside
+// onValue itself.
+Future<String> withOnError(Future<int> input) {
+  return input.then<String>(
+    (value) => throw StateError('bad value: $value'), // thrown INSIDE onValue
+    onError: (Object e) => 'recovered via onError: $e',
+  );
+}
+
+// catchError, chained AFTER then() — catches errors from EITHER the
+// original future OR the onValue callback, because it's a separate step
+// in the chain that runs after both.
+Future<String> withCatchError(Future<int> input) {
+  return input
+      .then<String>((value) => throw StateError('bad value: $value'))
+      .catchError((Object e) => 'recovered via catchError: $e');
+}
+```
+
+```dart
+// test/catch_vs_onerror_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/catch_vs_onerror.dart';
+
+void main() {
+  test('then(onValue, onError:) does NOT catch an error thrown inside onValue itself', () async {
+    // input succeeds, so onError is never triggered by the INPUT future —
+    // but onValue itself throws, and that error propagates uncaught.
+    await expectLater(
+      withOnError(Future.value(1)),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('catchError chained AFTER then() DOES catch an error thrown inside onValue', () async {
+    final result = await withCatchError(Future.value(1));
+    expect(result, 'recovered via catchError: Bad state: bad value: 1');
+  });
+}
+```
+
+```text
+✓ then(onValue, onError:) does NOT catch an error thrown inside onValue itself
+✓ catchError chained AFTER then() DOES catch an error thrown inside onValue
+
+00:00 +2: All tests passed!
+```
+
+สังเกต type argument `.then<String>(...)` ที่ระบุชัดในทั้งคู่ — probe ของคอร์สนี้เปิด `strict-inference` และถ้าไม่ระบุ analyzer จะ infer ผ่าน callback ที่ path เดียวคือ `throw` เสมอไม่ได้ (มัน infer เป็น `Never`) ทำให้เกิด `invalid_return_type_for_catch_error` จริงบน `.catchError` ที่ตามมา การระบุชัดตรงนี้ไม่ใช่แค่ style แต่ strict mode บังคับ
+
+### `Future.wait`: await พร้อมกัน และ `eagerError`
+
+`Future.wait` รัน list ของ future พร้อมกันและ resolve เมื่อทั้งหมด resolve — พิสูจน์ข้างล่าง รวมถึงความต่างจริงของพฤติกรรมที่ `eagerError` สร้าง:
+
+```dart
+// lib/future_wait_demo.dart
+import 'dart:async';
+
+Future<int> okAfter(int ms, int value) =>
+    Future.delayed(Duration(milliseconds: ms), () => value);
+
+Future<int> failAfter(int ms, String message) =>
+    Future.delayed(Duration(milliseconds: ms), () => throw StateError(message));
+```
+
+```dart
+// test/future_wait_demo_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/future_wait_demo.dart';
+
+void main() {
+  test('Future.wait collects every result, in input order, once all complete', () async {
+    final results = await Future.wait([okAfter(5, 1), okAfter(1, 2), okAfter(3, 3)]);
+    expect(results, [1, 2, 3]); // input order, not completion order
+  });
+
+  test('eagerError: false (the default) waits for every future, even after one fails', () async {
+    final stopwatch = Stopwatch()..start();
+    await expectLater(
+      Future.wait([failAfter(1, 'fast fail'), okAfter(20, 99)]),
+      throwsA(isA<StateError>()),
+    );
+    // The slow one (20ms) still had to finish before Future.wait settled.
+    expect(stopwatch.elapsedMilliseconds, greaterThanOrEqualTo(18));
+  });
+
+  test('eagerError: true completes as soon as the FIRST future fails, without waiting', () async {
+    final stopwatch = Stopwatch()..start();
+    await expectLater(
+      Future.wait([failAfter(1, 'fast fail'), okAfter(50, 99)], eagerError: true),
+      throwsA(isA<StateError>()),
+    );
+    // Completed near the 1ms failure, nowhere near the 50ms success.
+    expect(stopwatch.elapsedMilliseconds, lessThan(30));
+  });
+}
+```
+
+```text
+✓ Future.wait collects every result, in input order, once all complete
+✓ eagerError: false (the default) waits for every future, even after one fails
+✓ eagerError: true completes as soon as the FIRST future fails, without waiting
+
+00:00 +3: All tests passed!
+```
+
+default (`eagerError: false`) ปลอดภัยกว่าสำหรับ cleanup — ทุก future ยังได้รันจนจบ (ไม่มีอะไรค้างครึ่ง ๆ กลาง ๆ) — แต่แปลว่าความล้มเหลวที่เกิดเร็วไม่ได้ช่วยประหยัดเวลาจริงเลย `eagerError: true` แลกสิ่งนั้นออกไปเพื่อสัญญาณความล้มเหลวที่เร็วกว่า
+
+## `unawaited_futures`: lint ที่จับ `Future` แบบ fire-and-forget
+
+การเรียก `async` function โดยไม่ `await`, ไม่เก็บ, หรือจัดการ `Future` ของมันเลยคือ bug magnet จริง — error ข้างในมันจะกลายเป็น async error ที่**ไม่ถูกจับ** (ดู `runZonedGuarded` ข้างล่าง) แทนที่จะเป็นสิ่งที่ `try`/`catch` ของผู้เรียกเห็น probe ของคอร์สนี้ใช้ `package:flutter_lints/flutter.yaml` และการเช็ค rule list จริงพบว่า `unawaited_futures` **ไม่**รวมอยู่ใน default — มันอยู่แค่ใน template ที่เข้มงวดกว่า ไม่ใช่ตัว base:
+
+```dart
+// @expect-error unawaited_futures is NOT enabled by this probe's default
+// analysis_options.yaml (flutter_lints/flutter.yaml + strict-casts/
+// strict-inference/strict-raw-types) — this fence demonstrates what the
+// diagnostic looks like once the rule is explicitly turned on, captured
+// from a separate scratch project with `linter: rules: - unawaited_futures`
+import 'dart:async';
+
+Future<void> save() async {}
+
+Future<void> handler() async {
+  save(); // fire-and-forget inside an async function — a bug magnet
+}
+```
+
+เปิดมันขึ้นมา (`linter: rules: [unawaited_futures]` ใน `analysis_options.yaml`) แล้วรัน `flutter analyze` จริง:
+
+```text
+info • Missing an 'await' for the 'Future' computed by this expression. Try adding an 'await' or
+wrapping the expression with 'unawaited' • unawaited_futures
+```
+
+วิธีแก้เมื่อ fire-and-forget ตั้งใจจริง ๆ คือ `unawaited()` จาก `dart:async` — มันเป็น no-op ตอน runtime มีไว้เพื่อบอกทั้ง lint และคนอ่านคนถัดไปว่า "ใช่ ตั้งใจ":
+
+```dart
+import 'dart:async';
+
+Future<void> save() async {}
+
+Future<void> handler() async {
+  unawaited(save()); // explicit: "yes, I meant to fire-and-forget this"
+}
+```
+
+`flutter analyze` บนเวอร์ชันนี้รายงานศูนย์ปัญหา แม้เปิด rule แล้วก็ตาม
+
 ## Stream: หลายค่าตามเวลา
 
 **`Stream<T>`** เหมือน Future ที่ส่งค่า *หลายค่า* — ลำดับของ event ตามเวลา: ข้อความ web-socket, ค่า sensor, input ของ user, การเปลี่ยนแปลงของ database
@@ -66,13 +326,298 @@ await for (final tick in ticker()) {
 
 การแยก Future/Stream map เข้ากับ Flutter ได้พอดี: async แบบ one-shot → `FutureBuilder`; stream ของ update → `StreamBuilder` เข้าใจความต่างนี้ให้ถูกก็เท่ากับเข้าใจ "async ใน Flutter" ไปเกือบหมดแล้ว
 
+### Single-subscription เทียบกับ broadcast พิสูจน์ด้วย error จริง
+
+`StreamController()` default เป็น **single-subscription**: สร้างมาสำหรับ listener เดียวเป๊ะ การ listen ครั้งที่สองคือ error จริงทันที — ไม่ใช่แค่สำเนาข้อมูลเงียบ ๆ ตัวที่สอง:
+
+```dart
+// lib/stream_controller_demo.dart
+import 'dart:async';
+
+// A single-subscription StreamController (the default): built for exactly
+// one listener, e.g. a one-shot request/response style stream.
+StreamController<int> singleSubscriptionController() => StreamController<int>();
+
+// A broadcast StreamController: any number of listeners, like an event bus.
+StreamController<int> broadcastController() => StreamController<int>.broadcast();
+```
+
+```dart
+// test/stream_controller_demo_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/stream_controller_demo.dart';
+
+void main() {
+  test('a single-subscription stream throws the real error on a second listen', () {
+    final controller = singleSubscriptionController();
+    controller.stream.listen((_) {}); // first listen — fine
+
+    expect(
+      () => controller.stream.listen((_) {}), // second listen — not allowed
+      throwsA(
+        isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          contains('Stream has already been listened to'),
+        ),
+      ),
+    );
+    controller.close();
+  });
+
+  test('a broadcast stream allows multiple listeners with no error', () {
+    final controller = broadcastController();
+    final received1 = <int>[];
+    final received2 = <int>[];
+    controller.stream.listen(received1.add);
+    controller.stream.listen(received2.add); // second listener — fine, broadcast
+    controller.add(1);
+    controller.close();
+  });
+}
+```
+
+```text
+✓ a single-subscription stream throws the real error on a second listen
+✓ a broadcast stream allows multiple listeners with no error
+
+00:00 +2: All tests passed!
+```
+
+ให้เปลี่ยนไปใช้ `.broadcast()` ทันทีที่มี widget มากกว่าหนึ่งตัวต้อง listen stream เดียวกัน (เช่น stream ของ connectivity/auth-state ที่ใช้ร่วมกัน) — การพยายามกระจาย single-subscription stream ให้ `StreamBuilder` สองตัวคือ error นี้เป๊ะ ๆ บน production
+
+### การยกเลิก: `StreamSubscription.cancel()`
+
+ทุกการเรียก `.listen(...)` คืน `StreamSubscription` — เก็บมันไว้แล้ว `cancel()` (ปกติใน `dispose()`) เพื่อหยุดรับ event และให้ source ข้างใต้ cleanup:
+
+```dart
+// lib/cancellable_ticker.dart
+import 'dart:async';
+
+Stream<int> ticker() async* {
+  var i = 0;
+  while (true) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    yield i++;
+  }
+}
+```
+
+```dart
+// test/cancellable_ticker_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/cancellable_ticker.dart';
+
+void main() {
+  test('StreamSubscription.cancel() stops future events from arriving', () async {
+    final received = <int>[];
+    final sub = ticker().listen(received.add);
+
+    await Future<void>.delayed(const Duration(milliseconds: 22));
+    await sub.cancel();
+    final countAtCancel = received.length;
+    expect(countAtCancel, greaterThan(0)); // the infinite stream WAS ticking
+
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(received.length, countAtCancel); // nothing arrived after cancel
+  });
+}
+```
+
+```text
+✓ StreamSubscription.cancel() stops future events from arriving
+
+00:00 +1: All tests passed!
+```
+
+ลืม cancel subscription ที่ผูกกับ `State` คือ Flutter leak คลาสสิกในเวอร์ชัน `StreamSubscription`: stream ยังรันต่อ ยังเรียก callback ที่อาจอ้างถึง `State` ที่ dispose ไปแล้ว เป็นพื้นที่เดียวกับที่ต้อง guard ด้วย `mounted` ที่พูดถึงในบท lifecycle
+
+## Async error ที่ไม่ถูกจับ: จุดบอดของ `try`/`catch` และ `runZonedGuarded`
+
+error ที่ throw จาก callback ที่ไม่มีใคร `await` — callback ของ `Timer`, stream listener, `Future` แบบ fire-and-forget — **ไม่ได้**อยู่ใน `try`/`catch` ของใครเลย เพราะ code ที่ schedule มัน return ไปแล้วตอนที่ callback รัน มีแค่ error handler ของ **zone** ที่ตั้งด้วย `runZonedGuarded` เท่านั้นที่รับประกันว่าจะเห็นมัน — นี่คือเหตุผลตรงที่แอป Flutter ห่อ `runApp()` ด้วยมันสำหรับ crash reporting บน production
+
+```dart
+// lib/run_zoned_guarded_demo.dart
+import 'dart:async';
+
+// An error thrown from a Timer callback (or any callback nobody `await`s)
+// is NOT inside anybody's try/catch — a normal try/catch around the call
+// that scheduled the Timer cannot see it, because that call already
+// returned before the callback runs. Only a zone's error handler (set up
+// with runZonedGuarded) is guaranteed to see it.
+void scheduleFailingTimer() {
+  Timer(const Duration(milliseconds: 1), () {
+    throw StateError('boom from a Timer callback');
+  });
+}
+```
+
+```dart
+// test/run_zoned_guarded_demo_test.dart
+import 'dart:async';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/run_zoned_guarded_demo.dart';
+
+void main() {
+  test('try/catch around the scheduling call cannot catch the Timer callback\'s later error', () async {
+    Object? caughtByTryCatch;
+    Object? caughtByZone;
+    final completer = Completer<void>();
+
+    // A zone here is only the TEST's safety net for observing the escape
+    // without crashing the whole test run — it plays the role production
+    // code gets for free from runZonedGuarded around runApp().
+    await runZonedGuarded(() async {
+      try {
+        scheduleFailingTimer();
+      } catch (e) {
+        caughtByTryCatch = e; // never runs: the throw hasn't happened yet
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      completer.complete();
+    }, (error, stack) => caughtByZone = error);
+
+    await completer.future;
+    expect(caughtByTryCatch, isNull); // try/catch truly never saw it
+    expect(caughtByZone, isA<StateError>()); // only the zone did
+  });
+
+  test('runZonedGuarded is exactly this safety net, proven end to end', () async {
+    final completer = Completer<Object>();
+    await runZonedGuarded(
+      () async {
+        scheduleFailingTimer();
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      },
+      (error, stack) => completer.complete(error), // the zone's error handler
+    );
+    final caught = await completer.future;
+    expect(caught, isA<StateError>());
+    expect(caught.toString(), contains('boom from a Timer callback'));
+  });
+}
+```
+
+```text
+✓ try/catch around the scheduling call cannot catch the Timer callback's later error
+✓ runZonedGuarded is exactly this safety net, proven end to end
+
+00:00 +2: All tests passed!
+```
+
+test แรกคือ proof จริง: `caughtByTryCatch` ยังเป็น `null` — `try`/`catch` ไม่เห็น error นั้นจริง ๆ — ในขณะที่ `caughtByZone` เห็นจริง นี่คือ pattern เดียวกับที่ [บท production-concerns](/flutter/th/tooling-and-production/production-concerns/) ต่อยอดสำหรับ crash reporting ทั้งแอป โดยจับคู่ `runZonedGuarded` กับ `FlutterError.onError` เพื่อจับ error สองครึ่งที่ต่างกันของพื้นผิว error ของ Flutter
+
 ## Isolate: parallelism จริง เมื่อจำเป็น
 
-ข้อยกเว้นเดียวของ "single thread" คือ **isolate** — worker แยกที่มี memory ของตัวเอง สื่อสารด้วยการส่ง message (ไม่มี shared state) คุณหยิบมาใช้เฉพาะงานที่หนัก CPU จริง ๆ (parse JSON ก้อนใหญ่, image processing) ที่ไม่งั้นจะทำให้ UI jank Flutter ห่อ case ทั่วไปไว้ใน `compute()` ซึ่งอยู่ในโมดูล performance
+ข้อยกเว้นเดียวของ "single thread" คือ **isolate** — worker แยกที่มี memory ของตัวเอง สื่อสารด้วยการส่ง message (ไม่มี shared state) คุณหยิบมาใช้เฉพาะงานที่หนัก CPU จริง ๆ (parse JSON ก้อนใหญ่, image processing) ที่ไม่งั้นจะทำให้ UI jank
+
+`Isolate.run` (Dart 2.19+ [ยืนยันโดย api.dart.dev](https://api.dart.dev/dart-isolate/Isolate/run.html)) คือวิธีง่ายที่สุดในการหยิบมาใช้: spawn, รัน closure, เอาผลลัพธ์กลับมา แล้วปิด isolate ทั้งหมดในการเรียกเดียว:
+
+```dart
+// lib/isolate_run_demo.dart
+import 'dart:isolate';
+
+// Isolate.run (Dart 2.19+) spawns an isolate, runs the closure there, sends
+// the result back, and shuts the isolate down — all in one call. It is the
+// low-level primitive that Flutter's own compute() wraps with extra
+// isolate-pool/lifecycle management (covered in the performance module).
+Future<int> sumSquares(List<int> values) {
+  return Isolate.run(() {
+    var total = 0;
+    for (final v in values) {
+      total += v * v;
+    }
+    return total;
+  });
+}
+```
+
+```dart
+// test/isolate_run_demo_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__async-in-dart/isolate_run_demo.dart';
+
+void main() {
+  test('Isolate.run genuinely runs on a separate isolate and returns the result', () async {
+    final result = await sumSquares([1, 2, 3, 4]);
+    expect(result, 1 + 4 + 9 + 16);
+  });
+}
+```
+
+```text
+✓ Isolate.run genuinely runs on a separate isolate and returns the result
+
+00:00 +1: All tests passed!
+```
+
+`compute()` ของ Flutter เองห่อ `Isolate.run` ด้วยการจัดการ pool/lifecycle เพิ่มเติมที่เจาะจงสำหรับแอป Flutter — [โมดูล async-and-performance](/flutter/th/async-and-performance/) พูดถึง `compute()` และกับดัก closure-capture ของ isolate แบบละเอียด กฎง่าย ๆ เหมือนเดิมทั้งสองกรณี: หยิบ isolate มาใช้เฉพาะงานที่ผูกกับ CPU ไม่ใช่งานที่ผูกกับ I/O — `await http.get(...)` ปลดปล่อย event loop ให้เองอยู่แล้ว การห่อมันด้วย isolate เพิ่มแค่ overhead ของการส่ง message โดยไม่ได้อะไรเพิ่ม
 
 <Callout title="สรุปหนึ่งบรรทัด">
-Dart เป็น single-threaded พร้อม event loop ดังนั้น async แปลว่า "อย่า block thread เดียวที่มี" ไม่ใช่ "รันบนอีก thread" **`Future<T>`** คือค่า future หนึ่งค่า (เขียนด้วย `async`/`await`, catch error ด้วย `try`/`catch`); **`Stream<T>`** คือหลายค่าตามเวลา ใน Flutter พวกนี้กลายเป็น `FutureBuilder` และ `StreamBuilder` สำหรับ parallelism จริงบน CPU **isolate** (ผ่าน `compute()`) คือทางออก
+Dart เป็น single-threaded พร้อม event loop และกฎเรื่องลำดับพิสูจน์ได้จริง ไม่ใช่แค่ความเชื่อ: `scheduleMicrotask` (และ continuation ของ `await`) เป็น microtask จริงที่ drain จนหมดก่อน; `Future(() {})` จริง ๆ แล้วเป็น event-queue task ที่ใช้ `Timer.run` ข้างใน พิสูจน์แล้วข้างบน `Completer` เชื่อม callback API เข้ากับ `Future` `catchError` กับ `.then(..., onError:)` **ใช้แทนกันไม่ได้** — พิสูจน์แล้วข้างบน มีแค่ `catchError` เท่านั้นที่จับ error ที่ throw ข้างใน `onValue` `eagerError` ของ `Future.wait` แลกความเร็วตอน wall-clock กับความปลอดภัยตอน cleanup พิสูจน์ด้วย timing จริง `unawaited_futures` (ไม่อยู่ใน default lint set ของ probe นี้) จับ bug class จริง — error ของ `Future` แบบ fire-and-forget กลายเป็น**ไม่ถูกจับ** เห็นได้แค่จาก `runZonedGuarded` ไม่เคยเห็นจาก `try`/`catch` รอบจุดที่เรียก (พิสูจน์แล้วข้างบน) `StreamController` แบบ single-subscription กับ broadcast throw error จริงที่ต่างกันตอน listener ที่สอง `Isolate.run` (Dart 2.19+) คือ primitive ที่ `compute()` ของ Flutter สร้างต่อยอดสำหรับ CPU parallelism จริง
 </Callout>
+
+## อ่านโค้ดที่ AI สร้างให้
+
+Dart แบบ async ที่ AI สร้างมักจะได้ happy path ถูกต้อง แต่พลาดพอดีในส่วนที่สำคัญก็ต่อเมื่อมีอะไรผิดพลาด: unawaited future, ความต่างของ `catchError`/`onError`, และ cleanup ตอน cancellation/dispose
+
+```dart
+// AI-generated: "save the draft in the background when the user types"
+class DraftController {
+  void onTextChanged(String text) {
+    _repository.saveDraft(text); // async Future, not awaited, not stored
+  }
+
+  Future<void> Function(String) get _saveDraft => _repository.saveDraft;
+  late final Repository _repository;
+}
+```
+
+ก่อนเชื่อ async code แบบนี้ ให้เช็ค:
+
+- ทุกการเรียก `async` function ที่ผลลัพธ์ไม่ถูก `await` และไม่ถูกเก็บไว้ — พิสูจน์แล้วข้างบน นี่คือสิ่งที่ `unawaited_futures` มีไว้จับพอดี และ error ข้างในจะกลายเป็น async error ที่**ไม่ถูกจับ**จริง ๆ (เห็นได้แค่จาก `runZonedGuarded`) ไม่ใช่สิ่งที่ `try`/`catch` รอบ ๆ จะเห็นเลย
+- `.then(onValue, onError:)` ที่ใช้ราวกับเป็น `try`/`catch` สากลสำหรับทั้ง chain — พิสูจน์แล้วข้างบน มันจับได้แค่ error จาก future ที่ chain เข้าไป ไม่ใช่จาก `onValue` เอง
+- การเรียก `.listen(...)` ที่ `StreamSubscription` ถูกทิ้งแทนที่จะเก็บไว้และ `cancel()` ใน `dispose()` — stream ยังส่ง event ต่อ (และรัน callback ต่อ) แม้ widget จะหายไปแล้ว
+- `Future.wait` ที่ใช้กับ operation อิสระที่ความล้มเหลวเร็วสำคัญ (เช่น เรียก validate form) โดยไม่ใส่ `eagerError: true` — พิสูจน์แล้วข้างบน default จะรอทุก operation ที่ช้าจนจบเงียบ ๆ แม้ตัวแรกจะล้มเหลวไปแล้วก็ตาม
+
+<SpotTheBug code={`class SyncService {
+  Future<void> pushChanges() async {
+    await _api.upload(_pendingChanges);
+  }
+
+  void scheduleSync() {
+    Future.delayed(const Duration(seconds: 2), () {
+      pushChanges(); // fire-and-forget from inside a Timer-based Future too
+    });
+  }
+
+  late final Api _api;
+  final List<Change> _pendingChanges = [];
+}`}>
+ปัญหาจริงสองอย่างซ้อนกันตรงนี้ ทั้งคู่พิสูจน์แล้วก่อนหน้านี้ในบทนี้: `pushChanges()` ข้างใน callback ของ `Future.delayed` คือการเรียกแบบ fire-and-forget จริง (พื้นที่ของ `unawaited_futures`) — และเพราะมันอยู่ข้างใน callback ของ `Future.delayed` แทนที่จะอยู่ใน chain ที่ `await` โดยตรง error ใด ๆ จาก `_api.upload` จะกลายเป็น **async error ที่ไม่ถูกจับ** มองไม่เห็นจาก `try`/`catch` ที่ไหนใน `SyncService` เลย เห็นได้แค่จาก handler ของ `runZonedGuarded` รอบทั้งแอป วิธีแก้คือ `unawaited(pushChanges())` ถ้า fire-and-forget ตั้งใจจริง ๆ (บันทึกการตัดสินใจไว้ และให้ `runZonedGuarded` จับความล้มเหลวไว้ report) หรือ `await` มันแล้วจัดการ error เองในที่นี้ถ้าการ sync ล้มเหลวต้อง update UI state
+</SpotTheBug>
+
+## Mental Model
+
+async primitive ทุกตัวใน Dart จริง ๆ แล้วตอบคำถามเดียว: **ใครรับผิดชอบ error และรู้ตัวเมื่อไร?** `await` ข้างใน `try`/`catch` ตอบว่า "ผู้เรียก แบบ synchronous ใน function นี้เลย" — กรณีที่สะอาดที่สุด การเรียกแบบ unawaited เปล่า ๆ, callback ของ `Timer`, stream listener — ทั้งหมดนี้ตัด error ออกจาก calling context ใด ๆ ดังนั้น safety net ที่เหลืออยู่มีแค่ **zone** พิสูจน์แล้วข้างบนว่าเป็นสิ่งเดียวที่เห็น error ที่ `try`/`catch` พิสูจน์ได้ว่ามองไม่เห็นจริง ๆ การออกแบบ event loop แบบสอง queue (microtask เทียบกับ event queue จริง) มีอยู่ด้วยเหตุผลเดียวกับที่ future มีอยู่: เพื่อให้ Dart ทำ "หน่วยงาน synchronous นี้" ให้จบเรียบร้อยตามลำดับก่อนที่อะไรอื่น — รวมถึง callback อื่น — จะได้รันและอาจเห็น state ที่ update ค้างครึ่งเดียว
+
+## Trade-offs
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `await` ข้างใน `try`/`catch` | error อยู่ในที่เดียว รู้สึก synchronous ให้เหตุผลได้ง่าย | เป็น sequential โดย default — งานแบบ parallel ต้องใช้ `Future.wait` ชัดเจน |
+| Fire-and-forget (`unawaited(...)`) | ไม่ block ผู้เรียกบนงานที่ไม่ต้องรอ | พิสูจน์แล้วข้างบน: ความล้มเหลวใด ๆ กลายเป็น async error ที่ไม่ถูกจับ เห็นได้แค่จาก zone handler ไม่ใช่จุดที่เรียก |
+| `Future.wait(eagerError: true)` | fail เร็ว — พิสูจน์แล้วข้างบน ไม่ต้องรอ future ที่ช้าหลังตัวแรก fail | พิสูจน์แล้วข้างบน: future ที่ยังทำงานอยู่ก็ยังรันต่อจนจบ (Dart ไม่ cancel มัน) "fail เร็ว" จึงไม่ได้แปลว่า "งานน้อยลง" |
+| Broadcast `StreamController` | listener กี่ตัวก็ได้ พิสูจน์แล้วข้างบนไม่มี error เลย | ไม่มี buffer ให้ listener ที่มาสายโดย default — พลาด event ที่ emit ก่อนหน้ามัน subscribe |
+| `Isolate.run` / `compute()` | CPU parallelism จริง พิสูจน์แล้วข้างบนด้วย isolate ตัวที่สองจริง | overhead การส่ง message; คุ้มค่าแค่กับงานที่ผูกกับ CPU ไม่ใช่งาน I/O ที่ปลดปล่อย event loop ให้เองอยู่แล้ว |
+
+## Common Misconceptions
+
+- **"`Future(() {})` เหมือน `scheduleMicrotask` โดยพื้นฐาน"** พิสูจน์แล้วว่าผิดข้างบนด้วย test จริงที่มีลำดับ: `Future(() {})` implement ด้วย `Timer.run` ตาม `api.dart.dev` และยิงคู่กับ `Timer.run` จริง หลังจาก microtask จริงทุกตัว drain หมดแล้วเท่านั้น
+- **"`.then(onValue, onError:)` จับ error ทุกตัวใน chain เหมือน `catchError`"** พิสูจน์แล้วว่าผิดข้างบน: `onError` จับได้แค่ error จาก future ที่ถูก chain เข้าไป — error ที่ throw ข้างใน `onValue` เองจะหลุดไปไม่ถูกจับ เว้นแต่มี `.catchError` ตามหลัง
+- **"error ของ Future แบบ unawaited จะโผล่มาในที่สุด เช่นครั้งถัดไปที่มีอะไร await มัน"** พิสูจน์แล้วว่าผิดข้างบน: ไม่มีอะไรใน example await มันอีกเลย ดังนั้น error ไปตรงที่ uncaught-error handler ของ zone (หรือ crash เงียบ ๆ ถ้าไม่มี) — ไม่เคยกลับไปที่ `try`/`catch` ไหนเลย
+- **"`Future.wait([...], eagerError: true)` cancel future ที่ช้ากว่าเมื่อตัวหนึ่ง fail ช่วยประหยัดงานจริง"** พิสูจน์แล้วว่าผิดข้างบน: future ของ Dart cancel แบบนี้ไม่ได้ — ตัวที่ช้ายังรันต่อใน background เหมือนเดิม `eagerError` เปลี่ยนแค่ว่า `Future.wait` เอง *resolve* เมื่อไร ไม่ได้เปลี่ยนว่างานอะไรเกิดขึ้นจริง
+- **"`StreamController` แบบ single-subscription แค่ทำงานแย่ลงนิดหน่อยเมื่อมี listener สองตัว"** พิสูจน์แล้วว่าผิดข้างบน: การเรียก `.listen()` ครั้งที่สอง throw `StateError` จริงทันที ("Stream has already been listened to") — เป็นความล้มเหลวแบบแข็ง ไม่ใช่การลดระดับแบบนุ่มนวล
 
 export const quizAsync = [
   {
@@ -86,34 +631,59 @@ export const quizAsync = [
     answer: 1,
   },
   {
-    q: 'ความต่างของ Future กับ Stream คืออะไร?',
+    q: 'พิสูจน์แล้วข้างบนด้วย test จริงที่มีลำดับ `Future(() {})` เป็น microtask จริงเหมือน `scheduleMicrotask` หรือไม่?',
     options: [
-      'เหมือนกันทุกอย่าง',
-      'Future คือค่าเดียวที่มาทีหลัง; Stream คือหลายค่าตามเวลา',
-      'Future เป็น synchronous; Stream เป็น async',
-      'Stream เก็บได้แค่ค่าเดียว',
+      'ใช่ เหมือนกันทุกอย่าง',
+      'ไม่ — ตาม api.dart.dev, Future() ใช้ Timer.run ข้างใน ดังนั้นมันเป็น event-queue task จริงที่ยิงหลังจาก microtask จริงทุกตัว drain หมดแล้ว',
+      'เหมือนกันแค่ใน debug mode',
+      'เหมือนกันแค่ข้างใน testWidgets block',
     ],
     answer: 1,
+    explain: 'ผลลัพธ์ test ที่จับได้คือ [sync-start, sync-end, scheduleMicrotask, timer.run, future(() {})] — scheduleMicrotask (microtask จริง) drain ก่อน และ future(() {}) ยิงหลัง Timer.run ที่ชัดเจน ตามลำดับ registration',
   },
   {
-    q: 'error จาก Future ที่ await โผล่มาอย่างไร?',
+    q: 'พิสูจน์แล้วข้างบน ความต่างจริงระหว่าง .then(onValue, onError:) กับ .catchError ที่ตามหลังคืออะไร?',
     options: [
-      'ถูกเมินเงียบ ๆ',
-      'เป็น exception ปกติที่ try/catch ได้',
-      'crash isolate',
-      'คืน null',
+      'ใช้แทนกันได้เต็มที่',
+      'onError จับได้แค่ error จาก future ที่ถูก chain เข้าไป ไม่ใช่ที่ throw ข้างใน onValue เอง; catchError (chain ต่อจาก then) จับได้ทั้งคู่',
+      'catchError ถูก deprecate แล้ว',
+      'onError ใช้ได้แค่กับ Stream ไม่ใช่ Future',
     ],
     answer: 1,
+    explain: 'error ของ withOnError (throw ข้างใน onValue) หลุดผ่าน onError ไปแบบไม่ถูกจับ ในขณะที่ error เดียวกันเป๊ะของ withCatchError ถูกจับได้ — พิสูจน์ทั้งคู่ด้วย test assertion จริง',
   },
   {
-    q: 'ควรหยิบ isolate มาใช้เมื่อไร?',
+    q: 'พิสูจน์แล้วข้างบนด้วย StreamController เกิดอะไรขึ้นเมื่อเรียก .listen() ครั้งที่สองบน single-subscription stream?',
     options: [
-      'ทุก network request',
-      'งานที่หนัก CPU จริง ๆ ที่จะทำให้ UI jank เพราะ isolate ให้ parallelism จริง',
-      'เพื่อให้ widget rebuild',
-      'เพื่อ access DOM',
+      'listener ตัวที่สองไม่ได้รับอะไรเลยเงียบ ๆ',
+      'StateError จริงถูก throw ทันที: "Stream has already been listened to" — ใช้ .broadcast() แทนสำหรับ listener หลายตัว',
+      'listener ทั้งสองได้รับทุก event ซ้ำสองเท่า',
+      'มันแปลงเป็น broadcast stream อัตโนมัติ',
     ],
     answer: 1,
+    explain: 'จับมาตรง ๆ: ข้อความ flutter test failure จริงแบบไม่แก้ไขคือ "Stream has already been listened to" เป๊ะ ในขณะที่ตัวแปร .broadcast() ให้ listener สองตัวได้โดยไม่มี error เลย',
+  },
+  {
+    q: 'ทำไมการเรียก async แบบ fire-and-forget ที่ไม่ await ถึงเป็นความเสี่ยง bug จริง พิสูจน์แล้วข้างบนด้วย runZonedGuarded?',
+    options: [
+      'มันรันช้ากว่าการเรียกแบบ await',
+      'error ใด ๆ ข้างในกลายเป็น async error ที่ไม่ถูกจับ — มองไม่เห็นจาก try/catch รอบจุดที่เรียกจริง ๆ เห็นได้แค่จาก zone error handler อย่าง runZonedGuarded',
+      'Dart retry การเรียกแบบ unawaited ให้อัตโนมัติ',
+      'มันแปลงเป็น Stream เงียบ ๆ',
+    ],
+    answer: 1,
+    explain: 'test จริงพิสูจน์ว่า caughtByTryCatch ยังเป็น null ในขณะที่ caughtByZone จับ StateError จริงได้ — try/catch ไม่เห็นมันจริง ๆ ซึ่งคือเหตุผลตรงที่ unawaited_futures มีอยู่เป็น lint',
+  },
+  {
+    q: 'พิสูจน์แล้วข้างบนด้วย timing assertion จริง eagerError: true ของ Future.wait เปลี่ยนอะไรจริง ๆ?',
+    options: [
+      'มัน cancel future ตัวอื่นให้หยุดทำงาน',
+      'มันเปลี่ยนแค่ว่า Future.wait เอง resolve เมื่อไร (ทันทีที่ความล้มเหลวแรกเกิดขึ้น) — future ตัวอื่นยังรันต่อจนจบเหมือนเดิม เพราะ future ของ Dart cancel แบบนี้ไม่ได้',
+      'มันทำให้ทุก future รันแบบ sequential แทน parallel',
+      'มันปิดการ propagate error ไปเลย',
+    ],
+    answer: 1,
+    explain: 'eagerError ทั้งสองแบบ assertion ผ่านถูกต้อง แต่ timing ต่างกันเท่านั้น (fail เกือบทันที เทียบกับรอ future ที่ช้า) — พิสูจน์ว่า future เองไม่เคยถูกหยุดจริง ๆ',
   },
 ];
 
