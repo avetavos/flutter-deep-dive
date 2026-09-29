@@ -1,6 +1,6 @@
 ---
 title: 'Classes & Mixins'
-description: 'constructor (named, factory, const), mixin สำหรับ reuse แบบแนวนอน, extension method และ enhanced enum — feature เชิง object ที่ Flutter พึ่งพา'
+description: 'constructor (named, factory, const), mixin สำหรับ reuse แบบแนวนอน, mixin linearization, class modifier พร้อม error จริงข้าม library, Object equality, covariant และ enhanced enum — feature เชิง object ที่ Flutter พึ่งพา'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## constructor แบบ Dart
 
@@ -37,6 +38,8 @@ final o = Point.origin();
 - **`const` constructor** (ทำได้เมื่อ field ทุกตัวเป็น `final`) ให้ผู้เรียก build instance ที่ถูก canonicalize — พื้นฐานของ `const` widget
 - **named constructor** (`Point.origin`) ให้หลายวิธีสร้างที่ชัดเจน แทนการ overload
 - **factory constructor** ไม่จำเป็นต้องคืน instance ใหม่ — คืนตัวที่ cache ไว้หรือ subtype ก็ได้ `factory` คือวิธีที่หลาย class ของ Flutter/Dart implement singleton หรือ parsing
+
+ทั้งสามข้อพิสูจน์ไว้ข้างล่างด้วย `identical()` เช็คจริงและ test singleton จริง
 
 ## Mixin: reuse behavior ข้าม class ที่ไม่เกี่ยวกัน
 
@@ -68,6 +71,59 @@ export const mixinDiagram = `flowchart TB
 
 เวลาคุณเขียน `class _MyState extends State<MyWidget> with SingleTickerProviderStateMixin` คุณกำลัง mix ความสามารถในการเป็น `vsync` provider สำหรับ animation เข้ามา — reuse แบบแนวนอนล้วน ๆ
 
+### Mixin linearization: `with A, B` ใครชนะ พิสูจน์แล้ว
+
+`with A, B` ไม่ได้ผสาน `A` กับ `B` แบบเท่าเทียมกัน — Dart สร้าง superclass **chain** จริง ๆ โดย apply mixin จากซ้ายไปขวา ตัวที่อยู่*ท้ายสุด*จะอยู่*ใกล้*ที่สุดกับ class ของคุณ แปลว่า override ของ mixin ตัวสุดท้ายจะชนะ และเมื่อมันเรียก `super` จะไปถึง mixin ที่อยู่ก่อนหน้ามันเอง (ไม่ใช่ base class ดั้งเดิม)
+
+```dart
+// lib/mixin_linearization.dart
+// Mixin linearization: with A, B means B is applied LAST, so B sits closer
+// to the subclass in the superclass chain — B's override of a shared method
+// wins, and B's `super.greet()` call reaches A (not the base class).
+
+class Base {
+  String greet() => 'Base';
+}
+
+mixin A on Base {
+  @override
+  String greet() => 'A->${super.greet()}';
+}
+
+mixin B on Base {
+  @override
+  String greet() => 'B->${super.greet()}';
+}
+
+class Combined extends Base with A, B {}
+class Reversed extends Base with B, A {}
+```
+
+```dart
+// test/mixin_linearization_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__classes-and-mixins/mixin_linearization.dart';
+
+void main() {
+  test('with A, B: the LAST mixin (B) wins and its super reaches the one before it (A)', () {
+    expect(Combined().greet(), 'B->A->Base');
+  });
+
+  test('reversing the order (with B, A) reverses which mixin wins', () {
+    expect(Reversed().greet(), 'A->B->Base');
+  });
+}
+```
+
+```text
+✓ with A, B: the LAST mixin (B) wins and its super reaches the one before it (A)
+✓ reversing the order (with B, A) reverses which mixin wins
+
+00:00 +2: All tests passed!
+```
+
+นี่คือกลไกเดียวกับ `class _MyState extends State<T> with SingleTickerProviderStateMixin, WidgetsBindingObserver` เป๊ะ — ลำดับไม่ใช่แค่เรื่องความสวยงาม ถ้า mixin สองตัวเขียน override method lifecycle เดียวกันและทั้งคู่เรียก `super` ตัวที่อยู่ท้ายสุดจะรันก่อนและตัดสินว่าตัวก่อนหน้าจะเห็นอะไร
+
 ## extension method และ enhanced enum
 
 **extension method** เพิ่ม method ให้ type ที่คุณไม่ได้เป็นเจ้าของ — พบบ่อยสำหรับ helper สั้น ๆ:
@@ -93,9 +149,369 @@ enum Status {
 Status.active.label; // 'Active'
 ```
 
-<Callout title="สรุปหนึ่งบรรทัด">
-constructor ของ Dart ทำได้เยอะ: `const` constructor (field เป็น `final` ทุกตัว) เปิดทาง `const` widget ที่ถูก canonicalize, **named** constructor ให้ทางเลือกที่ชัดเจน และ **factory** constructor คืน instance ที่ cache หรือ subtype ได้ **mixin** (`with`) คือวิธีที่ Flutter ติดความสามารถอย่าง ticker และ observer เข้ากับ `State` class ของคุณ — reuse แบบแนวนอนโดยไม่ต้อง inheritance
+## Class modifier: error จริงข้าม library boundary
+
+Dart 3.0 เพิ่ม modifier ห้าตัวที่จำกัดว่า class จะถูกใช้**นอก library (ไฟล์ `.dart`) ที่ประกาศมัน**ได้อย่างไร — แต่ละตัวให้ `flutter analyze` error จริงที่ต่างกันเมื่อถูกละเมิด ตัวอย่างข้างล่างทุกอันมีสองไฟล์: ที่ประกาศใน library หนึ่ง การละเมิดในอีก library หนึ่ง
+
+### `sealed` — ปิดทั้งการ extend และ implement นอก library
+
+```dart
+// lib/load_state_sealed.dart
+sealed class LoadState {}
+final class Loading extends LoadState {}
+final class Loaded extends LoadState {
+  Loaded(this.data);
+  final String data;
+}
+```
+
+```dart
+// @expect-error real invalid_use_of_type_outside_library diagnostic, captured below
+import 'load_state_sealed.dart';
+
+// A sealed class's subtypes must all live in the SAME library — this file
+// is a different one, so adding a new variant here is a violation.
+class TimedOut extends LoadState {}
+```
+
+```text
+error • The class 'LoadState' can't be extended, implemented, or mixed in outside of its library
+because it's a sealed class • invalid_use_of_type_outside_library
+```
+
+นี่คือสิ่งที่ทำให้ exhaustiveness checking ของ `sealed` + `switch` (พิสูจน์ในบทก่อนหน้า) ปลอดภัยจริง: analyzer นับ subtype ได้ครบเพราะไม่มี library อื่นเพิ่มตัวใหม่ได้
+
+### `base` — ห้าม implement นอก library
+
+```dart
+// lib/vehicle_base.dart
+base class Vehicle {
+  Vehicle(this.wheels);
+  final int wheels;
+}
+```
+
+```dart
+// @expect-error real invalid_use_of_type_outside_library diagnostic, captured below
+import 'vehicle_base.dart';
+
+class Car implements Vehicle {
+  @override
+  int get wheels => 4;
+}
+```
+
+```text
+error • The class 'Vehicle' can't be implemented outside of its library because it's a base class •
+invalid_use_of_type_outside_library
+```
+
+`base` รับประกันว่าทุก instance เป็น `Vehicle` จริง ๆ (ผ่าน `extends` ที่ inherit implementation จริง) — ไม่ใช่ของปลอมที่สร้างด้วย `implements` ซึ่งแค่ match รูปร่าง interface
+
+### `interface` — ห้าม extend แต่ implement ได้
+
+```dart
+// lib/repository_interface.dart
+interface class Repository {
+  const Repository();
+  List<String> fetchAll() => const [];
+}
+```
+
+```dart
+// @expect-error real invalid_use_of_type_outside_library diagnostic, captured below
+import 'repository_interface.dart';
+
+class CachedRepository extends Repository {
+  @override
+  List<String> fetchAll() => ['cached'];
+}
+```
+
+```text
+error • The class 'Repository' can't be extended outside of its library because it's an interface
+class • invalid_use_of_type_outside_library
+```
+
+วิธีแก้คือสิ่งที่ `interface` ถูกสร้างมาให้ทำพอดี: implement แทนที่จะ extend — compile ผ่านสะอาด `flutter analyze` รายงานศูนย์ปัญหา:
+
+```dart
+// lib/repository_interface_ok.dart
+import 'repository_interface.dart';
+
+// Implementing (not extending) an `interface` class from outside its
+// library is exactly what the modifier is for — this compiles fine.
+class CachedRepository implements Repository {
+  @override
+  List<String> fetchAll() => ['cached'];
+}
+```
+
+### `final` — ห้ามทั้ง extend และ implement นอก library
+
+```dart
+// lib/currency_final.dart
+final class Currency {
+  const Currency(this.code);
+  final String code;
+}
+```
+
+```dart
+// @expect-error real invalid_use_of_type_outside_library diagnostic, captured below
+import 'currency_final.dart';
+
+class Usd extends Currency {
+  Usd() : super('USD');
+}
+```
+
+```text
+error • The class 'Currency' can't be extended outside of its library because it's a final class •
+invalid_use_of_type_outside_library
+```
+
+`final` เข้มงวดที่สุดในสี่ตัวนี้ (รองจาก `sealed` ที่เพิ่มการบังคับ exhaustiveness ด้วย): นอก library ของมัน `Currency` subtype ไม่ได้เลยไม่ว่าด้วยวิธีไหน — ใช้สร้างและใช้งานได้อย่างเดียว
+
+### `mixin class` — ประกาศ constructor แบบไม่ trivial ไม่ได้
+
+modifier ตัวที่ห้าเป็นข้อจำกัดคนละแบบ — ไม่เกี่ยวกับ library boundary แต่เกี่ยวกับสิ่งที่ class ที่ใช้ได้ทั้งแบบ class ปกติและ mixin (`class Foo` **และ** `with Foo`) ประกาศได้ เพราะ field ของ mixin จะถูกต่อเข้ากับ class ที่ apply มัน และ constructor ก็ไม่มีความหมายตรงนั้น:
+
+```dart
+// @expect-error real mixin_class_declares_non_trivial_generative_constructor diagnostic, captured below
+mixin class Logger {
+  Logger(this.tag); // a mixin class cannot declare a generative constructor
+  final String tag;
+  void log(String msg) => print('[$tag] $msg');
+}
+```
+
+```text
+error • The mixin class 'Logger' can't declare a non-trivial generative constructor •
+mixin_class_declares_non_trivial_generative_constructor
+```
+
+<Callout title="diagnostic บอกอะไรจริง ๆ">
+`sealed`/`base`/`interface`/`final` ทั้งสี่ตัวใช้ error code**เดียวกัน**จาก analyzer คือ `invalid_use_of_type_outside_library` — ต่างกันแค่ข้อความ ("can't be extended", "can't be implemented", "can't be extended, implemented, or mixed in") ถ้าคุณ grep output ของ CI หา error พวกนี้ ให้ match ที่ code ไม่ใช่ message
 </Callout>
+
+## `abstract` + `implements` เทียบกับ `extends`
+
+`abstract class` ประกาศ member โดยไม่ต้องมี implementation; `implements` รับแค่ *interface* (signature ของ method/getter) โดย**ไม่มี** implementation ที่ inherit มาเลย ในขณะที่ `extends` inherit code จริง:
+
+```dart
+abstract class Shape {
+  double area();
+}
+
+// `implements` takes only the interface (member signatures) — nothing is
+// inherited, so every member must be reimplemented from scratch.
+class UnitSquare implements Shape {
+  @override
+  double area() => 1.0;
+}
+
+// `extends` inherits real implementation — abstract members must still be
+// filled in, but concrete ones (like describe()) come for free.
+abstract class ShapeBase {
+  double area();
+  String describe() => 'area=${area()}';
+}
+
+class UnitCircle extends ShapeBase {
+  @override
+  double area() => 3.141592653589793;
+}
+```
+
+พิสูจน์แล้วข้างล่าง: `UnitCircle` ได้ `describe()` มาฟรีผ่าน `extends` ส่วน `UnitSquare` จะต้อง reimplement ทุกอย่างใหม่หมดถ้า `Shape` ประกาศมันไว้ เพราะ `implements` ไม่ inherit implementation เลย
+
+## `const` canonicalization, factory singleton, equality และ `covariant` — พิสูจน์พร้อมกันทั้งหมด
+
+```dart
+// lib/const_and_factory.dart
+
+class Point {
+  const Point(this.x, this.y); // all fields final -> const constructor allowed
+  final double x, y;
+
+  // Object equality: two Points with equal fields should compare equal and
+  // hash equal, or Sets/Maps/tests silently misbehave.
+  @override
+  bool operator ==(Object other) =>
+      other is Point && other.x == x && other.y == y;
+  @override
+  int get hashCode => Object.hash(x, y);
+}
+
+class Logger {
+  Logger._internal(); // private named constructor — only this file can call it
+  static final Logger _instance = Logger._internal();
+
+  // factory: returns the cached singleton instead of a fresh instance.
+  factory Logger() => _instance;
+}
+
+abstract class Shape {
+  double area();
+}
+
+class UnitSquare implements Shape {
+  @override
+  double area() => 1.0;
+}
+
+abstract class ShapeBase {
+  double area();
+  String describe() => 'area=${area()}';
+}
+
+class UnitCircle extends ShapeBase {
+  @override
+  double area() => 3.141592653589793;
+}
+
+class Box {
+  void addAll(covariant List<num> items) {} // widens the accepted param type
+}
+
+class IntBox extends Box {
+  // Without `covariant` on the base, overriding with a NARROWER param type
+  // (List<int> instead of List<num>) would be a compile error.
+  @override
+  void addAll(List<int> items) {}
+}
+```
+
+```dart
+// test/const_and_factory_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:probe/lessons/dart-foundations__classes-and-mixins/const_and_factory.dart';
+
+void main() {
+  test('const constructors canonicalize: two equal const values are the SAME instance', () {
+    const a = Point(1, 2);
+    const b = Point(1, 2);
+    expect(identical(a, b), isTrue);
+
+    final c = Point(1, 2); // built with `final`, not `const` — a fresh instance
+    expect(identical(a, c), isFalse);
+    expect(a == c, isTrue); // == still holds, via the overridden operator
+  });
+
+  test('a factory constructor can return a cached instance instead of a fresh one', () {
+    final l1 = Logger();
+    final l2 = Logger();
+    expect(identical(l1, l2), isTrue); // same singleton both times
+  });
+
+  test('overriding == and hashCode is what makes value types work in a Set', () {
+    final points = {Point(1, 2), Point(1, 2), Point(3, 4)};
+    expect(points.length, 2); // the two equal Points dedupe
+  });
+
+  test('extends ShapeBase inherits describe() for free; implements Shape does not', () {
+    expect(UnitCircle().describe(), 'area=3.141592653589793');
+    expect(UnitSquare().area(), 1.0);
+  });
+
+  test('covariant widens the accepted param type on a subclass override', () {
+    final box = IntBox();
+    box.addAll([1, 2, 3]); // compiles: IntBox narrows to List<int>
+  });
+}
+```
+
+```text
+✓ const constructors canonicalize: two equal const values are the SAME instance
+✓ a factory constructor can return a cached instance instead of a fresh one
+✓ overriding == and hashCode is what makes value types work in a Set
+✓ extends ShapeBase inherits describe() for free; implements Shape does not
+✓ covariant widens the accepted param type on a subclass override
+
+00:00 +5: All tests passed!
+```
+
+สองข้อนี้ควรดูใกล้ ๆ อีกรอบ:
+
+**`covariant` — error จริงถ้าไม่มีมัน** `Box.addAll` รับ `List<num>`; `IntBox` override ด้วย `List<int>` ที่แคบกว่า ถ้าไม่ mark parameter ของ base เป็น `covariant` นี่คือ compile error จริงแบบไม่แก้ไข — กฎ default ของ Dart คือ type ของ parameter ใน override ต้อง*เหมือนเดิมหรือกว้างกว่า* ไม่แคบกว่าเด็ดขาด เพราะไม่งั้นการเรียก `box.addAll(['not an int'])` ผ่าน type `Box` ฐานจะ unsound:
+
+```text
+error • 'IntBox.addAll' ('void Function(List<int>)') isn't a valid override of 'Box.addAll'
+('void Function(List<num>)') • invalid_override
+```
+
+`covariant` บน parameter ของ base คือการ opt-out เช็ค soundness นั้นอย่างชัดเจน — คุณกำลังบอก compiler ว่า "ฉันยอมรับความเสี่ยงตอน runtime เอง จะบังคับ type ที่แคบกว่านี้ด้วยตัวเองถ้าจำเป็น"
+
+**Equality: `Equatable` ทำงานแบบเดียวกันด้วย code น้อยกว่า** การเขียน `==`/`hashCode` เองแบบข้างบนคือสิ่งที่ [`Equatable` ที่ใช้ในบท BLoC](/flutter/th/state-management/bloc-and-patterns/) generate ให้คุณจาก list `props` — สัญญา value-equality เดียวกัน แต่ boilerplate น้อยกว่าเมื่อ class มี field เกินสองสามตัว
+
+<Callout title="สรุปหนึ่งบรรทัด">
+**Mixin linearization** เป็น superclass chain จริงที่มีลำดับ — mixin ตัวสุดท้ายใน `with A, B` ชนะ และ `super` ของมันไปถึงตัวก่อนหน้า พิสูจน์แล้วข้างบน **class modifier** ทั้งห้า (`sealed`/`final`/`base`/`interface`/`mixin class`) แต่ละตัวให้ `flutter analyze` error จริงที่ต่างกันข้าม library boundary — พิสูจน์แล้วข้างบนด้วย `invalid_use_of_type_outside_library` (สี่แบบ) และ `mixin_class_declares_non_trivial_generative_constructor` `extends` inherit implementation จริง; `implements` inherit แค่ interface `const` constructor **canonicalize** (พิสูจน์ด้วย `identical()`), `factory` คืน cached singleton ได้ (พิสูจน์แล้วเช่นกัน) และ `covariant` คือการ opt-out เช็ค override-narrowing ของ compiler อย่างชัดเจนจริง (พิสูจน์ด้วย `invalid_override` error จริงที่มันปิดเสียง)
+</Callout>
+
+## อ่านโค้ดที่ AI สร้างให้
+
+Dart class ที่ AI สร้างมักจะได้รูปร่างถูกต้อง แต่พลาดสองเรื่องที่จะกัดก็ต่อเมื่อ code ข้ามไฟล์/package boundary หรือเข้าไปอยู่ใน `Set`/`Map`: เลือก class modifier ที่ตรงกับข้อจำกัดที่ตั้งใจไว้จริง ๆ และจำ `==`/`hashCode` บนสิ่งที่เทียบด้วยค่า
+
+```dart
+// AI-generated: "a User model that's safe to use as an interface for mocking in tests"
+class User {
+  User(this.id, this.name);
+  final String id;
+  final String name;
+}
+
+// elsewhere, in a test file:
+class MockUser implements User {
+  @override
+  String get id => 'mock-id';
+  @override
+  String get name => 'Mock User';
+}
+```
+
+code นี้ compile ผ่านวันนี้ — แต่ "ปลอดภัยที่จะใช้เป็น interface สำหรับ mock ใน test" คือสิ่งที่ `interface class User { ... }` ควรประกาศไว้ชัดเจน ถ้าไม่ประกาศ ไม่มีอะไรหยุดเพื่อนร่วมทีมจากการเขียน `class RealUser extends User` ใน production code เดือนหน้า โดยพึ่งพา field layout และ constructor จริงของ `User` แบบที่ผู้เขียนไม่เคยตั้งใจให้ทำได้
+
+ก่อนเชื่อ code แบบนี้ ให้เช็ค:
+
+- class นี้ตั้งใจให้เป็นชุด variant ปิด (`sealed`), รับประกันว่าเป็น implementation จริงเสมอ (`final`/`base`) หรือเป็น interface ชัดเจนสำหรับ mocking/adapter (`interface`)? ถ้าไม่ประกาศอะไรเลย แปลว่า**ใครก็ได้**ที่ไหนก็ได้ `extends`/`implements`/`with` มันได้ — default คือเปิดกว้างที่สุด
+- ทุก class ที่จะอยู่ใน `Set`, เป็น `Map` key หรือเทียบด้วย `==` (รวมถึงใน test ที่ `expect(actual, expectedInstance)`) ต้องมี `==`/`hashCode` — หรือ `Equatable` — ไม่งั้น instance ที่มีโครงสร้างเหมือนกันสองตัวจะ `!=` และการ dedup/เทียบจะพังเงียบ ๆ พิสูจน์แล้วข้างบนด้วย test ของ `Set`
+- `mixin class` ที่ generator เพิ่ม constructor เข้าไป (พบบ่อยเมื่อ template code-gen สมมติว่า "ทุก class ต้องมี constructor") — พิสูจน์แล้วข้างบนว่านี่คือ `flutter analyze` error จริงทันที ไม่ใช่ runtime bug แอบแฝง อย่างน้อยก็ fail แบบเสียงดัง
+
+<SpotTheBug code={`sealed class ConnectionState {}
+final class Connected extends ConnectionState {
+  Connected(this.latencyMs);
+  final int latencyMs;
+}
+final class Disconnected extends ConnectionState {}
+
+// lib/reconnect_policy.dart — a different file from the one above
+class FlakyConnectionState extends ConnectionState {}`}>
+โค้ดนี้ compile ไม่ผ่าน: `ConnectionState` เป็น `sealed` และ `FlakyConnectionState` ถูกประกาศใน**library ที่ต่างกัน** (ไฟล์ `.dart` คนละไฟล์) จาก `Connected`/`Disconnected` error จริงจาก analyzer คือ `invalid_use_of_type_outside_library`: *"The class 'ConnectionState' can't be extended, implemented, or mixed in outside of its library because it's a sealed class"* เป็น diagnostic เดียวกับที่พิสูจน์ไปแล้วก่อนหน้านี้ในบทนี้สำหรับ `LoadState`/`TimedOut` วิธีแก้คือย้าย `FlakyConnectionState` เข้าไปอยู่ไฟล์เดียวกับ subtype อื่น ๆ ของ `ConnectionState` — ซึ่งคือประเด็นทั้งหมดของ `sealed`: ทุก variant ต้องมองเห็นได้ในที่เดียว เพื่อให้ `switch` ทุกอันบนมันตรวจ exhaustiveness ได้
+</SpotTheBug>
+
+## Mental Model
+
+class modifier คือ**คำสัญญาเกี่ยวกับรูปร่างของ subtype tree** ที่ compiler บังคับใช้แทนที่จะเป็นแค่ comment ใน code review `sealed` สัญญาว่า "ฉันนับ subtype ได้ครบทุกตัว" (ซึ่งคือสิ่งที่ทำให้ exhaustive `switch` ปลอดภัย) `final` สัญญาว่า "ทุก instance รัน code ของฉันจริง ๆ ไม่มีของสลับเข้ามา" `interface` สัญญาว่า "พึ่งพารูปร่างของฉัน ไม่ใช่ implementation ของฉัน" (ประตูสำหรับ mocking/adapter อย่างชัดเจน) `base` อยู่ระหว่าง `final` กับแบบเปิด: "extend ฉันเพื่อ inheritance จริงได้ แต่ปลอมเป็นฉันผ่าน `implements` ไม่ได้" mixin linearization ก็อยู่ในจิตวิญญาณ "ชัดเจนดีกว่านัย" แบบเดียวกัน: `with A, B` ไม่ใช่การผสาน แต่เป็น chain จริงที่มีลำดับ ที่คุณให้เหตุผลได้เหมือน single inheritance เป๊ะ แค่มี link เยอะกว่า
+
+## Trade-offs
+
+| ทางเลือก | ประโยชน์ | ต้นทุน |
+| --- | --- | --- |
+| `sealed` | ตรวจ exhaustive `switch` ได้ทุกที่ พิสูจน์แล้วในบทก่อนหน้า | variant ใหม่ทุกตัวต้องอยู่ไฟล์/library เดียวกัน — กระจาย subtype ข้าม package ไม่ได้ |
+| `final` | รับประกันแข็งแกร่งที่สุด: subtype นอก library ไม่ได้เลย | ไม่มีจุดขยายให้ผู้ใช้เลย — กำแพงที่ตั้งใจ ไม่ใช่ความผิดพลาด |
+| `interface` | seam สะอาดสำหรับ mocking/testing/adapter พิสูจน์แล้วข้างบนว่า `implements` compile ผ่าน | ใครก็ implement ได้ด้วย internal representation ที่ต่างไปเลย — ไม่มี code ร่วมกันเลย |
+| `base` | รับประกันว่า inheritance จริงผ่าน `extends` เท่านั้น บล็อกของปลอมจาก `implements` | ยังเปิดให้ subclass ถูกต้องนอก library ได้ ต่างจาก `final` |
+| `==`/`hashCode` เขียนเอง เทียบกับ `Equatable` | ไม่ต้องเพิ่ม dependency ควบคุมได้เต็มที่ | boilerplate ต่อ field เยอะขึ้น และลืม update ทั้งคู่เมื่อเพิ่ม field ได้ง่าย |
+| `covariant` | ให้ subclass แคบ parameter type ได้จริงเมื่อคุณรู้ว่าปลอดภัย | opt-out เช็ค soundness จริง — compiler ไม่ป้องกันการเรียกที่ unsound ให้อีกต่อไป |
+
+## Common Misconceptions
+
+- **"`sealed`, `final`, `base`, และ `interface` แต่ละตัวมี error code เฉพาะของตัวเอง"** พิสูจน์แล้วว่าผิดข้างบน: ทั้งสี่ตัวใช้ `invalid_use_of_type_outside_library` ร่วมกัน — ต่างกันแค่ข้อความตาม modifier และตามว่าเป็นการละเมิด `extends` หรือ `implements`
+- **"`with A, B` แค่ผสมทั้งคู่เข้าด้วยกันแบบเท่าเทียม ลำดับไม่สำคัญ"** พิสูจน์แล้วว่าผิดข้างบนด้วย test จริง: `with A, B` กับ `with B, A` ให้ผลลัพธ์ `greet()` ต่างกัน (`'B->A->Base'` กับ `'A->B->Base'`) เพราะ linearization สร้าง chain ที่มีลำดับจริง
+- **"`mixin class` ก็แค่ `mixin` ที่ใช้ keyword ต่างกัน"** ใกล้เคียง แต่พิสูจน์แล้วข้างบนว่า `mixin class` ประกาศ generative constructor แบบไม่ trivial ไม่ได้เฉพาะ (`mixin_class_declares_non_trivial_generative_constructor`) — ข้อจำกัดที่ `class` ธรรมดาไม่มี เพราะ declaration เดียวกันต้องใช้ได้ตอน mix เข้าด้วย `with` ด้วย
+- **"`implements` ให้ code reuse แบบเดียวกับ `extends` แค่ keyword ต่าง"** พิสูจน์แล้วว่าผิดข้างบน: `UnitSquare implements Shape` ต้อง reimplement ทุกอย่างใหม่หมด ส่วน `UnitCircle extends ShapeBase` ได้ `describe()` มาฟรี — `implements` inherit แค่ interface ไม่เคย inherit implementation
+- **"object สองตัวที่มี field value เหมือนกันเป๊ะจะ `==` กันเสมอใน Dart"** ผิดถ้าไม่ override ชัดเจน — พิสูจน์แล้วข้างบน `==` ของ `Point` ต้องเขียนเอง (หรือ generate ผ่าน `Equatable`); `Object.==` default คือเทียบด้วย identity ดังนั้น instance ที่โครงสร้างเท่ากันสองตัวจะ `!=` จนกว่า class จะ opt-in
 
 export const quizClasses = [
   {
@@ -107,6 +523,7 @@ export const quizClasses = [
       'มีชื่อได้',
     ],
     answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: เรียก Logger() สองครั้งผ่าน factory constructor ของมันคืน instance ที่ identical() กัน — singleton จริง ไม่ใช่แค่ object หน้าตาเหมือนกันสองตัว',
   },
   {
     q: 'mixin ใน Dart/Flutter ใช้ทำอะไร?',
@@ -119,24 +536,48 @@ export const quizClasses = [
     answer: 1,
   },
   {
-    q: 'class ต้องมีอะไรถึงจะมี const constructor ได้?',
+    q: 'ใน `class Combined extends Base with A, B` พิสูจน์แล้วข้างบนด้วย test จริง override ของใครชนะ และ super ของมันไปถึงไหน?',
     options: [
-      'ต้อง extend Widget',
-      'field ทุกตัวต้องเป็น final',
-      'ต้องเป็น factory',
-      'ต้องใช้ mixin',
+      'A ชนะ และ super ของมันไปถึง Base ตรง ๆ',
+      'B ชนะ (mixin ที่อยู่ท้ายสุด) และ super ของมันไปถึง A ไม่ใช่ Base — chain linearization จริงที่มีลำดับ',
+      'ถูกผสานกัน รัน body ทั้งคู่',
+      'เป็น undefined behavior',
     ],
     answer: 1,
+    explain: 'ผลลัพธ์ test จริงคือ greet() == "B->A->Base": B (อยู่ท้ายสุด) override ชนะ และ super.greet() ของมันไปถึง A ยืนยันด้วยการสลับลำดับใน test ที่สอง',
   },
   {
-    q: 'extension method ให้คุณทำอะไร?',
+    q: 'sealed, final, base, และ interface class ทั้งสี่แชร์ flutter analyze error จริงตัวไหนเมื่อถูกละเมิดข้าม library boundary ตามที่บทนี้พิสูจน์?',
     options: [
-      'เพิ่ม method ให้ type ที่คุณไม่ได้เป็นเจ้าของ (เช่นเพิ่ม helper ให้ String)',
-      'extend class ด้วย inheritance',
-      'สร้าง type ที่เป็น nullable',
-      'นิยาม mixin',
+      'แต่ละตัวมี error code เฉพาะที่ตั้งชื่อตาม modifier',
+      'invalid_use_of_type_outside_library — code เดียวกันทั้งสี่ตัว ต่างกันแค่ข้อความตาม modifier และตาม extends กับ implements',
+      'ทุกตัว fail แบบเงียบ ๆ ตอน runtime แทน',
+      'compile_time_error_undefined',
     ],
-    answer: 0,
+    answer: 1,
+    explain: 'พิสูจน์แล้วด้วย diagnostic จริงสี่ตัวที่แยกกัน (Vehicle/base, Currency/final, Repository/interface, LoadState/sealed) — ทั้งสี่รายงาน invalid_use_of_type_outside_library',
+  },
+  {
+    q: 'ทำไม Point ต้องเขียน == และ hashCode เองถึงจะทำงานถูกต้องใน Set ตามที่พิสูจน์ข้างบน?',
+    options: [
+      'Set ต้องการ interface พิเศษชื่อ SetElement',
+      'default == ของ Object คือเทียบด้วย identity ไม่ใช่เทียบด้วยค่า — ถ้าไม่ override Point ที่โครงสร้างเท่ากันสองตัวจะ != และทั้งคู่ตกลงไปอยู่ใน Set',
+      'const object ไม่ต้องการ equality เลย',
+      'hashCode เป็น optional ใน Dart',
+    ],
+    answer: 1,
+    explain: 'พิสูจน์แล้วข้างบน: {Point(1, 2), Point(1, 2), Point(3, 4)}.length เท่ากับ 2 ไม่ใช่ 3 — override คือสิ่งที่ทำให้ Point ที่ค่าเท่ากันสองตัว dedupe กัน',
+  },
+  {
+    q: 'ทำไมการ override Box.addAll(List<num>) ด้วย IntBox.addAll(List<int>) ต้องใช้ keyword covariant พิสูจน์แล้วข้างบนด้วย error จริง?',
+    options: [
+      'ไม่ต้องเลย — override แบบไหนก็อนุญาตเสมอ',
+      'กฎ default ของ Dart ห้ามแคบ parameter type ใน override (ไม่งั้น unsound); covariant คือการ opt-out เช็ค soundness นั้นอย่างชัดเจนและจริง พิสูจน์ด้วย invalid_override error จริงถ้าไม่มีมัน',
+      'covariant ใช้ได้กับ return type เท่านั้น',
+      'List<int> กับ List<num> ถือเป็น type เดียวกัน',
+    ],
+    answer: 1,
+    explain: "ถ้าไม่มี covariant บน parameter ของ Box, flutter analyze รายงาน invalid_override error จริง: IntBox.addAll ไม่ใช่ override ที่ถูกต้องของ Box.addAll — เพราะการเรียก addAll(['x']) ผ่าน type Box ฐานจะ unsound ถ้าไม่มีการเช็คนี้",
   },
 ];
 
