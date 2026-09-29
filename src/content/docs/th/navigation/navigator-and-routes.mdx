@@ -1,6 +1,6 @@
 ---
 title: 'Navigator & Routes'
-description: 'Navigator 1.0 — route stack, push และ pop, MaterialPageRoute, named route และการส่งข้อมูลไปข้างหน้ากับรับผลลัพธ์กลับมา'
+description: 'Navigator 1.0 — route stack ที่พิสูจน์ด้วย widget test จริง, PopScope เทียบ WillPopScope ที่ deprecated, FlutterError ของ context ผิด, rootNavigator และเหตุผลที่ go_router ห่อ Router/RouterDelegate'
 sidebar:
   order: 2
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## route stack
 
@@ -27,25 +28,462 @@ export const stackDiagram = `flowchart TB
 
 ปุ่ม back ของเครื่อง, ลูกศร back บน app bar และ swipe-back gesture ทั้งหมดทำสิ่งเดียวกัน: `pop` route ที่อยู่ top
 
-## push และ pop
+## push, pop, pushReplacement, pushNamedAndRemoveUntil — พิสูจน์จริง
 
-คุณเอา `Navigator` มาจาก `BuildContext` ปัจจุบันด้วย `Navigator.of(context)` แล้ว push route ตัว `MaterialPageRoute` ให้ transition animation ที่ถูกต้องตาม platform มาฟรี — และคำว่า "ถูกต้องตาม platform" ก็ขยับไปเรื่อย ๆ: ตั้งแต่ Flutter 3.38 transition default ของ Android คือ `PredictiveBackPageTransitionBuilder` ซึ่งเดินตาม back gesture ของผู้ใช้และ preview หน้าปลายทางข้างล่างให้เห็นระหว่างลาก คุณได้มันมาโดยไม่ต้องแก้ code เพราะ `MaterialPageRoute` อ่าน transition มาจาก theme
+คุณเอา `Navigator` มาจาก `BuildContext` ปัจจุบันด้วย `Navigator.of(context)` แล้วเรียก operation บน stack ได้สี่แบบ `push` กับ `pop` เพิ่ม/ลด stack ทีละหนึ่ง; `pushReplacement` สลับ entry ที่อยู่ *top* ด้วยอันใหม่โดยไม่แตะความลึกด้านล่าง; `pushNamedAndRemoveUntil` push named route ใหม่แล้ว pop ทุกอันด้านล่างที่ไม่ผ่าน predicate — `(route) => false` เคลียร์ทั้ง stack เป็น pattern มาตรฐานของ "log out" / "onboarding เสร็จแล้ว"
 
 ```dart
-// Push a new screen onto the stack.
-Navigator.of(context).push(
-  MaterialPageRoute(builder: (context) => const DetailScreen()),
-);
+// lib/stack_screens.dart
+import 'package:flutter/material.dart';
 
-// Pop back to the previous screen.
-Navigator.of(context).pop();
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: TextButton(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (context) => const ListScreen()),
+          ),
+          child: const Text('Home — go to List'),
+        ),
+      ),
+    );
+  }
+}
+
+class ListScreen extends StatelessWidget {
+  const ListScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('List'),
+            TextButton(
+              onPressed: () async {
+                // push<int> + await: the pushed screen's pop(value) resolves this Future.
+                final picked = await Navigator.of(context).push<int>(
+                  MaterialPageRoute<int>(builder: (context) => const DetailScreen()),
+                );
+                lastPoppedResult = picked;
+              },
+              child: const Text('List — go to Detail'),
+            ),
+            TextButton(
+              // pushReplacement: swaps List for Settings. Home, below List, is untouched.
+              onPressed: () => Navigator.of(context).pushReplacement(
+                MaterialPageRoute<void>(builder: (context) => const SettingsScreen()),
+              ),
+              child: const Text('List — replace with Settings'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class DetailScreen extends StatelessWidget {
+  const DetailScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: TextButton(
+          onPressed: () => Navigator.of(context).pop(42),
+          child: const Text('Detail — pop with 42'),
+        ),
+      ),
+    );
+  }
+}
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+  @override
+  Widget build(BuildContext context) =>
+      const Scaffold(body: Center(child: Text('Settings')));
+}
+
+/// A plain top-level var, not app state — just a hook so the test below can
+/// read the value that `pop(42)` sent back through the awaited `push<int>`.
+int? lastPoppedResult;
 ```
 
-`builder` คือ function ที่ return widget ของหน้าจอ — รันตอน route ถูกสร้าง ไม่ใช่ตอนคุณเรียก `push`
+```dart
+// test/stack_screens_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/stack_screens.dart';
 
-## ส่งข้อมูลไปข้างหน้า
+void main() {
+  testWidgets(
+    'push/pop moves the stack and returns a value; pushReplacement swaps the top without changing depth below it',
+    (tester) async {
+      lastPoppedResult = null;
+      await tester.pumpWidget(const MaterialApp(home: HomeScreen()));
+      expect(find.text('Home — go to List'), findsOneWidget);
 
-วิธีที่สะอาดที่สุดในการส่งข้อมูลไปหน้าจอถัดไปคือ **constructor argument** ธรรมดา ไม่มีเวทมนตร์ ไม่มี global state — แค่ส่งเข้าไป
+      await tester.tap(find.text('Home — go to List'));
+      await tester.pumpAndSettle();
+      expect(find.text('List'), findsOneWidget);
+
+      await tester.tap(find.text('List — go to Detail'));
+      await tester.pumpAndSettle();
+      expect(find.text('Detail — pop with 42'), findsOneWidget);
+
+      await tester.tap(find.text('Detail — pop with 42'));
+      await tester.pumpAndSettle();
+      expect(find.text('List'), findsOneWidget, reason: 'pop reveals the screen below on the stack');
+      expect(lastPoppedResult, 42, reason: 'the value passed to pop() travels back through the awaited push<int>()');
+
+      await tester.tap(find.text('List — replace with Settings'));
+      await tester.pumpAndSettle();
+      expect(find.text('Settings'), findsOneWidget);
+      expect(find.text('List'), findsNothing, reason: 'pushReplacement removed List — it did not stay stacked underneath');
+
+      final navigator = tester.state<NavigatorState>(find.byType(Navigator).first);
+      expect(navigator.canPop(), isTrue, reason: 'Home is still below Settings — pushReplacement only swapped the top entry');
+
+      navigator.pop();
+      await tester.pumpAndSettle();
+      expect(find.text('Home — go to List'), findsOneWidget, reason: 'popping Settings reveals Home directly — List never reappears, because it was replaced, not pushed over');
+    },
+  );
+}
+```
+
+```text
+✓ push/pop moves the stack and returns a value; pushReplacement swaps the top without changing depth below it
+
+00:00 +1: All tests passed!
+```
+
+`pushNamedAndRemoveUntil` ต้องมี named route ถึงจะสาธิตได้ เลยแยกเป็นแอปเล็ก ๆ ของตัวเอง:
+
+```dart
+// lib/remove_until_app.dart
+import 'package:flutter/material.dart';
+
+class RemoveUntilApp extends StatelessWidget {
+  const RemoveUntilApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      initialRoute: '/',
+      routes: {
+        '/': (context) => const NamedHome(),
+        '/settings': (context) => const NamedSettings(),
+        '/login': (context) => const NamedLogin(),
+      },
+    );
+  }
+}
+
+class NamedHome extends StatelessWidget {
+  const NamedHome({super.key});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: TextButton(
+      onPressed: () => Navigator.of(context).pushNamed('/settings'),
+      child: const Text('Home'),
+    ),
+  );
+}
+
+class NamedSettings extends StatelessWidget {
+  const NamedSettings({super.key});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: TextButton(
+      // (route) => false rejects every existing route, so ALL of them —
+      // including Home — are removed, not just the ones "above" /login.
+      onPressed: () => Navigator.of(context)
+          .pushNamedAndRemoveUntil('/login', (route) => false),
+      child: const Text('Settings — log out'),
+    ),
+  );
+}
+
+class NamedLogin extends StatelessWidget {
+  const NamedLogin({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: Text('Login'));
+}
+```
+
+```dart
+// test/remove_until_app_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/remove_until_app.dart';
+
+void main() {
+  testWidgets('pushNamedAndRemoveUntil((route) => false) clears the ENTIRE stack, not just routes above the target', (tester) async {
+    await tester.pumpWidget(const RemoveUntilApp());
+    await tester.tap(find.text('Home'));
+    await tester.pumpAndSettle();
+    expect(find.text('Settings — log out'), findsOneWidget);
+
+    await tester.tap(find.text('Settings — log out'));
+    await tester.pumpAndSettle();
+    expect(find.text('Login'), findsOneWidget);
+
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator).first);
+    expect(navigator.canPop(), isFalse, reason: 'Home and Settings are both gone — Login is the only entry left on the stack');
+  });
+}
+```
+
+```text
+✓ pushNamedAndRemoveUntil((route) => false) clears the ENTIRE stack, not just routes above the target
+
+00:00 +1: All tests passed!
+```
+
+## `PopScope` และทำไม `WillPopScope` ถึงหายไป
+
+การดัก back gesture แต่ก่อนใช้ `WillPopScope` ตอนนี้มันถูก deprecated แล้ว — ยกคำมาจาก annotation ตรง ๆ จาก Flutter SDK 3.47.5 ที่ติดตั้งอยู่ (`packages/flutter/lib/src/widgets/will_pop_scope.dart`):
+
+> `@Deprecated('Use PopScope instead. The Android predictive back feature will not work with WillPopScope. This feature was deprecated after v3.12.0-1.0.pre.')`
+
+ตัวแทนคือ `PopScope<T>` ซึ่งมี member สำคัญสองตัว (ยกจาก SDK ที่ติดตั้งอยู่เช่นกัน `packages/flutter/lib/src/widgets/pop_scope.dart`):
+
+- **`canPop`** (`bool`, default `true`) — ถ้า `false`, system back gesture (รวมถึง preview ของ predictive back) จะถูกปิดสำหรับ route นี้
+- **`onPopInvokedWithResult`** (`PopInvokedWithResultCallback<T>?`) — ถูกเรียก **หลัง** จากที่ pop ถูกจัดการแล้ว พร้อม `didPop` (เกิดขึ้นจริงหรือไม่) และ `result` ของ pop มันยัง fire ด้วย `didPop: false` เมื่อ `canPop: false` บล็อกการ pop ไว้ — นี่ไม่ใช่ callback แบบ "veto" `canPop` ต่างหากที่เป็นตัว veto
+
+แต่ก่อนมี `onPopInvoked` (ไม่มี `Result`) — ตัวมันเองก็ถูก deprecated บน `PopScope` เช่นกัน ยกจากไฟล์เดียวกัน: `@Deprecated('Use onPopInvokedWithResult instead. This feature was deprecated after v3.22.0-12.0.pre.')`
+
+```dart
+// lib/pop_scope_demo.dart
+import 'package:flutter/material.dart';
+
+/// Records `onPopInvokedWithResult` calls so the test can assert on them —
+/// a top-level list plays the same role `lastPoppedResult` played above.
+final popScopeEvents = <String>[];
+
+class PopScopeHost extends StatelessWidget {
+  const PopScopeHost({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: TextButton(
+        onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (context) => const PopScopeDemo()),
+        ),
+        child: const Text('Root — push guarded screen'),
+      ),
+    );
+  }
+}
+
+class PopScopeDemo extends StatefulWidget {
+  const PopScopeDemo({super.key});
+  @override
+  State<PopScopeDemo> createState() => _PopScopeDemoState();
+}
+
+class _PopScopeDemoState extends State<PopScopeDemo> {
+  bool guardEnabled = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !guardEnabled,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        popScopeEvents.add(didPop ? 'popped' : 'blocked');
+      },
+      child: Scaffold(
+        body: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Guarded screen'),
+            TextButton(
+              onPressed: () => setState(() => guardEnabled = false),
+              child: const Text('Disable guard'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/pop_scope_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/pop_scope_demo.dart';
+
+void main() {
+  testWidgets('PopScope(canPop:false) blocks the pop and still fires onPopInvokedWithResult(false, ...); disabling the guard lets it through', (tester) async {
+    popScopeEvents.clear();
+    await tester.pumpWidget(const MaterialApp(home: PopScopeHost()));
+    await tester.tap(find.text('Root — push guarded screen'));
+    await tester.pumpAndSettle();
+    expect(find.text('Guarded screen'), findsOneWidget);
+
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator).first);
+
+    navigator.maybePop();
+    await tester.pumpAndSettle();
+    expect(find.text('Guarded screen'), findsOneWidget, reason: 'canPop:false blocked the pop — still on the guarded screen');
+    expect(popScopeEvents, ['blocked'], reason: 'the callback still fires, with didPop:false — it reports, it does not itself veto');
+
+    await tester.tap(find.text('Disable guard'));
+    await tester.pump();
+    navigator.maybePop();
+    await tester.pumpAndSettle();
+    expect(find.text('Root — push guarded screen'), findsOneWidget, reason: 'guard disabled — the pop went through this time');
+    expect(popScopeEvents, ['blocked', 'popped']);
+  });
+}
+```
+
+```text
+✓ PopScope(canPop:false) blocks the pop and still fires onPopInvokedWithResult(false, ...); disabling the guard lets it through
+
+00:00 +1: All tests passed!
+```
+
+### predictive back บน Android
+
+ตั้งแต่ Flutter 3.38 page transition default บน `TargetPlatform.android` คือ `PredictiveBackPageTransitionsBuilder` — ชื่อ class จริง ยืนยันตรงกับ SDK source ที่ติดตั้งอยู่ (`packages/flutter/lib/src/material/page_transitions_theme.dart`, map `_defaultBuilders`: `TargetPlatform.android: PredictiveBackPageTransitionsBuilder()`) มันเดินตาม back gesture ของผู้ใช้และ preview หน้าปลายทางข้างล่างให้เห็นระหว่างลาก คุณได้มันมาฟรีจาก `MaterialPageRoute` ไม่ต้องแก้ code เพราะ transition ถูกอ่านมาจาก `PageTransitionsTheme`
+
+<Callout title="typo ของคอร์สที่แก้แล้ว">
+draft ก่อนหน้าของบทนี้สะกดชื่อ class ผิดเป็น `PredictiveBackPageTransitionBuilder` (ขาดตัว "s" หลัง "Transitions") เลขเวอร์ชัน 3.38 ถูกต้องอยู่แล้ว — ผิดแค่การสะกด ถ้าเจอรูป singular ที่ไหนก็ตาม รวมถึงใน AI-generated code เก่า ๆ มันคอมไพล์ไม่ผ่าน: `grep -c "PredictiveBackPageTransitionBuilder\b"` (ไม่มี s) ทั่วทั้ง Flutter SDK 3.47.5 ที่ติดตั้งอยู่ ได้ผลลัพธ์ **0**
+</Callout>
+
+เฉพาะบน Android, preview ของ predictive back ระดับ OS (เฟรมที่ลอกออกให้เห็นหน้าก่อนหน้า/หน้า home) ต้องการ flag เปิดใช้เพิ่มอีกอันหนึ่ง ตาม [คู่มือ predictive back ของ `docs.flutter.dev`](https://docs.flutter.dev/platform-integration/android/predictive-back):
+
+```xml
+<!-- android/app/src/main/AndroidManifest.xml, inside <activity> -->
+android:enableOnBackInvokedCallback="true"
+```
+
+และ Android 14 (API 34) ขึ้นไปเปิด animation ของ predictive back ระดับระบบเป็น default ทันทีที่ flag นี้ถูกตั้ง `PopScope` — ไม่ใช่ `WillPopScope` ที่ deprecated แล้ว — คือตัวที่ทำให้ logic การดัก back ของ route เข้ากันได้กับ gesture นี้: หน้า docs เดียวกันบอกตรง ๆ ว่า **"`PopScope` replaces the deprecated `WillPopScope` widget and supports predictive back gestures."**
+
+## Navigator 2.0: `Router`, `RouterDelegate`, `RouteInformationParser`
+
+ทั้งหมดข้างบนคือ Navigator 1.0 — การเรียก `push`/`pop` แบบ imperative Flutter ยังมีระบบ routing แบบ **declarative** ด้วย เรียกว่า Navigator 2.0 ประกอบจากสามชิ้นที่ทำงานร่วมกัน (`api.flutter.dev/flutter/widgets/Router-class.html`):
+
+- **`Router`** — ตัว dispatcher มันฟัง OS เพื่อรับข้อมูล routing (deep link, browser URL, `pushNamed`) แล้วส่งต่อ
+- **`RouteInformationParser`** — แปลงข้อมูล routing ดิบนั้นเป็น typed app-state object ของคุณเอง
+- **`RouterDelegate`** — เอา typed state นั้นมาสร้าง `Navigator` จริง (list ของ `Page`) ที่สอดคล้องกัน และยังต้อง report state *กลับ* เมื่อ `Navigator` เอง pop อะไรบางอย่าง (เช่น system back gesture) เพื่อให้ URL/OS routing state กับ widget tree sync กันทั้งสองทาง
+
+<Mermaid title="ชิ้นส่วนของ Navigator 2.0" code={router2Diagram} />
+
+export const router2Diagram = `flowchart LR
+  os["OS routing info\n(deep link, browser URL)"] --> router["Router"]
+  router --> parser["RouteInformationParser\n(raw -> typed state)"]
+  parser --> delegate["RouterDelegate\n(typed state -> Navigator/Page list)"]
+  delegate --> nav["Navigator"]
+  nav -->|"pop reported back"| delegate`;
+
+นี่คือพลังจริง (URL-driven navigation, ควบคุม `Page` stack ทั้งหมดแบบเจาะจงสำหรับ state restoration และ deep link) แลกมาด้วย boilerplate จริง ๆ — คุณต้องเขียน `RouteInformationParser` กับ `RouterDelegate` เอง ต่อ `ChangeNotifier` เข้า delegate ให้มัน rebuild เมื่อ state เปลี่ยน แล้ว reimplement สิ่งที่ Navigator 1.0 ให้คุณมาฟรี นี่คือเหตุผลตรง ๆ ที่ ecosystem ไม่เขียน `RouterDelegate` subclass เองสำหรับแอปทั่วไป: [คำอธิบายของ go_router เองบน pub.dev](https://pub.dev/packages/go_router) บอกตรง ๆ — go_router "is a declarative routing package for Flutter that uses the Router API to provide a convenient, url-based API for navigating between different screens." go_router *คือ* คู่ `RouterDelegate`/`RouteInformationParser` ที่ package เขียนไว้ให้ครั้งเดียว คุณแค่ config มันด้วย list ของ `GoRoute` แทนที่จะเขียน delegate เอง — บทถัดไปคือ API นั้น
+
+## `Navigator.of(context)` นอก `Navigator` — error จริง และ `rootNavigator: true`
+
+`Navigator.of(context)` เดินขึ้น widget tree จาก `context` เพื่อหา `Navigator` ที่ใกล้ที่สุด ถ้าไม่มีเลย มันจะ throw — ข้อความจริง ยกมาจาก SDK ที่ติดตั้งอยู่ (`packages/flutter/lib/src/widgets/navigator.dart`) ไม่ต้องมี app code เพิ่มเพื่อพิสูจน์เลย — test เรียก `Navigator.of()` ตรง ๆ กับ context ที่ไม่มี `Navigator` เป็น ancestor เลย:
+
+```dart
+// test/navigator_of_errors_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  testWidgets('Navigator.of(context) throws FlutterError with the real message when there is no Navigator ancestor', (tester) async {
+    late BuildContext capturedContext;
+    await tester.pumpWidget(Builder(builder: (context) {
+      capturedContext = context;
+      return const SizedBox.shrink();
+    }));
+
+    expect(
+      () => Navigator.of(capturedContext),
+      throwsA(
+        isA<FlutterError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('Navigator operation requested with a context that does not include a Navigator.'),
+        ),
+      ),
+    );
+  });
+}
+```
+
+```text
+✓ Navigator.of(context) throws FlutterError with the real message when there is no Navigator ancestor
+
+00:00 +1: All tests passed!
+```
+
+วิธีที่มันเกิดขึ้นบ่อยที่สุดในโค้ดจริงไม่ใช่ "ลืม `MaterialApp`" — แต่คือการเรียก `Navigator.of(context)` ด้วย `context` จาก **เหนือ** route ที่คุณเพิ่ง push (เช่น `context` ที่ callback closure ไว้ก่อนจะ push แทนที่จะเป็น `context` ของหน้าจอที่ push เอง) หรือจากใน widget ที่กำลังถูก build เป็น *ส่วนหนึ่งของ* route transition เอง ก่อนที่ subtree นั้นจะถูก attach เข้าไปใต้ `Navigator` ใด ๆ
+
+`rootNavigator: true` แก้ปัญหาตรงข้ามกัน: **มี `Navigator` เยอะเกินไป** ให้เลือก widget ตัวหนึ่งสามารถฝัง `Navigator` ของตัวเอง (wizard, back-stack ของ tab ที่ nest อยู่, `Navigator` ที่ `showDialog` สร้างขึ้นภายใน) — โดย default `Navigator.of(context)` จะหาตัวที่ *ใกล้ที่สุด* แต่บางทีคุณต้องการตัวที่อยู่นอกสุดแทน (เพื่อ pop full-screen dialog จากลึกเข้าไปในเนื้อหาของมัน เป็นต้น)
+
+```dart
+// lib/root_navigator_demo.dart
+import 'package:flutter/material.dart';
+
+/// A widget that embeds its OWN nested Navigator — the shape of an in-page
+/// wizard, a nested tab's own back-stack, or what showDialog builds internally.
+class RootNavigatorDemo extends StatelessWidget {
+  const RootNavigatorDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Navigator(
+        onGenerateRoute: (settings) => MaterialPageRoute(
+          builder: (context) => const Center(child: Text('Inner navigator route')),
+        ),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/root_navigator_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/root_navigator_demo.dart';
+
+void main() {
+  testWidgets('rootNavigator:true resolves to the OUTERMOST Navigator, not the nearest one', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: RootNavigatorDemo()));
+    await tester.pumpAndSettle();
+
+    final innerContext = tester.element(find.text('Inner navigator route'));
+    final nearest = Navigator.of(innerContext);
+    final root = Navigator.of(innerContext, rootNavigator: true);
+
+    expect(identical(nearest, root), isFalse, reason: 'two distinct NavigatorState instances answer the same context');
+    expect(
+      identical(root, tester.state<NavigatorState>(find.byType(Navigator).first)),
+      isTrue,
+      reason: 'rootNavigator:true walks all the way out — to MaterialApp\'s own Navigator, the first one built',
+    );
+  });
+}
+```
+
+```text
+✓ rootNavigator:true resolves to the OUTERMOST Navigator, not the nearest one
+
+00:00 +1: All tests passed!
+```
+
+## ส่งข้อมูลไปข้างหน้า และ named route เทียบ `onGenerateRoute`
+
+วิธีที่สะอาดที่สุดในการส่งข้อมูลไปหน้าจอถัดไปคือ **constructor argument** ธรรมดา — ไม่มีเวทมนตร์ ไม่มี global state:
 
 ```dart
 Navigator.of(context).push(
@@ -54,34 +492,13 @@ Navigator.of(context).push(
   ),
 );
 
-// DetailScreen receives it like any widget:
 class DetailScreen extends StatelessWidget {
   const DetailScreen({super.key, required this.userId});
   final int userId;
-  // ...
 }
 ```
 
-## รับผลลัพธ์กลับมา
-
-`Navigator.push` return `Future` ที่ complete เมื่อ route ที่ push ถูก pop — คุณจึง `await` ผลลัพธ์ที่ user เลือกบนหน้าจอถัดไปได้ (การเลือก, การยืนยัน)
-
-```dart
-// Caller awaits the result of the pushed screen.
-final picked = await Navigator.of(context).push<Color>(
-  MaterialPageRoute(builder: (context) => const ColorPicker()),
-);
-if (picked != null) {
-  // use the returned Color
-}
-
-// Inside ColorPicker, return a value by passing it to pop:
-Navigator.of(context).pop(Colors.blue);
-```
-
-## named route
-
-สำหรับแอปเล็ก ๆ คุณลงทะเบียน **named route** ใน `MaterialApp` แล้ว navigate ด้วยชื่อที่เป็น string ได้ วิธีนี้รวม route table ไว้ที่เดียว แต่ระวัง: named route จะยุ่งยากเมื่อต้องส่ง argument ที่มี type และเมื่อทำ deep link นั่นคือเหตุผลที่ ecosystem ย้ายไป declarative routing (บทถัดไป)
+สำหรับแอปเล็ก ๆ คุณลงทะเบียน **named route** ใน `MaterialApp.routes` แล้ว navigate ด้วยชื่อที่เป็น string ได้ — วิธีนี้รวม route table ไว้ที่เดียว:
 
 ```dart
 MaterialApp(
@@ -94,8 +511,93 @@ MaterialApp(
 Navigator.of(context).pushNamed('/settings');
 ```
 
+`routes` เป็น map ตายตัวที่ไม่มีทางเข้าถึง argument ของ route ที่ push ภายใน signature ของ builder เอง `onGenerateRoute` คือทางออก: function ที่รับ `RouteSettings` เต็ม ๆ (ทั้งชื่อ *และ* `arguments`) แล้ว return `Route` ที่คุณสร้างเอง รวมถึงเลือก transition หรือ fallback ไปหน้า 404 สำหรับชื่อที่ไม่ match ได้ด้วย:
+
+```dart
+MaterialApp(
+  onGenerateRoute: (settings) {
+    if (settings.name == '/details') {
+      final id = settings.arguments as int;
+      return MaterialPageRoute(builder: (context) => DetailScreen(userId: id));
+    }
+    return MaterialPageRoute(builder: (context) => const NotFoundScreen());
+  },
+);
+```
+
+ทั้งสองแบบยังคงเป็น string-keyed และ untyped ที่ call site (`settings.arguments as int` คือ runtime cast ไม่ใช่การรับประกันตอน compile-time) และไม่มีคำตอบระดับ first-class สำหรับ deep link ที่มีรูปแบบ URL จริง (`/users/42/posts/7`) — คุณต้อง parse `settings.name` เอง นั่นคือช่องว่างที่ทีมแนะนำ **go_router** สำหรับแอปที่มีหน้าจอเกินหยิบมือเดียว: มันให้ typed path parameter, nested/shell route และ `redirect`-based guard บน `Router` API เดียวกันที่อธิบายไว้ข้างบน โดยไม่ต้องเขียน `RouterDelegate` เอง — บทถัดไป
+
+## Mental Model
+
+คิดว่า `Navigator` คือ `List<Route>` ที่มี mutation ที่อนุญาตแค่สองแบบ คือ `push`/`pop` บวกกับ convenience ที่มีชื่อไม่กี่ตัวที่สร้างจากมัน (`pushReplacement` = pop-แล้ว-push-ในเฟรมเดียวที่ top; `pushNamedAndRemoveUntil` = push แล้ว pop ทุกอันที่ไม่ผ่าน predicate) ทุก route คือ *element ใน list นั้น* — `pushReplacement` ไม่แตะอะไรที่อยู่ใต้ top เลย นั่นคือเหตุผลที่ Home รอดจากการสลับของ `pushReplacement` ข้างบน แต่ไม่รอดจากการเคลียร์เต็ม ๆ ของ `pushNamedAndRemoveUntil((route) => false)` `PopScope` ไม่ได้อยู่ "ใน" list นั้นเลย — มันคือ widget *ข้างใน* subtree ของ route เองที่มีสิทธิ์ออกเสียง (`canPop`) ว่าการขอ pop กับ *route นั้นโดยเฉพาะ* จะถูกยอมหรือไม่ และรายงาน (`onPopInvokedWithResult`) ไม่ว่าผลจะเป็นอะไร
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| Navigator 1.0 (`push`/`pop`, `MaterialPageRoute`) | ตั้งค่าน้อยที่สุด เรียนรู้ง่าย เหมาะกับ flow ง่าย ๆ | ไม่รองรับ URL, deep link ต้อง parse เอง, stack state ไม่ serialize ได้เองตามธรรมชาติ |
+| Named route (`MaterialApp.routes`) | route table รวมศูนย์ เขียนสั้น | ไม่มี typed argument ไม่มีทางเข้าถึง argument ต่อ route ใน builder |
+| `onGenerateRoute` | ควบคุมได้เต็มต่อ route (argument, transition, fallback 404) | ยังเป็น string-keyed, ยังต้อง runtime cast สำหรับ argument, จัดการ 404 เอง |
+| Navigator 2.0 (`Router`/`RouterDelegate` เขียนเอง) | ควบคุมแบบ declarative เต็มรูปแบบ, URL sync จริง, `Page` stack ที่แม่นยำสำหรับ state restoration | boilerplate จริง — `RouterDelegate` + `RouteInformationParser` ที่คุณเขียนและดูแลเอง |
+| go_router (บทถัดไป) | พลังของ Router 2.0 ผ่าน API แบบ list `GoRoute`, typed path, `redirect` guard | ต้องตาม version package เพิ่มอีกตัว; ยังคุ้มที่จะรู้ Navigator 1.0/2.0 เพื่อเข้าใจว่ามันห่ออะไรอยู่ |
+
+## Common Misconceptions
+
+- **"`WillPopScope` ยังใช้ได้ดี แค่เก่าไปหน่อย"** มันคือ `@Deprecated` ใน SDK 3.47.5 ที่ติดตั้งอยู่ และตาม docs มันรองรับ predictive back ไม่ได้โดยโครงสร้าง — annotation บอกตรง ๆ ว่า *"The Android predictive back feature will not work with WillPopScope."*
+- **"`onPopInvokedWithResult` ของ `PopScope` ป้องกันการ pop ได้"** มันทำไม่ได้ — มัน fire *หลัง* ที่ pop ถูกตัดสินใจแล้ว `canPop` เท่านั้นที่เป็นตัว veto พิสูจน์แล้วข้างบน (`popScopeEvents` บันทึก `'blocked'` จาก callback ในขณะที่หน้าจอไม่เปลี่ยนเลย)
+- **"`pushReplacement` เคลียร์ทั้ง stack"** มันสลับแค่ entry เดียว — ตัว top เท่านั้น ทุกอย่างข้างล่างไม่ถูกแตะ พิสูจน์แล้วข้างบน (`canPop()` ยัง `true` และการ pop Settings เผย Home ตรง ๆ)
+- **"Named route กับ `onGenerateRoute` ให้ argument แบบ type-safe"** ทั้งสองส่ง `Object?`/`arguments` ผ่าน `RouteSettings` — ทุกครั้งที่อ่านคือ runtime cast ไม่ใช่การรับประกันตอน compile-time
+- **"`Navigator.of(context)` หา Navigator ตัวเดียวกันเสมอไม่ว่าจะส่ง context ไหน"** มันหาตัวที่ *ใกล้ที่สุด* และ widget สามารถ nest ของตัวเองได้ — พิสูจน์แล้วข้างบน (`nearest` กับ `root` เป็น `NavigatorState` คนละตัวกันจริงสำหรับ context เดียวกัน)
+
+## Reading AI-generated code
+
+pattern ที่ AI-generated เจอบ่อยมาก: helper แบบ async "save แล้วกลับไปหน้าก่อน" ที่อ่านดูสะอาดแต่ถือ `BuildContext` ข้าม `await`
+
+```dart
+// AI-generated: "save then go back"
+Future<void> saveAndClose(BuildContext context) async {
+  await saveToDatabase();
+  Navigator.of(context).pop();
+}
+```
+
+ผลลัพธ์จริงจาก `flutter analyze` บน snippet นี้ตรง ๆ จาก probe นี้:
+
+```text
+info • Don't use 'BuildContext's across async gaps. Try rewriting the code to not use
+       the 'BuildContext', or guard the use with a 'mounted' check
+     • lib/bug.dart:5:16 • use_build_context_synchronously
+```
+
+widget ที่เรียก `saveAndClose` อาจถูก pop, unmount หรือแทนที่ระหว่าง `await saveToDatabase()` — การใช้ `context` ของมันหลังจากนั้นคือ behavior ที่ไม่แน่นอน (อาจ throw หรือชี้ไปที่ element ที่ตายไปแล้วอย่างเงียบ ๆ) วิธีแก้คือ `mounted` guard แบบเดียวกับที่โมดูล state-management พิสูจน์ไว้สำหรับ `setState` แค่เอามาใช้กับ `Navigator.of(context)` แทน:
+
+```dart
+Future<void> saveAndClose(BuildContext context) async {
+  await saveToDatabase();
+  if (!context.mounted) return;   // guard the BuildContext use after the await
+  Navigator.of(context).pop();
+}
+```
+
+<SpotTheBug code={`// AI-generated: "guard the exit with a confirmation dialog"
+class EditScreen extends StatelessWidget {
+  const EditScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: () async {
+        final leave = await showExitDialog(context);
+        return leave ?? false;
+      },
+      child: const Scaffold(body: Text('Editing...')),
+    );
+  }
+}`}>
+โค้ดนี้ compile ผ่าน (พร้อม deprecation warning) แต่ผิดด้วยสองเหตุผลแยกกัน อย่างแรก `WillPopScope` เป็น `@Deprecated` ตั้งแต่ v3.12.0-1.0.pre — annotation บอกตรง ๆ ว่า "the Android predictive back feature will not work" กับมัน ดังนั้นบน Android 14+ ที่เปิด predictive back ไว้ การยืนยันออกจากหน้าจะถูกข้ามอย่างเงียบ ๆ โดย preview ระดับ OS ไม่ถูกดักไว้เลย อย่างที่สอง แม้จะไม่นับเรื่อง deprecation `onWillPop` ตอบได้แค่ *หลังจากรู้ผลแล้ว* เท่านั้น (`Future<bool>`) — มันแสดง live preview ระหว่าง gesture ไม่ได้ ซึ่งเป็นประเด็นหลักของ predictive back เลย วิธีแก้คือ `PopScope(canPop: false, onPopInvokedWithResult: (didPop, result) async { if (didPop) return; final leave = await showExitDialog(context); if (leave == true && context.mounted) Navigator.of(context).pop(); })` — `canPop: false` บล็อกการ pop ไว้ล่วงหน้า (เข้ากันได้กับ preview ของ predictive back) และ dialog รันก็ต่อเมื่อมีความพยายาม pop จริงที่ถูกบล็อกไปแล้วเท่านั้น
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`Navigator` จัดการ **stack ของ route**; `push` เพิ่มหน้าจอ, `pop` เอาออก และปุ่ม back ก็แค่ pop ห่อหน้าจอด้วย `MaterialPageRoute` เพื่อได้ transition ที่ถูกต้อง, ส่งข้อมูลไปข้างหน้าด้วย **constructor argument** ธรรมดา และรับผลลัพธ์กลับด้วยการ `await` `push` (หน้าจอที่ push return ค่ากลับผ่าน `pop(value)`) named route มีอยู่แต่ scale ได้ไม่ดี — เป็นสัญญาณไปสู่ declarative routing ต่อไป
+`Navigator` คือ stack: `push`/`pop` ขยับทีละหนึ่ง, `pushReplacement` สลับแค่ top, `pushNamedAndRemoveUntil` เคลียร์ทุกอย่างข้างล่าง predicate ได้ — ทั้งสี่พิสูจน์แล้วข้างบนด้วย `flutter test` output จริง `PopScope` (ไม่ใช่ `WillPopScope` ที่ deprecated แล้วและรองรับ predictive back ไม่ได้) คือวิธีปัจจุบันในการดัก pop: `canPop` เป็นตัว veto, `onPopInvokedWithResult` แค่รายงานเท่านั้น `Navigator.of(context)` throw `FlutterError` จริง — *"Navigator operation requested with a context that does not include a Navigator"* — นอก `Navigator` ใด ๆ และหาตัวที่ *ใกล้ที่สุด* เว้นแต่คุณส่ง `rootNavigator: true` Named route กับ `onGenerateRoute` ยังเป็น string-keyed และ untyped ทั้งคู่; ช่องว่างนี้บวกกับความต้องการ URL sync จริง (Navigator 2.0's `Router`/`RouterDelegate`/`RouteInformationParser` โดยไม่ต้องเขียนเอง) คือเหตุผลที่ทีมแนะนำ go_router — บทถัดไป
 </Callout>
 
 export const quizNav = [
@@ -108,36 +610,73 @@ export const quizNav = [
       'map ของ URL',
     ],
     answer: 1,
+    explain: 'push เพิ่มที่ top, pop เอาออกจาก top — พิสูจน์แล้วข้างบนด้วย widget test จริงที่เดิน Home -> List -> Detail แล้วย้อนกลับ',
   },
   {
-    q: 'วิธีที่แนะนำในการส่งข้อมูลไปหน้าจอถัดไปคืออะไร?',
+    q: 'หลังจาก `pushReplacement` สลับ List เป็น Settings บน stack ที่เดิมคือ [Home, List], `Navigator.canPop()` รายงานอะไร ตาม test ในบทนี้?',
     options: [
-      'global variable',
-      'constructor argument ธรรมดาบน widget ปลายทาง',
-      'platform channel',
-      'ไฟล์ JSON',
+      'false — pushReplacement เคลียร์ทั้ง stack',
+      'true — Home ยังอยู่ใต้ Settings; สลับแค่ entry บนสุด',
+      'มัน throw เพราะ route ที่ถูกแทนที่ไม่มีอยู่แล้ว',
+      'true ก็ต่อเมื่อ List มี children',
     ],
     answer: 1,
+    explain: 'test ใน probe assert ตรง ๆ ว่า canPop() เป็น true หลังการแทนที่ แล้ว pop เพื่อเผย Home ตรง ๆ พิสูจน์ว่า List ไม่กลับมาอีกเลยและ Home ไม่ถูกแตะเลย',
   },
   {
-    q: 'จะรับค่ากลับจากหน้าจอที่ user โต้ตอบด้วยอย่างไร?',
+    q: 'ชื่อ class จริงและปัจจุบันของ page transition default บน Android ตั้งแต่ Flutter 3.38 — ยืนยันกับ SDK source ที่ติดตั้งอยู่ คืออะไร?',
     options: [
-      'อ่าน global หลังจากหน้าจอปิด',
-      '`await` Future จาก `push` แล้วให้หน้าจอ return ค่าผ่าน `pop(value)`',
-      'ใช้ setState บนตัวเรียก',
-      'return ค่าไม่ได้',
+      'PredictiveBackPageTransitionBuilder',
+      'PredictiveBackPageTransitionsBuilder',
+      'AndroidBackTransitionBuilder',
+      'MaterialBackGestureBuilder',
     ],
     answer: 1,
+    explain: 'grep ตรง packages/flutter/lib/src/material/page_transitions_theme.dart แสดงรูป plural ("...Transitions...") ทั้งในการประกาศ class และใน map _defaultBuilders ส่วนรูป singular มี 0 match ทั่วทั้ง SDK',
   },
   {
-    q: 'ทำไม ecosystem ถึงย้ายออกจาก named route สำหรับแอปใหญ่?',
+    q: 'callback `onPopInvokedWithResult` ของ PopScope ทำอะไรจริง ๆ ตามที่ widget test ในบทนี้พิสูจน์?',
     options: [
-      'render ช้ากว่า',
-      'ยุ่งยากเมื่อต้องใช้ argument ที่มี type และทำ deep link',
-      'แสดง animation ไม่ได้',
-      'ทำงานเฉพาะบน Android',
+      'มัน return false เพื่อยกเลิกการ pop ได้',
+      'มันแค่รายงานหลังจากเกิดเหตุการณ์แล้ว — fire ด้วย didPop:false เมื่อ canPop:false บล็อกความพยายาม แต่ตัวมันเอง veto ไม่ได้',
+      'มันแทน onWillPop ของ WillPopScope ด้วยพฤติกรรม veto แบบเดียวกันเป๊ะ',
+      'มัน fire แค่ตอนที่ pop สำเร็จเท่านั้น',
     ],
     answer: 1,
+    explain: 'test แสดงว่า popScopeEvents บันทึก \'blocked\' (didPop:false) ในขณะที่หน้าจอไม่เปลี่ยนเลย — canPop ต่างหากที่ veto; callback เป็นแค่รายงาน พิสูจน์ทั้งตอนที่ถูกบล็อกและตอนที่สำเร็จภายหลัง',
+  },
+  {
+    q: 'context ไม่มี Navigator เป็น ancestor เลย จะเกิดอะไรขึ้นเมื่อเรียก Navigator.of(context) ตาม FlutterError จริงที่พิสูจน์ในบทนี้?',
+    options: [
+      'return null อย่างเงียบ ๆ',
+      'มัน throw FlutterError: "Navigator operation requested with a context that does not include a Navigator."',
+      'มันสร้าง Navigator แฝงขึ้นมาใหม่โดยอัตโนมัติ',
+      'มันพังแค่ใน release mode เท่านั้น',
+    ],
+    answer: 1,
+    explain: 'จับมาคำต่อคำจาก widget test ที่ pump Builder เปล่า ๆ ที่ไม่มี MaterialApp/Navigator เป็น ancestor แล้วเรียก Navigator.of() ตรง ๆ กับ context ของมัน',
+  },
+  {
+    q: 'widget ฝัง Navigator ของตัวเองอยู่ใน MaterialApp `Navigator.of(context, rootNavigator: true)` resolve ไปเป็นอะไร ตาม identity-comparison test ในบทนี้?',
+    options: [
+      'NavigatorState ตัวเดียวกับ Navigator.of(context) — rootNavigator ไม่มีผลอะไรเว้นแต่มี Navigator ซ้อนกันตั้งแต่ 3 ชั้นขึ้นไป',
+      'Navigator ที่อยู่นอกสุดใน tree (ของ MaterialApp เอง) — เป็น NavigatorState คนละตัวกับตัวที่ใกล้ที่สุด',
+      'มัน throw เพราะมี Navigator ให้เลือกสองตัว',
+      'Navigator ที่ถูก push ล่าสุด',
+    ],
+    answer: 1,
+    explain: 'test assert ว่า identical(nearest, root) เป็น false และ identical(root, Navigator ตัวแรกที่เจอใน tree) เป็น true — rootNavigator:true เดินออกไปจนสุดจริง ๆ',
+  },
+  {
+    q: 'ตาม deprecation annotation ที่ยกมาจาก SDK 3.47.5 ที่ติดตั้งอยู่ ทำไม WillPopScope ถึงใช้ไม่ได้โดยเฉพาะ นอกเหนือจากแค่เป็น API เก่า?',
+    options: [
+      'มัน render ช้ากว่า PopScope',
+      'Android predictive back feature ใช้กับมันไม่ได้ — มันรองรับ preview ของ gesture ไม่ได้โดยโครงสร้าง',
+      'มันทำงานได้แค่บน iOS เท่านั้น',
+      'มันถูกลบออกจาก SDK ไปแล้วทั้งหมดและคอมไพล์ไม่ผ่าน',
+    ],
+    answer: 1,
+    explain: 'ยกมาตรง ๆ จาก will_pop_scope.dart: "Use PopScope instead. The Android predictive back feature will not work with WillPopScope."',
   },
 ];
 
