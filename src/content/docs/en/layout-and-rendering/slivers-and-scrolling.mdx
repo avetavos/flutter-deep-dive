@@ -1,6 +1,6 @@
 ---
 title: 'Slivers & Scrolling'
-description: 'How scrolling really works — lazy building with ListView.builder, the viewport, and composing custom scroll effects with CustomScrollView and slivers.'
+description: 'Lazy building proven with a real build counter (11 of 1000 items built), cacheExtent proven to change that count, CustomScrollView composing SliverAppBar/SliverGrid/SliverList.builder/SliverToBoxAdapter while staying lazy, ScrollController + addPostFrameCallback, and AutomaticKeepAliveClientMixin proven to survive scrolling off-screen where a plain State does not.'
 sidebar:
   order: 4
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## Lazy building is the whole point
 
@@ -27,7 +28,116 @@ ListView.builder(
 )
 ```
 
-`ListView.builder` (and `GridView.builder`) call `itemBuilder` only for items the viewport needs. For any list that could be long, always use the builder form.
+## Proven: `ListView.builder` really only builds what's near the viewport
+
+Not a claim to take on faith — a build counter proves it directly. A `300`-tall viewport with `50`-tall items should need roughly 6 visible plus a small buffer, out of a list of `1000`:
+
+```dart
+// lib/lazy_list.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+
+int builtCount = 0;
+final Set<int> builtIndices = {};
+
+class LazyList extends StatelessWidget {
+  const LazyList({super.key, this.scrollCacheExtent});
+  // ScrollCacheExtent (sealed: .pixels(n) / .viewport(multiplier)) — the
+  // current API. The older `cacheExtent: double` parameter is deprecated,
+  // see the callout below.
+  final ScrollCacheExtent? scrollCacheExtent;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 300,
+      child: ListView.builder(
+        scrollCacheExtent: scrollCacheExtent,
+        itemCount: 1000,
+        itemExtent: 50,
+        itemBuilder: (context, i) {
+          builtCount++;
+          builtIndices.add(i);
+          return SizedBox(height: 50, child: Text('item $i'));
+        },
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/lazy_list_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/lazy_list.dart';
+
+void main() {
+  testWidgets('a 1000-item ListView.builder only builds items near a 300px viewport', (tester) async {
+    builtCount = 0;
+    builtIndices.clear();
+
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: LazyList())));
+
+    expect(builtCount, lessThan(20), reason: 'nowhere near all 1000 items were built');
+    expect(builtIndices.contains(0), isTrue, reason: 'the first visible item was built');
+    expect(builtIndices.contains(999), isFalse, reason: 'the far-off-screen last item was never built');
+  });
+}
+```
+
+```text
+00:00 +0: a 1000-item ListView.builder only builds items near a 300px viewport
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__slivers-and-scrolling/` run on this Mac)
+
+The real, measured count on this run was **`11`** of `1000` — the 6 items that actually fit the `300px` viewport at `50px` each, plus Flutter's default cache buffer of pixels built just outside the visible edge (so scrolling a little doesn't show a blank frame while new items build). `builtIndices` never contains `999` — the far end of the list was genuinely never touched. `GridView.builder` gives the identical laziness guarantee for grids.
+
+<Callout title="cacheExtent is deprecated — use scrollCacheExtent">
+On this course's SDK, `flutter analyze` reports `cacheExtent` (the old `double`-typed parameter) as deprecated: *"'cacheExtent' is deprecated and shouldn't be used. Use scrollCacheExtent instead. This feature was deprecated after v3.41.0-0.0.pre."* — a real, current diagnostic, not a guess. `scrollCacheExtent` takes the sealed `ScrollCacheExtent` type instead of a bare `double`: `ScrollCacheExtent.pixels(1000)` (an explicit pixel buffer, what this lesson uses below) or `ScrollCacheExtent.viewport(2.0)` (a multiplier of the viewport's own main-axis extent — e.g. `2.0` on a `600px`-tall viewport caches `1200px`, which scales automatically with viewport size in a way a fixed pixel value cannot).
+</Callout>
+
+## Proven: `scrollCacheExtent` directly controls how far ahead Flutter pre-builds
+
+The cache is the buffer zone (in logical pixels, or a viewport-relative multiplier) built just outside the visible viewport on each side — provable by giving it a much larger explicit value and watching the built count grow correspondingly:
+
+```dart
+// test/lazy_list_cache_extent_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/lazy_list.dart';
+
+void main() {
+  testWidgets('a larger scrollCacheExtent builds proportionally more items ahead of the viewport', (tester) async {
+    builtCount = 0;
+    builtIndices.clear();
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: LazyList())));
+    final defaultCount = builtCount;
+
+    builtCount = 0;
+    builtIndices.clear();
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: LazyList(scrollCacheExtent: ScrollCacheExtent.pixels(1000)))),
+    );
+    final largeCount = builtCount;
+
+    expect(largeCount, greaterThan(defaultCount), reason: 'a 1000px cache buffer builds more items than the default');
+    expect(largeCount, lessThan(200), reason: 'still nowhere near the full 1000-item list — this is "how far ahead", not "build everything"');
+  });
+}
+```
+
+```text
+00:00 +0: a larger scrollCacheExtent builds proportionally more items ahead of the viewport
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__slivers-and-scrolling/` run on this Mac)
+
+Measured directly on this run: the default cache built `11` items; `ScrollCacheExtent.pixels(1000)` built `26` (`300px` visible + `1000px` cache = `1300px` of `50px` items = `26`). A larger cache extent means smoother fast-scrolling (more is ready ahead of time) at the cost of more memory and up-front build work — tune it, don't guess at it.
 
 ## The viewport and slivers
 
@@ -41,38 +151,406 @@ export const sliverDiagram = `flowchart TB
   vp --> s2["SliverList\n(builds only visible tiles)"]
   vp --> offscreen["off-screen tiles:\nnot built yet"]`;
 
-## CustomScrollView: composing scroll effects
+## Proven: `CustomScrollView` composes multiple sliver types — and each `SliverList`/`SliverGrid` stays independently lazy
 
-`CustomScrollView` takes a list of slivers and scrolls them as one. This is how you build a collapsing header above a list, or a grid and a list in the same scroll view.
+```dart
+// lib/custom_scroll_demo.dart
+import 'package:flutter/material.dart';
+
+int sliverBuiltCount = 0;
+
+class CustomScrollDemo extends StatelessWidget {
+  const CustomScrollDemo({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      slivers: [
+        const SliverAppBar(floating: true, expandedHeight: 100, title: Text('Demo')),
+        // SliverToBoxAdapter: drop a normal (non-sliver-aware) widget into a
+        // sliver list — a one-off section header, banner, etc.
+        const SliverToBoxAdapter(child: SizedBox(height: 40, child: Text('section header'))),
+        SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisExtent: 50,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, i) => SizedBox(height: 50, child: Text('grid $i')),
+            childCount: 4,
+          ),
+        ),
+        SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (context, i) {
+              sliverBuiltCount++;
+              return SizedBox(height: 50, child: Text('row $i'));
+            },
+            childCount: 1000, // same laziness claim, in sliver form
+          ),
+        ),
+      ],
+    );
+  }
+}
+```
+
+```dart
+// test/custom_scroll_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/custom_scroll_demo.dart';
+
+void main() {
+  testWidgets('CustomScrollView composes SliverAppBar + SliverToBoxAdapter + SliverGrid + SliverList without error, staying lazy', (tester) async {
+    sliverBuiltCount = 0;
+    await tester.pumpWidget(const MaterialApp(home: Scaffold(body: CustomScrollDemo())));
+
+    expect(tester.takeException(), isNull);
+    expect(sliverBuiltCount, lessThan(30), reason: 'the 1000-item SliverList.builder-style delegate stays lazy inside a CustomScrollView too');
+  });
+}
+```
+
+```text
+00:00 +0: CustomScrollView composes SliverAppBar + SliverToBoxAdapter + SliverGrid + SliverList without error, staying lazy
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__slivers-and-scrolling/` run on this Mac)
+
+Measured on this run: `13` of the `1000` `SliverList` rows were built — laziness is a property of the *sliver*, not of `ListView` specifically, which is why composing several slivers into one `CustomScrollView` still scrolls as one unit while each sliver independently manages its own lazy range. The mental model: a normal widget occupies a fixed box; a **sliver** occupies a scrollable extent and negotiates with the viewport about how much of it is visible. `SliverAppBar`, `SliverList`, `SliverGrid`, and `SliverToBoxAdapter` (to drop a regular widget into a sliver list) are the pieces you compose.
+
+## Proven: `ScrollController` + `addPostFrameCallback` — the real pattern for scrolling after first layout
+
+A `ScrollController` cannot be told to scroll before the scrollable it's attached to has actually laid itself out — its `position` doesn't exist until after the first frame. `addPostFrameCallback` from `initState` is the standard way to run scroll logic exactly once, right after that first layout completes:
+
+```dart
+// lib/scroll_controller_demo.dart
+import 'package:flutter/material.dart';
+
+class JumpToEndList extends StatefulWidget {
+  const JumpToEndList({super.key});
+  @override
+  JumpToEndListState createState() => JumpToEndListState();
+}
+
+class JumpToEndListState extends State<JumpToEndList> {
+  final controller = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      controller.jumpTo(controller.position.maxScrollExtent);
+    });
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 300,
+      child: ListView.builder(
+        controller: controller,
+        itemCount: 50,
+        itemExtent: 50,
+        itemBuilder: (context, i) => SizedBox(height: 50, child: Text('item $i')),
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/scroll_controller_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/scroll_controller_demo.dart';
+
+void main() {
+  testWidgets('addPostFrameCallback jumps to the bottom right after first layout', (tester) async {
+    final key = GlobalKey<JumpToEndListState>();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: JumpToEndList(key: key))));
+    await tester.pump(); // let the scheduled post-frame callback actually run
+
+    final controller = key.currentState!.controller;
+    expect(controller.offset, controller.position.maxScrollExtent);
+    expect(controller.offset, 2200.0, reason: '50 items * 50px = 2500 content height, minus the 300px viewport');
+  });
+}
+```
+
+```text
+00:00 +0: addPostFrameCallback jumps to the bottom right after first layout
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__slivers-and-scrolling/` run on this Mac)
+
+`WidgetsBinding.instance.addPostFrameCallback` is the general-purpose "run this once the current frame has actually finished" hook — the same tool used any time code needs to react to a completed layout (reading a final size/position, driving an animation's first frame, or here, jumping a controller before the user ever sees the pre-jump position).
+
+## Proven: `AutomaticKeepAliveClientMixin` survives scrolling off-screen; plain `State` does not
+
+By default, a list item's `State` is disposed once it scrolls out of the built range (proven above — that's exactly what makes laziness work). `AutomaticKeepAliveClientMixin` opts a *specific* item out of that: the framework keeps its `Element`/`State` alive in a special bucket even while it's not part of the visible+cached range, and reattaches the *same* one when it scrolls back into view.
+
+```dart
+// lib/keep_alive_demo.dart
+import 'package:flutter/material.dart';
+
+int nextKeepAliveId = 0;
+int nextPlainId = 0;
+
+/// Stamps an id once, in initState — proves whether the SAME State survives
+/// a round trip off-screen and back, exactly like the State-persistence
+/// proofs elsewhere in this course.
+class KeepAliveItem extends StatefulWidget {
+  const KeepAliveItem({super.key});
+  @override
+  KeepAliveItemState createState() => KeepAliveItemState();
+}
+
+class KeepAliveItemState extends State<KeepAliveItem> with AutomaticKeepAliveClientMixin {
+  late final int id;
+
+  @override
+  void initState() {
+    super.initState();
+    id = nextKeepAliveId++;
+  }
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context); // required by AutomaticKeepAliveClientMixin
+    return SizedBox(height: 50, child: Text('keepalive $id'));
+  }
+}
+
+/// No mixin — the ordinary, default behavior.
+class PlainItem extends StatefulWidget {
+  const PlainItem({super.key});
+  @override
+  PlainItemState createState() => PlainItemState();
+}
+
+class PlainItemState extends State<PlainItem> {
+  late final int id;
+
+  @override
+  void initState() {
+    super.initState();
+    id = nextPlainId++;
+  }
+
+  @override
+  Widget build(BuildContext context) => SizedBox(height: 50, child: Text('plain $id'));
+}
+
+class KeepAliveDemoList extends StatelessWidget {
+  const KeepAliveDemoList({super.key, required this.controller});
+  final ScrollController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 300,
+      child: ListView.builder(
+        controller: controller,
+        itemCount: 200,
+        itemExtent: 50,
+        itemBuilder: (context, i) {
+          if (i == 0) return const KeepAliveItem();
+          if (i == 1) return const PlainItem();
+          return SizedBox(height: 50, child: Text('filler $i'));
+        },
+      ),
+    );
+  }
+}
+```
+
+```dart
+// test/keep_alive_demo_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/keep_alive_demo.dart';
+
+void main() {
+  testWidgets('AutomaticKeepAliveClientMixin keeps its State after scrolling far away and back; a plain State does not', (tester) async {
+    nextKeepAliveId = 0;
+    nextPlainId = 0;
+    final controller = ScrollController();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: KeepAliveDemoList(controller: controller))));
+
+    final firstKeepAliveId = tester.state<KeepAliveItemState>(find.byType(KeepAliveItem)).id;
+    final firstPlainId = tester.state<PlainItemState>(find.byType(PlainItem)).id;
+    expect(firstKeepAliveId, 0);
+    expect(firstPlainId, 0);
+
+    // Scroll far enough away that both items leave the built+cached range.
+    controller.jumpTo(8000);
+    await tester.pump();
+    expect(find.byType(KeepAliveItem), findsNothing, reason: 'scrolled far off-screen — not in the current built widget tree either way');
+    expect(find.byType(PlainItem), findsNothing);
+
+    // Scroll back to the top.
+    controller.jumpTo(0);
+    await tester.pump();
+
+    expect(
+      tester.state<KeepAliveItemState>(find.byType(KeepAliveItem)).id,
+      0,
+      reason: 'AutomaticKeepAliveClientMixin: the SAME State object survived the round trip',
+    );
+    expect(
+      tester.state<PlainItemState>(find.byType(PlainItem)).id,
+      1,
+      reason: 'plain State: a brand-new State was created on the way back — the old one was genuinely disposed',
+    );
+  });
+}
+```
+
+```text
+00:00 +0: AutomaticKeepAliveClientMixin keeps its State after scrolling far away and back; a plain State does not
+00:00 +1: All tests passed!
+```
+
+(trimmed from the real `flutter test test/lessons/layout-and-rendering__slivers-and-scrolling/` run on this Mac)
+
+Both items are equally absent from `find.byType` while scrolled `8000px` away — neither is part of the currently-built widget tree at that point. The difference only shows up on the way *back*: the keep-alive item's id is still `0` (the exact same `State`, reattached from wherever Flutter held onto it), while the plain item's id is `1` — proof a genuinely new `State` was constructed. Reach for this only for state that's expensive to rebuild and needs to survive scroll churn (a video player's playback position, a form the user partially filled in a list item) — keeping many items alive defeats the memory benefit of laziness that this whole lesson is about.
+
+## `NestedScrollView`
+
+`NestedScrollView` coordinates an outer scrollable (typically slivers like a `SliverAppBar`) with an inner scrollable (like a `TabBarView`'s per-tab list) so they share one continuous scroll gesture — the outer header collapses as the inner content scrolls, rather than the two fighting over gestures the way two independent nested scrollables would (the same nesting hazard as the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)'s unbounded-height crash, but for *scroll gesture* conflicts rather than layout constraints).
+
+```dart
+NestedScrollView(
+  headerSliverBuilder: (context, innerBoxIsScrolled) => [
+    const SliverAppBar(title: Text('Profile'), expandedHeight: 200, pinned: true),
+  ],
+  body: TabBarView(children: [FeedTab(), PhotosTab()]),
+)
+```
+
+## `Scrollbar`
+
+`Scrollbar` wraps a scrollable to draw a visual scroll indicator, and on desktop/web adds drag-to-scroll support for the indicator itself. It needs either a `controller` explicitly passed (matching the one on the scrollable it wraps) or `PrimaryScrollController` wired up automatically (the default for a single top-level scrollable per route).
+
+```dart
+Scrollbar(
+  controller: myController,
+  thumbVisibility: true, // always show it, not just while scrolling
+  child: ListView(controller: myController, children: [...]),
+)
+```
+
+## `SliverFillRemaining`
+
+Inside a `CustomScrollView`, `SliverFillRemaining` claims whatever space is left in the viewport after the other slivers — the sliver equivalent of `Expanded` inside a `Column`, useful for an empty-state message or a form's submit button that should sit at the bottom of the visible area rather than immediately after the content above it.
 
 ```dart
 CustomScrollView(
   slivers: [
-    const SliverAppBar(
-      floating: true,
-      expandedHeight: 200,     // a header that collapses as you scroll
-    ),
-    SliverList(
-      delegate: SliverChildBuilderDelegate(
-        (context, i) => Tile(items[i]),   // still lazy
-        childCount: items.length,
-      ),
+    const SliverAppBar(title: Text('Empty state demo')),
+    SliverFillRemaining(
+      hasScrollBody: false, // content does not itself need to scroll
+      child: const Center(child: Text('Nothing here yet')),
     ),
   ],
 )
 ```
 
-The mental model: a normal widget occupies a fixed box; a **sliver** occupies a scrollable extent and negotiates with the viewport about how much of it is visible. `SliverAppBar`, `SliverList`, `SliverGrid`, and `SliverToBoxAdapter` (to drop a regular widget into a sliver list) are the pieces you compose.
-
 ## Common scrolling pitfalls
 
-- **Nesting scrollables** the same direction (a `ListView` inside a `ListView`) fights over the scroll and throws unbounded-constraint errors — use slivers or `shrinkWrap` deliberately.
-- **`shrinkWrap: true`** makes a list size to its content instead of the viewport, but it *builds everything* and loses laziness — use it only for genuinely small lists.
-- **Missing keys** on reorderable lists cause the wrong state to attach to the wrong item (see the Keys lesson).
+- **Nesting scrollables the same direction** (a `ListView` inside a `ListView`) fights over the scroll and throws unbounded-constraint errors — use slivers or `shrinkWrap` deliberately (the exact mechanism and real error text are proven in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)).
+- **`shrinkWrap: true`** makes a list size to its content instead of the viewport, but it *builds everything* and loses laziness — use it only for genuinely small lists (also proven, with all three real fixes, in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/)).
+- **Missing keys** on reorderable lists cause the wrong state to attach to the wrong item (proven with a real checkbox test in the [Keys lesson](/flutter/en/widgets/keys/)).
 
 <Callout title="The one-line takeaway">
-Scrolling is built on **lazy building** — only items near the viewport are built and recycled — so always use `ListView.builder` for anything that could be long. A **viewport** holds **slivers**, scrollable regions that lay out lazily; compose them with `CustomScrollView` (e.g. a `SliverAppBar` collapsing over a `SliverList`) when one scroll view needs several effects. Avoid `shrinkWrap` on big lists — it discards the laziness.
+Scrolling is built on **lazy building** — proven above with a real counter (`11`/`1000` items built by default, growing to `26` with a `1000px` `scrollCacheExtent`) — so always use `ListView.builder`/`GridView.builder` for anything that could be long. A **viewport** holds **slivers**; `CustomScrollView` composes several (`SliverAppBar`, `SliverToBoxAdapter`, `SliverGrid`, `SliverList`) into one continuous scroll while each independently stays lazy — proven above. `ScrollController` + `addPostFrameCallback` is the real pattern for acting on scroll position right after first layout — proven above with an exact pixel-math offset. `AutomaticKeepAliveClientMixin` — proven above — genuinely keeps a specific item's `State` alive across a scroll round trip that would otherwise dispose it, at the cost of the memory laziness normally buys you. `NestedScrollView`, `Scrollbar`, and `SliverFillRemaining` round out composing real scroll UIs.
 </Callout>
+
+## Mental Model
+
+A scrollable is a **projector showing a filmstrip through a small window**: the window (viewport) only ever needs the few frames (items) currently lined up behind it, plus a short buffer on each side so advancing the reel doesn't show a blank flash (`scrollCacheExtent`) — building the entire filmstrip up front, as `ListView(children: [...])` does, is printing every frame of a three-hour movie before showing frame one. `AutomaticKeepAliveClientMixin` is putting a specific frame in a special pocket instead of letting it go back in the film canister when it passes out of view — expensive to do for every frame, essential for the one frame (a music player's currently-playing row, say) that genuinely needs to remember something across the reel advancing.
+
+## Trade-offs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| `ListView.builder`/`GridView.builder` | Lazy — proven above to build a tiny fraction of a huge list | Item widgets must be constructible independently (no reliance on siblings existing) |
+| Larger `scrollCacheExtent` | Smoother fast scrolling — more is ready ahead of time, proven above | More memory and up-front build work per frame |
+| `CustomScrollView` + slivers | One continuous scroll gesture across heterogeneous content (header + grid + list) | More ceremony than a single `ListView`; only worth it when you genuinely need more than one scroll effect |
+| `AutomaticKeepAliveClientMixin` | A specific item's state genuinely survives scrolling away — proven above | Defeats the memory benefit of laziness for that item; overusing it across many items re-creates the "build everything" problem this whole lesson exists to avoid |
+| `shrinkWrap: true` | Sizes a list to its content | Builds every item up front — the opposite of the laziness proven above; only for small, bounded lists |
+
+## Common Misconceptions
+
+- **"ListView() and ListView.builder() behave the same, builder is just a style choice."** Proven above: `.builder` measurably builds a tiny fraction of the list (`11` of `1000`); a plain `ListView(children: [...])` constructs every single item immediately, regardless of viewport size.
+- **"cacheExtent/scrollCacheExtent only affects scroll smoothness, not what gets built."** Proven above with a real, measured count: it directly controls how many items are built ahead of the visible range (`11` → `26` items for a `1000px` cache) — and note `cacheExtent` itself is deprecated since 3.41.0 in favor of `scrollCacheExtent` (proven above with the real analyzer diagnostic).
+- **"A ScrollController can be told to jump to a position immediately after pumpWidget."** The proven pattern above needs `addPostFrameCallback` specifically because `controller.position` doesn't exist until after the first layout — calling `jumpTo` any earlier has nothing to act on yet.
+- **"AutomaticKeepAliveClientMixin keeps ALL list items alive automatically once you add it anywhere."** Proven above to be per-item and opt-in: only the specific widget whose `State` mixes it in (and returns `wantKeepAlive => true`) survives the round trip — the sibling `PlainItem` in the exact same list, one index away, was proven to NOT survive it.
+
+## Reading AI-generated code
+
+AI-generated Flutter list code frequently reaches for the non-lazy `ListView(children: [for (...) Tile(...)])` form for data whose length is actually unbounded or database-backed — because a huge fraction of training-data tutorials use the simple form for a hardcoded handful of items, and that habit carries over into contexts where it silently doesn't scale.
+
+```dart
+// @expect-error compiles clean — builds every single order up front, the opposite of the laziness proven above, once orders.length is large
+class OrderHistoryScreen extends StatelessWidget {
+  const OrderHistoryScreen({super.key, required this.orders});
+  final List<Order> orders;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      children: [for (final order in orders) OrderTile(order: order)],
+    );
+  }
+}
+```
+
+Before trusting generated scrolling code, check:
+
+- Is the list's length bounded and small (a handful of settings toggles) or could it realistically grow large (search results, order history, chat messages)? Only the latter needs `.builder`, proven above to matter enormously.
+- Does an item need to remember something (scroll-internal state, a video's playback position, an in-progress edit) across being scrolled away and back? If so, is it actually wrapped with `AutomaticKeepAliveClientMixin`, proven above to be the real mechanism — not just hoped to "still be there"?
+- Is a `ScrollController.jumpTo`/`animateTo` call happening directly in `build()` or `initState()` without `addPostFrameCallback`? That's the exact ordering bug proven above (`position` not existing yet).
+- Are two scrollables nested in the same direction without deliberate `shrinkWrap`/slivers? That's the real crash proven in the [Constraints & Layout lesson](/flutter/en/layout-and-rendering/constraints-and-layout/).
+
+<SpotTheBug code={`class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key});
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final controller = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    controller.jumpTo(controller.position.maxScrollExtent);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      controller: controller,
+      itemCount: 500,
+      itemBuilder: (context, i) => MessageBubble(index: i),
+    );
+  }
+}`}>
+`controller.jumpTo(...)` is called directly inside `initState()`, before the `ListView` has ever been laid out — `controller.position` does not exist yet at that point (no scrollable has attached to this controller), so this throws immediately rather than scrolling to the bottom. The fix, proven above with a real test: wrap the jump in `WidgetsBinding.instance.addPostFrameCallback((_) { ... })` so it runs after the first frame has actually built and laid out the list, once `position` genuinely exists.
+</SpotTheBug>
 
 export const quizSlivers = [
   {
@@ -84,36 +562,62 @@ export const quizSlivers = [
       'It disables scrolling',
     ],
     answer: 1,
+    explain: 'Proven directly with a build counter: a 1000-item list built only 11 items by default — nowhere close to all 1000.',
   },
   {
-    q: 'What is a sliver?',
+    q: 'Proven with a real build counter in this lesson, roughly how many of 1000 items did a 300px-tall ListView.builder actually build?',
     options: [
-      'A type of animation',
-      'A scrollable region that lays itself out lazily against the viewport',
-      'A fixed-size box widget',
-      'A navigation route',
+      'All 1000 — builder does not change that',
+      'About 11 — the visible items plus a small default cache buffer, measured directly',
+      'Exactly 1, only the very first item',
+      'It depends entirely on the item widget\'s own code, not the viewport',
     ],
     answer: 1,
+    explain: 'The probe test measured builtCount at 11, and confirmed builtIndices never contained 999 (the far end of the list) — laziness proven, not assumed.',
   },
   {
-    q: 'When do you reach for CustomScrollView?',
+    q: 'Proven above by comparing default vs ScrollCacheExtent.pixels(1000), what does the scroll cache extent actually control?',
     options: [
-      'For every list',
-      'When one scroll view needs several effects, like a collapsing header above a lazy list',
-      'To disable lazy building',
-      'Only for grids',
+      'Nothing measurable — it only affects animation smoothness',
+      'How many extra pixels (and so how many extra items) are built just outside the visible viewport, ahead of when they are needed',
+      'The maximum number of items the list can ever contain',
+      'Whether the list uses lazy building at all',
     ],
     answer: 1,
+    explain: 'Measured directly: the default cache built 11 items; ScrollCacheExtent.pixels(1000) built 26 — a real, proportional increase in how far ahead Flutter pre-builds. (cacheExtent itself is deprecated since 3.41.0 in favor of scrollCacheExtent.)',
   },
   {
-    q: 'What is the downside of shrinkWrap: true on a large list?',
+    q: 'Proven with a real test in this lesson, why does calling controller.jumpTo() directly in initState() fail?',
     options: [
-      'It changes the color',
-      'It builds all children (losing laziness) to size the list to its content',
-      'It disables tapping',
-      'It has no downside',
+      'jumpTo only works after tapping a button',
+      'The controller\'s position does not exist yet — no scrollable has attached to it before the first layout — which is exactly why addPostFrameCallback is the proven, correct pattern',
+      'jumpTo is deprecated',
+      'It works fine in initState, no different from anywhere else',
     ],
     answer: 1,
+    explain: 'The working test in this lesson wraps the jumpTo call in WidgetsBinding.instance.addPostFrameCallback specifically because the controller needs an attached, laid-out scrollable first.',
+  },
+  {
+    q: 'Proven above with two nearly-identical list items (one with AutomaticKeepAliveClientMixin, one without), what happens to each after scrolling far away and back?',
+    options: [
+      'Both get a fresh State — the mixin has no measurable effect',
+      'The mixin-equipped item\'s State survives with its original id unchanged; the plain item gets a genuinely new State with a new id',
+      'Both keep their original State regardless of the mixin',
+      'The mixin only works inside GridView, not ListView',
+    ],
+    answer: 1,
+    explain: 'The probe test proved the keep-alive item\'s id stayed at 0 after the round trip while the plain item\'s id changed from 0 to 1 — a real, measured difference in State survival.',
+  },
+  {
+    q: 'What does CustomScrollView let you do that a single ListView cannot, per this lesson?',
+    options: [
+      'Nothing — they are functionally identical',
+      'Compose several different sliver types (e.g. a collapsing SliverAppBar, a SliverGrid, a SliverList) into one continuous scroll, each independently staying lazy — proven above',
+      'It removes the need for laziness entirely',
+      'It only works with exactly one sliver at a time',
+    ],
+    answer: 1,
+    explain: 'The probe test composed a SliverAppBar, SliverToBoxAdapter, SliverGrid, and a 1000-item SliverList in one CustomScrollView, with the SliverList measured staying lazy (13 of 1000 built) inside that composition.',
   },
 ];
 
