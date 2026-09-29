@@ -1,6 +1,6 @@
 ---
 title: 'InheritedWidget'
-description: 'primitive ที่อยู่เบื้องหลัง Provider, Theme และ MediaQuery — Flutter propagate data ลง tree แบบ O(1) และ rebuild เฉพาะ widget ที่ depend อยู่'
+description: 'primitive ที่อยู่เบื้องหลัง Provider, Theme และ MediaQuery — พิสูจน์ด้วย test นับ rebuild จริง: updateShouldNotify, InheritedModel aspects และความต่างของการ rebuild ระหว่าง dependOnInheritedWidgetOfExactType, getInheritedWidgetOfExactType กับ findAncestorWidgetOfExactType'
 sidebar:
   order: 3
 ---
@@ -9,6 +9,7 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 ## ปัญหาที่แก้
 
@@ -21,14 +22,16 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 descendant เรียก `dependOnInheritedWidgetOfExactType` ซึ่งมักถูกห่อไว้ใน static method `of(context)` ตามธรรมเนียม:
 
 ```dart
+// lib/inherited_basics.dart
+import 'package:flutter/material.dart';
+
 class ThemeConfig extends InheritedWidget {
   const ThemeConfig({super.key, required this.color, required super.child});
   final Color color;
 
   // Convention: a static `of` that registers the caller as a dependent.
   static ThemeConfig of(BuildContext context) {
-    final result =
-        context.dependOnInheritedWidgetOfExactType<ThemeConfig>();
+    final result = context.dependOnInheritedWidgetOfExactType<ThemeConfig>();
     assert(result != null, 'No ThemeConfig found in context');
     return result!;
   }
@@ -38,27 +41,442 @@ class ThemeConfig extends InheritedWidget {
   bool updateShouldNotify(ThemeConfig oldWidget) => color != oldWidget.color;
 }
 
-// Anywhere below it:
-final color = ThemeConfig.of(context).color;
+int dependentBuildCount = 0;
+int nonDependentBuildCount = 0;
+
+/// Reads ThemeConfig via of(context) — becomes a registered dependent.
+class Dependent extends StatelessWidget {
+  const Dependent({super.key});
+  @override
+  Widget build(BuildContext context) {
+    dependentBuildCount++;
+    final color = ThemeConfig.of(context).color;
+    return Container(width: 10, height: 10, color: color);
+  }
+}
+
+/// Never reads ThemeConfig — not a dependent, must never rebuild on its update.
+class NonDependent extends StatelessWidget {
+  const NonDependent({super.key});
+  @override
+  Widget build(BuildContext context) {
+    nonDependentBuildCount++;
+    return const SizedBox(width: 10, height: 10);
+  }
+}
 ```
 
 มีสองกลไกที่สำคัญตรงนี้ `dependOnInheritedWidgetOfExactType` ทำสองอย่างพร้อมกัน: **หา** ancestor ที่ใกล้ที่สุดของ type นั้น (การ lookup ขึ้น element tree ที่เร็วและ cache ไว้) และ **register** element ที่เรียกให้เป็น dependent ส่วน `updateShouldNotify` ตัดสินว่า เมื่อ inherited widget ถูก rebuild ด้วย data ใหม่ dependent จำเป็นต้อง rebuild จริงไหม
 
-## rebuild เฉพาะ dependent
+## rebuild เฉพาะ dependent — พิสูจน์ด้วยการนับ
 
-นี่คือผลตอบแทน เมื่อ `InheritedWidget` update และ `updateShouldNotify` คืน true Flutter จะ rebuild **เฉพาะ widget ที่เรียก `of(context)`** — ไม่ใช่ทั้ง subtree widget ตรงกลางที่ไม่เคย depend ก็ไม่ถูกแตะ
+นี่คือผลตอบแทน พิสูจน์ด้วย build counter จริง ไม่ใช่เชื่อเฉย ๆ widget พี่น้องสองตัวอยู่ใต้ `ThemeConfig` เดียวกัน: ตัวหนึ่งอ่านมัน (`Dependent`) อีกตัวไม่เคยอ่านเลย (`NonDependent`)
 
-<Mermaid title="Only registered dependents rebuild on update" code={depDiagram} />
+<Mermaid title="เฉพาะ dependent ที่ register ไว้เท่านั้นที่ rebuild เมื่อ update" code={depDiagram} />
 
 export const depDiagram = `flowchart TB
   iw["InheritedWidget\n(color เปลี่ยน)"] --> a["Widget A\n(ไม่ได้ depend)\nไม่ rebuild"]
   iw --> b["Widget B\nเรียก of(context)\nrebuild"]
   iw --> c["Widget C\n(ไม่ได้ depend)\nไม่ rebuild"]`;
 
+```dart
+// test/inherited_basics_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/inherited_basics.dart';
+
+class _Harness extends StatefulWidget {
+  const _Harness({super.key});
+  @override
+  State<_Harness> createState() => _HarnessState();
+}
+
+class _HarnessState extends State<_Harness> {
+  Color color = Colors.red;
+
+  void setColor(Color c) => setState(() => color = c);
+
+  @override
+  Widget build(BuildContext context) {
+    return ThemeConfig(
+      color: color,
+      child: const Column(children: [Dependent(), NonDependent()]),
+    );
+  }
+}
+
+void main() {
+  testWidgets('only the widget that called of(context) rebuilds when the value changes', (tester) async {
+    dependentBuildCount = 0;
+    nonDependentBuildCount = 0;
+
+    final key = GlobalKey<_HarnessState>();
+    await tester.pumpWidget(MaterialApp(home: _Harness(key: key)));
+    expect(dependentBuildCount, 1);
+    expect(nonDependentBuildCount, 1);
+
+    // Change the color — updateShouldNotify returns true.
+    key.currentState!.setColor(Colors.blue);
+    await tester.pump();
+
+    expect(dependentBuildCount, 2, reason: 'Dependent called of(context) — rebuilds');
+    expect(nonDependentBuildCount, 1, reason: 'NonDependent never depended — must not rebuild');
+  });
+
+  testWidgets('updateShouldNotify=false (same color) skips the dependent rebuild too', (tester) async {
+    dependentBuildCount = 0;
+    nonDependentBuildCount = 0;
+
+    final key = GlobalKey<_HarnessState>();
+    await tester.pumpWidget(MaterialApp(home: _Harness(key: key)));
+    expect(dependentBuildCount, 1);
+
+    // Same color — updateShouldNotify returns false — no dependent rebuild,
+    // even though the InheritedWidget itself was reconstructed.
+    key.currentState!.setColor(Colors.red);
+    await tester.pump();
+
+    expect(dependentBuildCount, 1, reason: 'updateShouldNotify returned false — no rebuild');
+  });
+}
+```
+
+```text
+✓ only the widget that called of(context) rebuilds when the value changes
+✓ updateShouldNotify=false (same color) skips the dependent rebuild too
+
+00:00 +2: All tests passed!
+```
+
+build count ของ `NonDependent` ไม่ขยับเลย — พิสูจน์ว่า Flutter ไม่ได้ rebuild "subtree" มัน rebuild เจาะจงเฉพาะกลุ่ม element ที่เรียก `dependOnInheritedWidgetOfExactType` จริง ๆ และ test ที่สองพิสูจน์ว่า `updateShouldNotify` เป็น gate จริง ไม่ใช่แค่เอกสาร: สร้าง `ThemeConfig` ใหม่ด้วยสี*เดิมเป๊ะ* ก็ยังรัน `updateShouldNotify` ซึ่งคืน `false` และ `Dependent` ไม่แม้แต่จะถูกขอให้ rebuild เลย
+
 การ rebuild แบบเจาะจงนั้นคือเหตุผลที่ `InheritedWidget` scale ได้: การอ่านคือ lookup ขึ้นบนที่ราคาถูก และ update จะกระเพื่อมไปถึงแค่ dependent จริง ๆ ทุก state solution ระดับสูงกว่านี้ ล้วนเป็นกลไกนี้บวก ergonomics อยู่ข้างใต้
 
+## `InheritedModel`: rebuild ตาม aspect ไม่ใช่ตามค่าทั้งก้อน
+
+`InheritedWidget` มี dependency granularity แบบเดียว: "dependent ตัวนี้สนใจการเปลี่ยนแปลง*ใดก็ตาม*ของ widget นี้ไหม" `InheritedModel<T>` เพิ่มแกนที่สอง — **aspect** (ค่าใดก็ได้ของ type `T` ปกติเป็น enum) — ทำให้ dependent บอกได้ว่า "rebuild ฉันเฉพาะตอนที่*สไลซ์นี้*เปลี่ยนเท่านั้น" แม้ dependent หลายตัวจะใช้ model เดียวกันร่วมกัน
+
+```dart
+// lib/inherited_model_aspects.dart
+import 'package:flutter/material.dart';
+
+enum ProfileAspect { name, age }
+
+class ProfileModel extends InheritedModel<ProfileAspect> {
+  const ProfileModel({super.key, required this.name, required this.age, required super.child});
+  final String name;
+  final int age;
+
+  static ProfileModel of(BuildContext context, ProfileAspect aspect) {
+    final result = InheritedModel.inheritFrom<ProfileModel>(context, aspect: aspect);
+    assert(result != null, 'No ProfileModel found in context');
+    return result!;
+  }
+
+  // Whole-widget change check (both InheritedWidget's normal gate).
+  @override
+  bool updateShouldNotify(ProfileModel oldWidget) =>
+      name != oldWidget.name || age != oldWidget.age;
+
+  // Per-aspect gate: does THIS dependent, which only asked for `dependencies`,
+  // actually need to rebuild for this particular change?
+  @override
+  bool updateShouldNotifyDependent(ProfileModel oldWidget, Set<ProfileAspect> dependencies) {
+    if (dependencies.contains(ProfileAspect.name) && name != oldWidget.name) return true;
+    if (dependencies.contains(ProfileAspect.age) && age != oldWidget.age) return true;
+    return false;
+  }
+}
+
+int nameBuildCount = 0;
+int ageBuildCount = 0;
+
+class NameLabel extends StatelessWidget {
+  const NameLabel({super.key});
+  @override
+  Widget build(BuildContext context) {
+    nameBuildCount++;
+    final name = ProfileModel.of(context, ProfileAspect.name).name;
+    return Text(name);
+  }
+}
+
+class AgeLabel extends StatelessWidget {
+  const AgeLabel({super.key});
+  @override
+  Widget build(BuildContext context) {
+    ageBuildCount++;
+    final age = ProfileModel.of(context, ProfileAspect.age).age;
+    return Text('$age');
+  }
+}
+```
+
+`InheritedModel.inheritFrom<T>(context, aspect: ...)` คือตัวเทียบเท่าแบบ aspect-aware ของ `dependOnInheritedWidgetOfExactType` — มัน register element นี้เป็น dependent *ของ aspect นั้นโดยเฉพาะ* เมื่อ model update Flutter จะเรียก `updateShouldNotify` ครั้งเดียว (gate ทั้งก้อนแบบปกติ) แล้วถ้าคืน `true` มันจะเรียก `updateShouldNotifyDependent` **แยกสำหรับ dependent แต่ละตัว** โดยส่ง aspect set ของ dependent ตัวนั้นเข้าไป — ทำให้ dependent สองตัวของ model เดียวกันได้คำตอบต่างกันสำหรับ update เดียวกันได้
+
+```dart
+// test/inherited_model_aspects_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/inherited_model_aspects.dart';
+
+class _Harness extends StatefulWidget {
+  const _Harness({super.key});
+  @override
+  State<_Harness> createState() => _HarnessState();
+}
+
+class _HarnessState extends State<_Harness> {
+  String name = 'Ada';
+  int age = 30;
+
+  void setAge(int a) => setState(() => age = a);
+  void setName(String n) => setState(() => name = n);
+
+  @override
+  Widget build(BuildContext context) {
+    return ProfileModel(
+      name: name,
+      age: age,
+      child: const Column(children: [NameLabel(), AgeLabel()]),
+    );
+  }
+}
+
+void main() {
+  testWidgets('InheritedModel: only the aspect-dependent widget rebuilds when just that aspect changes', (tester) async {
+    nameBuildCount = 0;
+    ageBuildCount = 0;
+
+    final key = GlobalKey<_HarnessState>();
+    await tester.pumpWidget(MaterialApp(home: _Harness(key: key)));
+    expect(nameBuildCount, 1);
+    expect(ageBuildCount, 1);
+
+    // Change ONLY age.
+    key.currentState!.setAge(31);
+    await tester.pump();
+
+    expect(ageBuildCount, 2, reason: 'AgeLabel depends on ProfileAspect.age — rebuilds');
+    expect(nameBuildCount, 1, reason: 'NameLabel only depends on ProfileAspect.name — must not rebuild');
+    expect(find.text('31'), findsOneWidget);
+
+    // Now change ONLY name.
+    key.currentState!.setName('Grace');
+    await tester.pump();
+
+    expect(nameBuildCount, 2, reason: 'NameLabel depends on ProfileAspect.name — rebuilds');
+    expect(ageBuildCount, 2, reason: 'AgeLabel did not depend on name — must not rebuild again');
+  });
+}
+```
+
+```text
+✓ InheritedModel: only the aspect-dependent widget rebuilds when just that aspect changes
+
+00:00 +1: All tests passed!
+```
+
+`InheritedModel` คือสิ่งที่ควรใช้เมื่อ model ตัวเดียวรองรับ UI หลายส่วนที่เป็นอิสระต่อกันจริง ๆ (state validation ระดับ field ของฟอร์ม, toggle จำนวนมากของหน้า settings) และ `InheritedWidget` ธรรมดาจะทำให้ reader ทุกตัว rebuild เกินจำเป็นทุกครั้งที่ field เดียวเปลี่ยน
+
+## สามวิธี lookup ancestor — มีแค่วิธีเดียวที่ทำให้ rebuild อัตโนมัติ
+
+`BuildContext` มี lookup method ที่เกี่ยวข้องอยู่สามตัว และการสับสนกันคือแหล่งที่มาจริงและพิสูจน์ได้ของ bug ประเภท "ทำไม widget ฉันไม่ update":
+
+| Method | หาอะไร | register dependency ไหม? | ต้นทุน |
+| --- | --- | --- | --- |
+| `dependOnInheritedWidgetOfExactType<T>()` | ancestor `InheritedWidget` ที่ใกล้สุดของ type `T` | **ใช่** — auto-rebuild เมื่อ update | O(1), cache ไว้ |
+| `getInheritedWidgetOfExactType<T>()` | ancestor `InheritedWidget` ที่ใกล้สุดของ type `T` | ไม่ | O(1), cache ไว้ |
+| `findAncestorWidgetOfExactType<T>()` | ancestor **`Widget`ใดก็ได้** ที่ใกล้สุดของ type `T` (ไม่จำกัดแค่ `InheritedWidget`) | ไม่ | O(depth) — เดิน widget tree ตรง ๆ ไม่มี cache |
+
+```dart
+// lib/inherited_lookup_methods.dart
+import 'package:flutter/material.dart';
+
+class ColorConfig extends InheritedWidget {
+  const ColorConfig({super.key, required this.color, required super.child});
+  final Color color;
+
+  @override
+  bool updateShouldNotify(ColorConfig oldWidget) => color != oldWidget.color;
+}
+
+int dependOnBuildCount = 0;
+int getBuildCount = 0;
+int findAncestorBuildCount = 0;
+
+/// dependOnInheritedWidgetOfExactType: finds AND registers a dependency —
+/// this widget is automatically rebuilt whenever ColorConfig updates
+/// (and updateShouldNotify returns true).
+class DependOnReader extends StatelessWidget {
+  const DependOnReader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    dependOnBuildCount++;
+    final color = context.dependOnInheritedWidgetOfExactType<ColorConfig>()!.color;
+    return Container(width: 10, height: 10, color: color);
+  }
+}
+
+/// getInheritedWidgetOfExactType: finds the value, same O(1) cached lookup,
+/// but registers NO dependency — this widget is never automatically
+/// rebuilt when ColorConfig updates on its own.
+class GetReader extends StatelessWidget {
+  const GetReader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    getBuildCount++;
+    final color = context.getInheritedWidgetOfExactType<ColorConfig>()!.color;
+    return Container(width: 10, height: 10, color: color);
+  }
+}
+
+/// findAncestorWidgetOfExactType: walks the WIDGET tree directly (works for
+/// any Widget, not just InheritedWidget) — O(depth), no cache, and also
+/// registers no dependency.
+class FindAncestorReader extends StatelessWidget {
+  const FindAncestorReader({super.key});
+  @override
+  Widget build(BuildContext context) {
+    findAncestorBuildCount++;
+    final color = context.findAncestorWidgetOfExactType<ColorConfig>()!.color;
+    return Container(width: 10, height: 10, color: color);
+  }
+}
+```
+
+```dart
+// test/inherited_lookup_methods_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/inherited_lookup_methods.dart';
+
+class _Harness extends StatefulWidget {
+  const _Harness({super.key});
+  @override
+  State<_Harness> createState() => _HarnessState();
+}
+
+class _HarnessState extends State<_Harness> {
+  Color color = Colors.red;
+
+  void setColor(Color c) => setState(() => color = c);
+
+  @override
+  Widget build(BuildContext context) {
+    return ColorConfig(
+      color: color,
+      child: const Column(
+        children: [DependOnReader(), GetReader(), FindAncestorReader()],
+      ),
+    );
+  }
+}
+
+void main() {
+  testWidgets(
+    'only dependOnInheritedWidgetOfExactType auto-rebuilds on update; get/findAncestor do not',
+    (tester) async {
+      dependOnBuildCount = 0;
+      getBuildCount = 0;
+      findAncestorBuildCount = 0;
+
+      final key = GlobalKey<_HarnessState>();
+      await tester.pumpWidget(MaterialApp(home: _Harness(key: key)));
+      expect(dependOnBuildCount, 1);
+      expect(getBuildCount, 1);
+      expect(findAncestorBuildCount, 1);
+
+      // ColorConfig updates with a new value — updateShouldNotify returns true.
+      key.currentState!.setColor(Colors.blue);
+      await tester.pump();
+
+      expect(dependOnBuildCount, 2, reason: 'registered a dependency — auto-rebuilt');
+      expect(getBuildCount, 1, reason: 'looked up the value but registered no dependency — not rebuilt');
+      expect(findAncestorBuildCount, 1, reason: 'walked the widget tree directly, no dependency either — not rebuilt');
+    },
+  );
+}
+```
+
+```text
+✓ only dependOnInheritedWidgetOfExactType auto-rebuilds on update; get/findAncestor do not
+
+00:00 +1: All tests passed!
+```
+
+`GetReader` กับ `FindAncestorReader` ทั้งคู่อ่านสี*ที่ถูกต้อง ทันสมัย*ทันทีที่มันบังเอิญ rebuild ด้วยเหตุผลอื่น — มันไม่ได้ stale ตลอดไป แค่ไม่ถูก*แจ้งอัตโนมัติ*เท่านั้น `getInheritedWidgetOfExactType` มีไว้สำหรับ use case แบบนี้เป๊ะ ๆ: อ่านค่าครั้งเดียว (เช่นข้างใน event handler หรือเช็คครั้งเดียว) โดยไม่ต้องจ่ายค่า subscription ที่ยืนยาวที่คุณไม่ต้องการ `findAncestorWidgetOfExactType` คือทางออกฉุกเฉินแบบเดิน widget tree สำหรับ ancestor widget ใดก็ได้ ไม่จำกัดแค่ `InheritedWidget` — ใช้เฉพาะตอนที่คุณใช้กลไกของ `InheritedWidget` จริง ๆ ไม่ได้ เพราะมันทั้งไม่ cache และไม่รู้เรื่อง dependency เลย
+
+## Provider, Riverpod, Theme.of และ MediaQuery.of ขี่กลไกนี้อย่างไร
+
+ทุกตัวนี้ขี่ตรงบน `InheritedWidget`/`InheritedModel` ไม่ใช่อ้อมมัน:
+
+- **`Theme.of(context)`/`MediaQuery.of(context)`** เรียก `dependOnInheritedWidgetOfExactType` ข้างใต้ (`MediaQuery` สร้างบน `InheritedModel` จริง ๆ ดังนั้น widget ที่อ่านแค่ `MediaQuery.sizeOf(context)` จะ rebuild ตอนขนาดเปลี่ยน แต่ไม่ rebuild ตอน orientation เปลี่ยนแบบที่ไม่กระทบ padding — trick แบบ aspect-based เป๊ะ ๆ ที่พิสูจน์ไว้ข้างบน)
+- **`Provider`** (`ChangeNotifierProvider` ฯลฯ) คือ `InheritedWidget` บวก `ChangeNotifier`: `notifyListeners()` trigger การ rebuild ของ `InheritedWidget` และ `context.watch<T>()` คือ `dependOnInheritedWidgetOfExactType` ที่มี syntax สวยกว่า; `context.read<T>()` คือการอ่านแบบ `getInheritedWidgetOfExactType` — "หามา register ไม่มีอะไร"
+- **Riverpod** ตั้งใจ*ไม่*สร้างบน `InheritedWidget` เลย — provider ของมันอยู่นอก widget tree ทั้งหมด (ดู[บท Provider & Riverpod](/flutter/th/state-management/provider-and-riverpod/)); `ProviderScope` คือที่เดียวที่มันยังต้องใช้ widget เพื่อ host `ProviderContainer`
+
+สำหรับกลไกระดับ element/widget tree ที่ `dependOnInheritedWidgetOfExactType` กับ `markNeedsBuild` ถูก implement อยู่จริง ๆ — element tree, `BuildOwner.buildScope` และวิธีที่ element ที่ dirty ถูกเยี่ยมชมใหม่ — ดู [Flutter Internals: the Three Trees](/flutter/th/flutter-internals/three-trees/)
+
+## Mental Model
+
+`InheritedWidget` คือ **โหนด broadcast ที่มี guest list** descendant ตัวไหนเรียก `dependOnInheritedWidgetOfExactType` (หรือ `InheritedModel.inheritFrom` พร้อม aspect) ก็เท่ากับเซ็นชื่อใน guest list — framework ไม่ต้องรู้ล่วงหน้าว่าใครเซ็น เพราะการ lookup เองนั่นแหละ*คือ*การเซ็นชื่อ เมื่อ broadcaster ได้ data ใหม่ มันถามสองคำถามตามลำดับ: "มีอะไรเปลี่ยนเลยไหม?" (`updateShouldNotify`) และสำหรับ `InheritedModel`: "*guest คนนี้*สนใจ*การเปลี่ยนแปลงนี้*ไหม?" (`updateShouldNotifyDependent`) ที่เหลือใน tree — ใครก็ตามที่ไม่เคยเซ็น guest list — มองไม่เห็น broadcast นี้เลย พิสูจน์ข้างบนด้วย build counter ที่ไม่ขยับเลย
+
+## Trade-offs
+
+| ตัวเลือก | ข้อดี | ต้นทุน |
+| --- | --- | --- |
+| `InheritedWidget` เขียนมือ | ไม่มี dependency เลย ควบคุมได้เต็มที่ primitive ที่ทุกอย่างสร้างมาจาก | ต้องเขียน boilerplate `of(context)` และ `updateShouldNotify` เอง |
+| `InheritedModel` พร้อม aspect | กลุ่ม rebuild อิสระหลายกลุ่มใช้ model ร่วมกันได้ | ceremony มากกว่า — aspect enum, `updateShouldNotifyDependent` — คุ้มก็ต่อเมื่อมีสไลซ์ที่เป็นอิสระจริง ๆ |
+| `dependOnInheritedWidgetOfExactType` | auto-rebuild เมื่อเปลี่ยน — กรณีปกติ | register dependency แบบยืนยาว; เรียกจาก `build()` เท่านั้น |
+| `getInheritedWidgetOfExactType` | อ่านครั้งเดียว ไม่มี subscription ยืนยาว | ต้องจำอ่านใหม่เองถ้าต้องการค่าปัจจุบันทีหลัง |
+| `findAncestorWidgetOfExactType` | ใช้ได้กับ ancestor widget ใดก็ได้ ไม่จำกัดแค่ `InheritedWidget` | O(depth), ไม่ cache, ไม่ track dependency — ทางเลือกสุดท้าย |
+
+## Common Misconceptions
+
+- **"InheritedWidget rebuild ทั้ง subtree ข้างใต้มัน"** พิสูจน์ว่าผิดข้างบน: build count ของ `NonDependent` ไม่ขยับเลย มีแค่ element ที่ register dependency จริงเท่านั้นที่ rebuild
+- **"การสร้าง InheritedWidget ใหม่ด้วยค่า field ใหม่ trigger dependent rebuild เสมอ"** เฉพาะถ้า `updateShouldNotify` คืน `true` — พิสูจน์ข้างบนด้วยการสร้างสีเดิมเป๊ะที่ทำให้ build count ของ `Dependent` ไม่เปลี่ยน
+- **"InheritedModel ก็แค่ InheritedWidget ที่มีชื่อหรูกว่า"** มันเพิ่มกลไกที่แยกออกมาจริง ๆ — aspect set ต่อ dependent ที่เช็คผ่าน `updateShouldNotifyDependent` — พิสูจน์ข้างบนว่าทำให้ dependent สองตัวของ model *เดียวกัน* rebuild เป็นอิสระต่อกันได้
+- **"lookup method ทั้งสามทำงานเหมือนกัน แค่ชื่อต่างกัน"** พิสูจน์ข้างบน: มีแค่ `dependOnInheritedWidgetOfExactType` เท่านั้นที่ทำให้ auto-rebuild เมื่อ update อีกสองตัวใช้ได้ดีพอ ๆ กันสำหรับการอ่านครั้งเดียว แต่จะ**ไม่**ทำให้คุณทันสมัยอย่างเงียบ ๆ
+- **"Provider กับ Riverpod ใช้กลไกเบื้องหลังคนละแบบกันเลย"** Provider คือ layer บาง ๆ ที่ ergonomic สร้างตรงบน `InheritedWidget` Riverpod ตั้งใจไม่ใช้ `InheritedWidget` สำหรับ provider ของมันเลย — นั่นคือความต่างเชิงโครงสร้างจริง (ดูบท Provider & Riverpod)
+
+## Reading AI-generated code
+
+โค้ดที่ AI generate มาสำหรับ "อ่านค่าจาก ancestor" มักจะเอื้อมไปหา lookup method ที่มันเห็นบ่อยสุดใน training data (ปกติคือ `dependOnInheritedWidgetOfExactType` ห่อด้วย static `of`) โดยไม่เช็คว่าต้องการ auto-rebuild จริงไหม — หรือตรงข้ามกัน: ใช้ lookup ที่ไม่ register dependency ในจุดที่ต้อง react ต่อการเปลี่ยนแปลงจริง ๆ
+
+```dart
+// @expect-error using getInheritedWidgetOfExactType where an auto-rebuild was needed — proven above
+class LiveColorBox extends StatelessWidget {
+  const LiveColorBox({super.key});
+  @override
+  Widget build(BuildContext context) {
+    // Looks correct, compiles fine, reads the current color on first build —
+    // but this widget will never repaint itself when ColorConfig changes.
+    final color = context.getInheritedWidgetOfExactType<ColorConfig>()!.color;
+    return Container(width: 40, height: 40, color: color);
+  }
+}
+```
+
+ก่อนเชื่อโค้ดที่ generate มาที่อ่าน `InheritedWidget`/`InheritedModel` เช็คสิ่งเหล่านี้:
+
+- widget นี้ต้อง**react**ต่อการเปลี่ยนแปลงในอนาคตไหม หรืออ่านครั้งเดียวก็พอ? การ react ต้องใช้ `dependOnInheritedWidgetOfExactType` (หรือ `InheritedModel.inheritFrom`); การอ่านครั้งเดียวควรใช้ `getInheritedWidgetOfExactType` เพื่อไม่ต้องจ่ายค่า subscription ที่จะทิ้งไปอยู่ดี
+- `dependOnInheritedWidgetOfExactType`/`InheritedModel.inheritFrom` ถูกเรียกจาก `build()` ไหม? เรียกจาก `initState()` จะ throw — พิสูจน์ไว้ใน[บท setState & the Lifecycle](/flutter/th/state-management/setstate-and-lifecycle/)
+- ถ้า widget หลายตัวใช้ model เดียวกันแต่สนใจ field ต่างกัน มันเป็น `InheritedWidget` ธรรมดา (ทุกตัว rebuild ทุกครั้งที่ field ไหนก็ตามเปลี่ยน) ทั้งที่ควรเป็น `InheritedModel` พร้อม aspect (พิสูจน์ข้างบนว่าแยก rebuild ต่อ field ได้) ไหม?
+- `updateShouldNotify` เทียบ field ที่สำคัญจริง ๆ ไหม หรือแค่ `return true` เฉย ๆ (เสียจุดประสงค์ทั้งหมด) หรือ `return false` เฉย ๆ (dependent ไม่เคย update เลย)?
+
+<SpotTheBug code={`class NotificationBadge extends StatelessWidget {
+  const NotificationBadge({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final count = context.getInheritedWidgetOfExactType<InboxModel>()!.unreadCount;
+    return Badge(label: Text('\$count'));
+  }
+}`}>
+โค้ดนี้ compile สะอาดและโชว์จำนวน unread ที่ถูกต้องตอน render ครั้งแรก — แต่ `getInheritedWidgetOfExactType` ไม่ register dependency ใด ๆ ดังนั้นเมื่อ `InboxModel` update ด้วย `unreadCount` ใหม่ (ข้อความใหม่เข้ามา) widget นี้ไม่เคยถูกบอกให้ rebuild เลย; badge จะเก่าเงียบ ๆ จนกว่าจะมีอะไร*อื่น*มา rebuild มันด้วยเหตุผลที่ไม่เกี่ยวกัน วิธีแก้คือความต่างที่พิสูจน์ไว้ข้างบนเป๊ะ: เปลี่ยนเป็น `context.dependOnInheritedWidgetOfExactType<InboxModel>()!.unreadCount` (หรือ method convention `of(context)` ของ model เอง ถ้ามันเรียก `dependOnInheritedWidgetOfExactType` ข้างในอยู่แล้ว) เพื่อให้ badge เป็น registered dependent และ rebuild อัตโนมัติ
+</SpotTheBug>
+
 <Callout title="สรุปหนึ่งบรรทัด">
-`InheritedWidget` ให้ descendant ตัวไหนก็อ่าน data ผ่าน `context` ได้โดยไม่ต้อง prop-drill ใช้ `dependOnInheritedWidgetOfExactType` (ที่ทั้ง **หา** ancestor และ **register** ผู้อ่านเป็น dependent) เมื่อ inherited widget update `updateShouldNotify` เป็นตัวคุมว่า dependent จะ rebuild ไหม — และเฉพาะ widget ที่อ่าน data นั้นจริง ๆ เท่านั้นที่ rebuild Theme, MediaQuery และ Provider ล้วนสร้างบน primitive ตัวเดียวนี้
+`InheritedWidget` ให้ descendant ตัวไหนก็อ่าน data ผ่าน `context` ได้โดยไม่ต้อง prop-drill มีแค่ element ที่เรียก `dependOnInheritedWidgetOfExactType` (หรือ `InheritedModel.inheritFrom` พร้อม aspect) เท่านั้นที่ auto-rebuild — พิสูจน์ข้างบนด้วย build counter ที่นิ่งสำหรับ non-dependent และ `updateShouldNotify`/`updateShouldNotifyDependent` เป็น gate ที่ควบคุมว่าอันไหนยิงจริง `getInheritedWidgetOfExactType` กับ `findAncestorWidgetOfExactType` ทั้งคู่หาค่าได้โดยไม่ register dependency — ถูกต้องสำหรับการอ่านครั้งเดียว แต่เก่าเงียบ ๆ สำหรับอะไรที่ต้องการ react `InheritedModel` แยก broadcaster ตัวเดียวเป็นกลุ่ม rebuild อิสระต่อ aspect Theme, MediaQuery และ Provider ล้วนสร้างตรงบนกลไกนี้; Riverpod ตั้งใจไม่ใช้เลย
 </Callout>
 
 export const quizInherited = [
@@ -71,36 +489,73 @@ export const quizInherited = [
       'การ compile Dart',
     ],
     answer: 1,
+    explain: 'descendant ตัวไหนก็อ่าน InheritedWidget ที่เป็น ancestor ได้ตรง ๆ ผ่าน context ไม่ว่าจะลึกแค่ไหน โดยไม่มี widget ตรงกลางสักตัวต้องรู้เรื่อง',
   },
   {
-    q: 'dependOnInheritedWidgetOfExactType ทำอะไร?',
+    q: 'พิสูจน์ด้วย build counter จริงในบทนี้ widget ตัวไหนบ้าง rebuild เมื่อ InheritedWidget update แล้ว updateShouldNotify คืน true?',
     options: [
-      'สร้าง widget ใหม่อย่างเดียว',
-      'หา ancestor ที่ใกล้ที่สุดของ type นั้น และ register ผู้เรียกเป็น dependent',
-      'dispose inherited widget',
-      'rebuild ทั้ง app',
+      'ทุก widget ใน subtree ข้างใต้มัน',
+      'เฉพาะ widget ที่เรียก dependOnInheritedWidgetOfExactType (registered dependent) — sibling ที่ไม่เคยอ่านมันไม่เคย rebuild',
+      'เฉพาะ InheritedWidget เอง',
+      'ไม่มี widget ไหนเลย — InheritedWidget ไม่เคย trigger rebuild',
     ],
     answer: 1,
+    explain: 'probe test โชว์ build count ของ NonDependent ค้างที่ 1 ขณะที่ของ Dependent เพิ่มจาก 1 เป็น 2 ในการ update ครั้งเดียวกันเป๊ะ',
   },
   {
-    q: 'เมื่อ InheritedWidget update widget ตัวไหน rebuild?',
+    q: 'ใน probe test การสร้าง ThemeConfig ใหม่ด้วยสี*เดิมเป๊ะ* (updateShouldNotify คืน false) — เกิดอะไรกับ build count ของ dependent widget?',
     options: [
-      'ทุก widget ใน subtree',
-      'เฉพาะ widget ที่ register เป็น dependent (เรียก of(context))',
-      'เฉพาะ root widget',
-      'ไม่มีเลย — ไม่เคย rebuild',
+      'ยังเพิ่มขึ้นอยู่ดี เพราะ InheritedWidget เองถูกสร้างใหม่',
+      'ไม่เปลี่ยนเลย — updateShouldNotify คืน false แปลว่า dependent ไม่ถูกขอให้ rebuild เลย',
+      'reset กลับเป็น 0',
+      'throw error',
     ],
     answer: 1,
+    explain: 'พิสูจน์ตรง ๆ: dependentBuildCount ค้างที่ 1 หลังสร้างใหม่ด้วยสีเดิม ยืนยันว่า updateShouldNotify เป็น gate จริง ไม่ใช่แค่เอกสาร',
   },
   {
-    q: 'บทบาทของ updateShouldNotify คืออะไร?',
+    q: 'InheritedModel เพิ่มอะไรเหนือกว่า InheritedWidget ธรรมดา ตามที่พิสูจน์ในบทนี้?',
     options: [
-      'dispose controller',
-      'ตัดสินว่า dependent ควร rebuild ไหมเมื่อ inherited widget ถูกแทนด้วย data ใหม่',
-      'สร้าง State object',
-      'จัดการ navigation',
+      'ไม่มีอะไรเลย — เป็นแค่ naming convention',
+      'dependency ต่อ aspect: updateShouldNotifyDependent ให้ dependent สองตัวของ model เดียวกัน rebuild เป็นอิสระต่อกันได้ ตามว่าแต่ละตัวขอ aspect ไหน',
+      'มันเอา updateShouldNotify ออกไปเลย',
+      'ใช้ได้แค่กับ primitive type ไม่ใช้กับ enum',
     ],
     answer: 1,
+    explain: 'probe test พิสูจน์ว่าเปลี่ยนแค่ `age` ทำให้ AgeLabel rebuild (ageBuildCount 1→2) ขณะที่ NameLabel นิ่ง และในทางกลับกันสำหรับการเปลี่ยน name อย่างเดียว',
+  },
+  {
+    q: 'พิสูจน์ในบทนี้ ความต่างจริงระหว่าง dependOnInheritedWidgetOfExactType กับ getInheritedWidgetOfExactType คืออะไร?',
+    options: [
+      'เป็น alias ที่ใช้แทนกันได้',
+      'ทั้งคู่หาค่า ancestor เดียวกันด้วย O(1) cached lookup แบบเดียวกัน แต่มีแค่ dependOnInheritedWidgetOfExactType เท่านั้นที่ register dependency ที่ทำให้ auto-rebuild เมื่อ update',
+      'getInheritedWidgetOfExactType เร็วกว่าแต่แม่นยำน้อยกว่า',
+      'dependOnInheritedWidgetOfExactType ใช้ได้แค่ใน StatefulWidget',
+    ],
+    answer: 1,
+    explain: 'probe test โชว์ dependOnBuildCount ไปจาก 1 เป็น 2 ตอน update ขณะที่ getBuildCount กับ findAncestorBuildCount ค้างที่ 1 ทั้งคู่สำหรับ update เดียวกันเป๊ะ',
+  },
+  {
+    q: 'ความต่างเชิงโครงสร้างหลักของ findAncestorWidgetOfExactType เทียบกับอีกสอง method คืออะไร?',
+    options: [
+      'เหมือนกับ dependOnInheritedWidgetOfExactType ทุกอย่าง',
+      'มันเดิน widget tree ตรง ๆ (ใช้ได้กับ Widget ใดก็ได้ ไม่จำกัดแค่ InheritedWidget) เป็น O(depth) แทนที่จะ cache แบบ O(1) และไม่ register dependency เช่นกัน',
+      'ใช้ได้แค่กับ StatelessWidget',
+      'เร็วที่สุดในสามตัว',
+    ],
+    answer: 1,
+    explain: 'findAncestorWidgetOfExactType คือทางออกฉุกเฉินแบบเดิน widget tree — ไม่ cache ไม่มี dependency ใช้ได้กับ ancestor Widget type ไหนก็ได้ เป็นทางเลือกสุดท้ายเทียบกับ method เฉพาะของ InheritedWidget',
+  },
+  {
+    q: 'context.watch<T>() ของ Provider เกี่ยวข้องกับ InheritedWidget อย่างไร ตามบทนี้?',
+    options: [
+      'Provider ไม่ใช้ InheritedWidget เลย',
+      'Provider คือ InheritedWidget + ChangeNotifier: notifyListeners() trigger การ rebuild ของ InheritedWidget และ context.watch<T>() คือ dependOnInheritedWidgetOfExactType ที่มี syntax สวยกว่า',
+      'Provider ทำงานได้เฉพาะตอนติดตั้ง Riverpod',
+      'context.watch กับ context.read ทำ lookup เบื้องหลังแบบเดียวกันเป๊ะ',
+    ],
+    answer: 1,
+    explain: 'Provider ขี่ตรงบนกลไกที่พิสูจน์ตลอดบทนี้; ในทางกลับกัน Riverpod ตั้งใจไม่ใช้ InheritedWidget สำหรับ provider ของตัวเองเลย',
   },
 ];
 
